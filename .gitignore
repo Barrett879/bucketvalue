@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.pytest_cache/
+
+# The cache holds two kinds of file.
+#
+# RAW SOURCE DATA (per-game box scores, odds payloads, injury-report PDFs,
+# season logs) is large, rebuildable, and needed only to REBUILD the training
+# tables. Never committed. Some of it (historical betting lines) also has
+# provenance that rules out republishing it.
+#
+# DERIVED RUNTIME ARTIFACTS are small and the deployed app cannot start without
+# them. They are un-ignored explicitly, one by one, as they are created.
+# After adding one: git clone to a temp dir and RUN the app before calling a
+# deploy ready (GridironValue shipped without its calibration files once and
+# the site silently fell back to the wrong leans).
+cache/*
+!cache/.gitkeep
+
+# LOCAL ONLY, a provenance fence rather than tidiness: third-party line archives
+# with no licence (or a licence that conflicts with the original source's terms)
+# stay on this machine. Scripts that read them must refuse to run unless
+# `git check-ignore` agrees this directory is excluded.
+cache/local_only/

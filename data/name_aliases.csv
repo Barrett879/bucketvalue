@@ -1,0 +1,20 @@
+# Alternate spellings -> the NBA's own display name (stats.nba.com playerindex).
+# Consulted BEFORE fuzzy matching. Only for nicknames that are not prefixes of
+# the official given name, transliterations, and reordered family names; plain
+# accent, suffix, initial and hyphen variants are handled by names.normalize.
+# Every nba_name here must exist on the current roster; tests check it when a
+# roster snapshot is present. Grow this from real PrizePicks pastes.
+alias,nba_name
+Moe Wagner,Moritz Wagner
+Mo Wagner,Moritz Wagner
+Lu Dort,Luguentz Dort
+Mohamed Bamba,Mo Bamba
+Kenyon Martin Jr.,KJ Martin
+Kenyon Martin,KJ Martin
+Nah'Shon Hyland,Bones Hyland
+Nahshon Hyland,Bones Hyland
+Carlton Carrington,Bub Carrington
+Dennis Schroeder,Dennis Schröder
+Hansen Yang,Yang Hansen
+Yanic Niederhauser,Yanic Konan Niederhäuser
+Herb Jones,Herbert Jones

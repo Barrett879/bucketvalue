@@ -1,0 +1,36 @@
+# BucketValue dependencies. Exact pins on everything.
+#
+# The shared set is IDENTICAL to DiamondValue's and GridironValue's so idioms
+# port between the three projects without surprises:
+#  - pandas held at 2.x on purpose (3.0 changes copy-on-write and default
+#    string dtypes, which alters join and parquet round-trip behaviour).
+#  - scikit-learn and joblib are pinned to the exact versions the shipped model
+#    artifacts in models/ are saved with. Version drift silently breaks
+#    joblib.load on a host rebuild. DO NOT bump these two without retraining and
+#    re-committing the artifacts.
+#  - Streamlit Community Cloud ignores runtime.txt, so every pin here must have
+#    a wheel for the newest CPython it might build on (3.14 when checked).
+streamlit==1.59.1
+numpy==2.3.5
+pandas==2.3.3
+pyarrow==22.0.0
+plotly==6.3.0
+scikit-learn==1.7.2
+joblib==1.5.2
+scipy==1.16.3
+threadpoolctl==3.6.0
+requests==2.32.5
+
+# NBA data access. stats.nba.com and the cdn.nba.com JSON gate on the client's
+# TLS fingerprint: python-requests HANGS (no 403, just a read timeout) while a
+# Chrome-impersonating curl_cffi session answers in under a second. nba_api is
+# kept for its endpoint definitions and parsers; its HTTP session is swapped for
+# curl_cffi in bucketlib/http.py.
+nba_api==1.11.4
+curl_cffi==0.15.0
+# Official NBA injury-report PDFs. Pure python; pdfplumber/pdftotext are not
+# needed and are not installed on the bot.
+pypdf==6.12.2
+
+# Dev only (tests). Harmless in production.
+pytest==8.3.4
