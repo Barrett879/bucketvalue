@@ -45,3 +45,39 @@ No structure dominates. Minutes x rate-model wins the composite (Fantasy, PRA) a
 is close on the rest; direct wins PTS/REB marginally. Decision deferred to the
 probabilistic gate with availability and injury features in (they change minutes
 most, which favours the decomposition). Full table: `docs/exp_structure_logs_v0.csv`.
+
+## v1, full features (2026-10-09): THE GATE
+
+Training table: 325,371 rostered player-games 2018-19..2025-26 (participation +
+history from 2014-15 + ESPN closing lines + the injury report at one of four serve
+horizons per game). Train 2018-19..2022-23, validate 2023-24, test 2024-25;
+2025-26 untouched. Structure: availability classifier; minutes | plays regressor;
+per-minute exposure-Poisson rate models; E[stat | plays] = minutes x rate.
+
+**Availability** (log loss; status lookup / recent played rate in brackets):
+5:30pm day before 0.35-0.36 (0.62 / 0.45); 11am 0.29 (0.45-0.48 / 0.44-0.47);
+2h before 0.24-0.25; 15 min before 0.20-0.21. Sum of P(play) per team-game /
+appearances 0.98-1.02.
+
+**Ship gate** (`scripts/gate.py`, `docs/gate_v1.csv`): improvement over the SHRUNK
+baseline with 95% player-cluster bootstrap intervals; RMSE-based for minutes and
+Fantasy, Poisson deviance for counts. **All 22 targets pass** on both folds, and no
+stratum (starters, bench, cold start, rookies, teammate out, returning from
+absence, status unknown) is significantly worse. Minutes 15-17% (squared error),
+PRA 9-10%, Fantasy 7-8%, PTS 6-7.5%, REB 6.6%, AST 4-5%, STL/BLK 2-2.6%.
+
+**Closing-line optimism** (`scripts/exp_open_vs_close.py`): scoring the same models
+with OPENING lines raises minutes RMSE 0.4-0.9% at 5:30pm the day before and
+~0.05% at 15 minutes before tip. Lines help ~1% at early horizons, nothing at tip.
+
+**Probabilistic gate** (`scripts/prob_gate.py`, `docs/prob_gate_v1.csv`): the
+simulator (fitted walk-forward on 2020-21..2022-23, `models/sim_params_v1.json`)
+vs a negative binomial with the same mean. Simulator calibration error on half
+lines 1-2.6 points (NB 2.2-4.9); RPS equal or better on every stat. Side-picking
+edges are measured against PROXY lines from the baseline projection, NOT
+PrizePicks lines, and become `data/stat_reliability.csv` tiers (worse fold):
+Fantasy/PRA/P+R/P+A/PTS/R+A strong, STL/3PM/TOV/REB/Blks+Stls/AST moderate, BLK
+weak. These are model-quality tiers, never market edges (DiamondValue: the posted
+line is a near-sufficient statistic for its projection).
+
+**Decision: every board stat ships as a model.** Nothing falls back to a baseline.
