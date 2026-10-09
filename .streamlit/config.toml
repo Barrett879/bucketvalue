@@ -1,0 +1,32 @@
+# Light is the shipped default (theme.py THEME_DEFAULT_DARK = False). Keeping
+# base="light" here matters: it is what any iframe-rendered component inherits
+# before our own tokens apply, so a mismatch shows as a dark flash on load.
+[theme]
+base = "light"
+primaryColor = "#16d4c1"
+backgroundColor = "#f4f6f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#14142a"
+
+[server]
+headless = true
+# The two self-hosted webfonts in bucketlib/theme.py are served from
+# /app/static/fonts/. Streamlit does NOT serve static/ unless this is on, and
+# with it off the request does not 404: it returns 200 with the SPA's own
+# index.html (6602 bytes of text/html), so the @font-face silently fails and
+# every visitor falls back to a system font. The files are on disk beside
+# app.py, which is where Streamlit expects them, so the flag is all that was
+# missing.
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+# OFF on the shared deployment. This is what put absolute server paths in front
+# of visitors when an unhandled exception replaced the page, which a 15-character
+# paste could trigger. The paste path is hardened now, but the next unhandled
+# exception should not disclose the filesystem either. Run locally with
+# `--client.showErrorDetails=true` when debugging.
+showErrorDetails = false

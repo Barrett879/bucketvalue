@@ -1,24 +1,14 @@
 """Theme tokens, page chrome, nav, and footer for BucketValue.
 
-The visual system is HoopsValue's by way of DiamondValue: the same surface,
-text-ramp and accent tokens in dark and light, the same Space Grotesk + Manrope
-self-hosted webfonts, the fixed pill nav with the red active state, and the
-pinned theme toggle. Only the wordmark and the football-specific components
-(week bar, window group headers, slate cards carrying the market line) are new.
+The visual system is HoopsValue's by way of DiamondValue and GridironValue: the
+same surface, text-ramp and accent tokens in dark and light, the same Space
+Grotesk + Manrope self-hosted variable webfonts (one @font-face per family), the
+fixed pill nav with the red active state, and the pinned theme toggle. Ported
+from gridlib/theme.py with the class prefix `bv-`; the football components
+(week bar, broadcast windows) became a date bar and tip-time groups.
 
-Two deliberate departures from DiamondValue:
-  - The fonts are declared ONCE per family with a variable weight range.
-    DiamondValue ships three byte-identical copies of each file and declares
-    three @font-face rules pointing at them, so a browser fetches the same
-    bytes three times per family. Both files are variable fonts (Manrope wght
-    200-800, Space Grotesk wght 300-700), so one declaration covers every
-    weight the site uses.
-  - The class prefix is `gv-`, not `dv-`.
-
-SITE_NAME is the ONE place the product name lives (spec: a rename is a one-line
-change). SENTINEL is defined here ONCE and is the only em dash permitted in a
-string literal anywhere in the codebase; it renders in table cells for missing
-values.
+SITE_NAME is the ONE place the product name lives. util.SENTINEL is the only em
+dash permitted in a string literal; it renders in cells for missing values.
 """
 from __future__ import annotations
 
@@ -28,22 +18,21 @@ import streamlit as st
 
 # ── The one-line rename ──────────────────────────────────────────────────────
 SITE_NAME = "BucketValue"
-SITE_TAGLINE = "Expected stat lines, not predictions"
+SITE_TAGLINE = "NBA stat lines, modelled game by game"
 
-# The single permitted em dash: the missing-value table sentinel.
-SENTINEL = "—"
+# The single permitted em dash lives in util.SENTINEL (re-exported here).
+from .util import SENTINEL  # noqa: E402,F401
 
 # Ship light by default (config.toml base="light" matches); dark is opt-in via
 # the pinned toggle, persisted across page navigations via ?theme=.
 THEME_DEFAULT_DARK = False
 
 # Nav pages: (label, url). Home is rendered separately.
-# Only pages that EXIST. A nav link to a page with no file renders as the app
-# shell and then a client-side "page not found", which reads as a broken site
-# rather than a missing feature. Accuracy (spec step 5) is not built yet, so it
-# is not linked; the week-by-week table on /Props carries that role for now.
+# Only pages that EXIST IN GIT. A nav link to a page with no file renders the
+# app shell and then a client-side "page not found", which reads as a broken
+# site. Accuracy is LOCAL ONLY (Barrett, 2026-10-08): pages/Accuracy.py is
+# gitignored, so it is never listed here; tests/test_nav.py enforces both.
 _NAV_PAGES = [
-    ("Accuracy", "/Accuracy"),
     ("About", "/About"),
 ]
 
@@ -364,11 +353,10 @@ COMMON_CSS = """
         font-family: 'Space Grotesk', sans-serif; font-weight: 700;
         font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
         color: var(--fg-4); margin-bottom: 0.45rem; }
-    /* The football: a squashed diamond. Same visual weight as DiamondValue's
-       rotated square, shaped for the sport. */
-    .bv-pip { width: 9px; height: 6px; background: var(--accent-teal);
-        border-radius: 50% / 60%; margin-right: 0.5rem; flex: none;
-        transform: rotate(-12deg); }
+    /* The ball: a small circle, same visual weight as DiamondValue's rotated
+       square and GridironValue's squashed football. */
+    .bv-pip { width: 8px; height: 8px; background: var(--accent-teal);
+        border-radius: 50%; margin-right: 0.5rem; flex: none; }
     .bv-mast-summary { display: flex; align-items: flex-end; margin-left: auto; }
     .bv-sum { padding: 0 0.95rem; text-align: right; }
     .bv-sum + .bv-sum { border-left: 1px solid var(--panel-line); }
@@ -383,23 +371,23 @@ COMMON_CSS = """
     @media (max-width: 640px) { .bv-mast-summary { margin: 0.8rem 0 0; }
         .bv-sum:first-child { padding-left: 0; } }
 
-    /* Week bar (keyed container): chevrons + week selector + This week */
-    .st-key-bv_weekbar [data-testid="stHorizontalBlock"] { align-items: flex-end; }
-    .st-key-bv_weekbar [data-testid="stWidgetLabel"] p {
+    /* Date bar (keyed container): chevrons + date picker + Yesterday/Today/Tomorrow */
+    .st-key-bv_datebar [data-testid="stHorizontalBlock"] { align-items: flex-end; }
+    .st-key-bv_datebar [data-testid="stWidgetLabel"] p {
         font-family: 'Space Grotesk', sans-serif; font-size: 0.62rem;
         font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
         color: var(--fg-5); }
-    .st-key-bv_weekbar [data-testid="stButton"] button {
+    .st-key-bv_datebar [data-testid="stButton"] button {
         height: 2.35rem; font-size: 0.82rem; font-weight: 600;
         border-radius: 10px !important; }
-    .st-key-bv_week_prev button, .st-key-bv_week_next button {
+    .st-key-bv_day_prev button, .st-key-bv_day_next button {
         padding: 0 0.5rem !important; font-size: 1.1rem !important;
         font-weight: 700 !important; line-height: 1 !important; }
-    .st-key-bv_week_now button {
+    .st-key-bv_day_today button {
         border-color: var(--accent-teal) !important; color: var(--accent-teal) !important; }
     .bv-bar-rule { height: 1px; background: var(--panel-line); margin: 0.5rem 0 0.2rem; }
 
-    /* Window group header: "Sunday early - 8 games" */
+    /* Tip-time group header: "7:00 PM ET - 5 games" */
     .bv-window {
         display: flex; align-items: baseline; gap: 0.6rem;
         margin: 1.15rem 0 0.55rem; padding-bottom: 0.35rem;
@@ -729,6 +717,74 @@ COMMON_CSS = """
         margin-left: 0.4rem; vertical-align: middle;
     }
 
+
+    /* ── NBA additions ───────────────────────────────────────────────────── */
+    /* Tip-time group header on the slate: "7:00 PM ET  5 games" */
+    .bv-tipgrp { display: flex; align-items: baseline; gap: 0.6rem;
+        margin: 1.15rem 0 0.55rem; padding-bottom: 0.35rem;
+        border-bottom: 1px solid var(--hairline); }
+    .bv-tipgrp .lab { font-family: 'Space Grotesk', sans-serif; font-weight: 700;
+        font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--fg-3); }
+    .bv-tipgrp .meta { font-size: 0.7rem; color: var(--fg-5); }
+    /* Card extras: national TV, back-to-back chip, key absences */
+    .bv-slate-sub { margin-top: 0.3rem; font-size: 0.66rem; color: var(--fg-5);
+        text-align: center; line-height: 1.35; }
+    .bv-chip { display: inline-block; padding: 0.02rem 0.36rem; border-radius: 999px;
+        font-size: 0.56rem; font-weight: 700; letter-spacing: 0.05em;
+        text-transform: uppercase; border: 1px solid var(--panel-line); color: var(--fg-4);
+        margin: 0 0.12rem; }
+    .bv-chip.warn { color: var(--amber); border-color: var(--amber); }
+    .bv-out { color: var(--fg-4); }
+    .bv-out b { color: var(--value-bad); font-weight: 700; }
+
+    /* Player stat table: one team. Rounded, shadowed container; tabular
+       numerals; MIN is the lead column; Out rows greyed and sunk. */
+    .bv-pt { border: 1px solid var(--panel-line); border-radius: 12px;
+        overflow: hidden; background: var(--panel); box-shadow: var(--shadow-card);
+        margin: 0.4rem 0 1.2rem; font-variant-numeric: tabular-nums; }
+    .bv-pt-cap { display: flex; align-items: center; gap: 0.55rem;
+        padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--panel-line);
+        background: linear-gradient(90deg,
+            color-mix(in srgb, var(--team) 16%, transparent), transparent 70%); }
+    .bv-pt-cap .ab { font-family: 'Space Grotesk', sans-serif; font-weight: 700;
+        font-size: 1rem; color: var(--fg-1); }
+    .bv-pt-cap .nm { font-size: 0.78rem; color: var(--fg-4); font-weight: 600; }
+    .bv-pt-cap .asof { margin-left: auto; font-size: 0.66rem; color: var(--fg-5); }
+    .bv-pt table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .bv-pt th { font-family: 'Space Grotesk', sans-serif; font-weight: 600;
+        font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--fg-5); text-align: right; padding: 0.42rem 0.45rem;
+        border-bottom: 1px solid var(--hairline); }
+    .bv-pt th.l, .bv-pt td.l { text-align: left; }
+    .bv-pt td { padding: 0.36rem 0.45rem; font-size: 0.82rem; color: var(--fg-2);
+        text-align: right; border-bottom: 1px solid var(--hairline-soft);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bv-pt tr:nth-child(even) td { background: var(--row-tint); }
+    .bv-pt tr:hover td { background: var(--panel-hover); }
+    .bv-pt td.lead { color: var(--fg-1); font-weight: 700; }
+    .bv-pt td.pl { color: var(--fg-1); font-weight: 600; }
+    .bv-pt td.pl .pos { color: var(--fg-5); font-weight: 500; font-size: 0.68rem;
+        margin-left: 0.3rem; }
+    .bv-pt tr.out td { color: var(--fg-6); }
+    .bv-pt tr.out td.pl { color: var(--fg-4); font-weight: 500; }
+    .bv-pt .grp td { font-family: 'Space Grotesk', sans-serif; font-size: 0.58rem;
+        letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-5);
+        background: transparent !important; padding-top: 0.6rem; }
+    img.bv-hs { width: 1.55rem; height: 1.55rem; border-radius: 50%;
+        object-fit: cover; vertical-align: middle; margin-right: 0.45rem;
+        background: var(--panel-2); }
+    /* Injury status badge. Unknown is never drawn as healthy. */
+    .bv-st { display: inline-block; min-width: 1.5rem; padding: 0.04rem 0.32rem;
+        border-radius: 6px; font-size: 0.56rem; font-weight: 700;
+        letter-spacing: 0.04em; text-transform: uppercase; text-align: center; }
+    .bv-st.out { background: var(--tint-bad); color: var(--value-bad); }
+    .bv-st.dbt { background: var(--tint-bad); color: var(--orange); }
+    .bv-st.q   { background: var(--tint-even); color: var(--amber); }
+    .bv-st.prob { background: var(--tint-good); color: var(--value-good); }
+    .bv-st.gl  { background: var(--hairline); color: var(--fg-4); }
+    .bv-st.tw  { border: 1px solid var(--panel-line); color: var(--fg-5); }
+
     /* Notices: a quiet panel for "no games" / "data not published yet" states.
        Never let an empty result render as silence; say why it is empty. */
     .bv-notice {
@@ -834,26 +890,18 @@ def render_nav(current: str, keep: dict[str, str] | None = None) -> None:
 
 
 def render_footer() -> None:
-    """Site-wide footer with the required nflverse / FTN Data attribution.
-
-    nflverse data is CC-BY-SA 4.0 and attribution to FTN Data via nflverse is
-    MANDATORY, so this is a licence obligation, not decoration. It ships from
-    day one for the same reason DiamondValue attributes the MLB Stats API.
-    """
+    """Site-wide footer: sources and the informational-only disclaimer."""
     year = today_et().year
     html = (
         '<div class="bv-footer">'
         '<div class="bv-foot-disc">'
-        "Play-by-play, schedule, market and roster data from "
-        '<a href="https://github.com/nflverse/nflverse-data" target="_blank" '
-        'rel="noopener">nflverse</a>, sourced in part from FTN Data and used '
-        'under <a href="https://creativecommons.org/licenses/by-sa/4.0/" '
-        'target="_blank" rel="noopener">CC BY-SA 4.0</a>. '
-        f"{SITE_NAME} is an informational analytics site. It is not a "
-        "sportsbook, it accepts no wagers, and it offers no betting advice. "
-        "Every number shown is a modelled central value, not a forecast of "
-        "what will happen. Player projections are medians: half of that "
-        "player's outcomes in that spot land above the number and half below."
+        "Box scores, schedules and rosters from NBA.com; game lines from ESPN "
+        "(DraftKings); availability from the NBA's official injury report. "
+        f"{SITE_NAME} is an informational analytics site, unaffiliated with the "
+        "NBA, ESPN or PrizePicks. It is not a sportsbook, it accepts no wagers, "
+        "and it offers no betting advice. Player numbers are modelled medians "
+        "for a player who plays: half of his outcomes in that spot land above "
+        "the number and half below."
         "</div>"
         '<div class="bv-foot-rule"></div>'
         '<div class="bv-foot-bottom">'
