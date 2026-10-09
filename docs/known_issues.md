@@ -18,6 +18,15 @@ against the code on 2026-10-09; items fixed since are removed, not struck.
 - injury: everything (six layouts, wrapped team names, UNK@UNK, report-level
   accept, title-time walk, truncated PDFs); 7,822/7,822 cached PDFs parse.
 
+## Data conflicts resolved (2026-10-09)
+- The cdn box score disagrees with the stats logs on WHO played in 4 of ~10,200
+  games (0042100401 Kornet vs Nesmith 48s; 0022200012; 0022400831; 0022400920)
+  and breaks the team player-seconds invariant in 2 (0022100124 BKN -301s,
+  0022400061 BOS +260s). All six were re-parsed from the V3 box, which agrees
+  with the stats logs the stat lines come from. In season the bot builds both
+  stat lines and participation from the SAME cdn payload, so they cannot
+  disagree with each other; a broken invariant there turns the run red.
+
 ## Open
 - box (script layer): past-season empty game lists are cached; Cup final (006)
   games cannot be enumerated by build_participation (rest features take them
