@@ -676,6 +676,14 @@ def load_game(game_id: str, source: str = "auto", refresh: bool = False) -> tupl
             # NotFinal means what it says and propagates.
             if source == "cdn" or _is_live_game(game_id):
                 raise
+        except ValueError:
+            # A cdn box that breaks an invariant (0022100124: BKN player-seconds
+            # 301s short; 0022400061: BOS 260s over) while the stats logs for the
+            # same game reconcile exactly. Past season: the V3 box is the
+            # authority, and it still has to pass the same invariants. Live
+            # season: raise, so the bot goes red instead of guessing.
+            if source == "cdn" or _is_live_game(game_id):
+                raise
     box, summary = fetch_v3(game_id, refresh=refresh)
     return parse_v3(box, summary, game_id)
 

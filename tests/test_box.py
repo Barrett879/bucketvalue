@@ -1058,3 +1058,20 @@ def test_cdn_frozen_midgame_falls_back_to_v3_for_a_past_season_only(monkeypatch)
     import pytest
     with pytest.raises(B.NotFinal):
         B.load_game("0022600001")
+
+
+def test_cdn_invariant_failure_falls_back_to_v3_for_a_past_season_only(monkeypatch):
+    """0022100124: the cdn box is 301 player-seconds short for BKN; V3 is right."""
+    from bucketlib.sources import box as B
+    import pytest
+
+    monkeypatch.setattr(B, "fetch_cdn", lambda gid, refresh=False: {"game": {}})
+    def bad(payload, gid):
+        raise ValueError(f"{gid}: BKN player-seconds off by -301s (OT=0)")
+    monkeypatch.setattr(B, "parse_cdn", bad)
+    monkeypatch.setattr(B, "fetch_v3", lambda gid, refresh=False: ("box", "sum"))
+    monkeypatch.setattr(B, "parse_v3", lambda box, summ, gid: ("rows", {"source": "v3"}))
+    assert B.load_game("0022100124")[1]["source"] == "v3"
+    monkeypatch.setattr(B, "_is_live_game", lambda gid: True)
+    with pytest.raises(ValueError):
+        B.load_game("0022600001")
