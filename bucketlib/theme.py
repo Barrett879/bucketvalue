@@ -22,7 +22,7 @@ values.
 """
 from __future__ import annotations
 
-import datetime as _dt
+from .util import today_et
 
 import streamlit as st
 
@@ -840,7 +840,7 @@ def render_footer() -> None:
     MANDATORY, so this is a licence obligation, not decoration. It ships from
     day one for the same reason DiamondValue attributes the MLB Stats API.
     """
-    year = _dt.date.today().year
+    year = today_et().year
     html = (
         '<div class="bv-footer">'
         '<div class="bv-foot-disc">'

@@ -23,6 +23,7 @@ sibling + os.replace); READ_ONLY declares a shared deployment.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -126,11 +127,34 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 _PQ_META_KEY = b"bucketvalue"
 
 
-def write_parquet(df: pd.DataFrame, path: Path, meta: dict | None = None) -> None:
+def frame_hash(df: pd.DataFrame) -> str:
+    """Content hash of a frame: values, column names and dtypes, not the index
+    and not any metadata. Two writes of the same data hash the same even though
+    their embedded fetch stamps differ."""
+    h = hashlib.sha256()
+    h.update(json.dumps([[str(c), str(t)] for c, t in df.dtypes.items()]).encode())
+    if len(df):
+        h.update(pd.util.hash_pandas_object(df, index=False).values.tobytes())
+    return h.hexdigest()
+
+
+def write_parquet(df: pd.DataFrame, path: Path, meta: dict | None = None,
+                  if_changed: bool = False) -> bool:
     """Atomic parquet write. `meta` (JSON-able) rides in the schema metadata;
-    `fetched_at` is added automatically when absent."""
+    `fetched_at` and `content_hash` are added automatically.
+
+    if_changed=True skips the write when the existing file holds the same
+    content, keeping its old stamp. The bot uses this for every COMMITTED file:
+    the embedded stamp makes every write a new blob, so without it each cron run
+    would commit, push and redeploy unchanged data (DiamondValue's bot wrote
+    388 MB of blobs in 65 days that way). Returns True when it wrote.
+    """
+    digest = frame_hash(df)
+    if if_changed and path.exists() and read_parquet_meta(path).get("content_hash") == digest:
+        return False
     meta = dict(meta or {})
     meta.setdefault("fetched_at", stamp_now())
+    meta["content_hash"] = digest
     table = pa.Table.from_pandas(df, preserve_index=False)
     existing = table.schema.metadata or {}
     table = table.replace_schema_metadata({**existing, _PQ_META_KEY: json.dumps(meta).encode()})
@@ -142,6 +166,7 @@ def write_parquet(df: pd.DataFrame, path: Path, meta: dict | None = None) -> Non
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
+    return True
 
 
 def read_parquet(path: Path) -> pd.DataFrame | None:
@@ -160,11 +185,30 @@ def read_parquet_meta(path: Path) -> dict:
     return json.loads(raw) if raw else {}
 
 
-def write_json(path: Path, obj, stamped: bool = False, gz: bool = False) -> None:
-    """Atomic JSON write. `stamped=True` wraps as {"fetched_at", "data"}."""
-    payload = {"fetched_at": stamp_now(), "data": obj} if stamped else obj
+def json_hash(obj) -> str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                     default=str).encode()).hexdigest()
+
+
+def write_json(path: Path, obj, stamped: bool = False, gz: bool = False,
+               if_changed: bool = False) -> bool:
+    """Atomic JSON write. `stamped=True` wraps as
+    {"fetched_at", "content_hash", "data"}. if_changed=True (stamped only)
+    skips the write when the stored content hash matches; see write_parquet.
+    Returns True when it wrote."""
+    if stamped:
+        digest = json_hash(obj)
+        if if_changed and path.exists():
+            old = read_json(path)
+            if isinstance(old, dict) and old.get("content_hash") == digest:
+                return False
+        payload = {"fetched_at": stamp_now(), "content_hash": digest, "data": obj}
+    else:
+        payload = obj
     raw = json.dumps(payload, separators=(",", ":"), default=str).encode()
-    _atomic_write_bytes(path, gzip.compress(raw) if gz else raw)
+    # mtime=0 keeps gzip output byte-stable for identical content.
+    _atomic_write_bytes(path, gzip.compress(raw, mtime=0) if gz else raw)
+    return True
 
 
 def read_json(path: Path):
