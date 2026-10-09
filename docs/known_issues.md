@@ -28,9 +28,7 @@ against the code on 2026-10-09; items fixed since are removed, not struck.
   disagree with each other; a broken invariant there turns the run red.
 
 ## Open
-- box (script layer): past-season empty game lists are cached; Cup final (006)
-  games cannot be enumerated by build_participation (rest features take them
-  from the schedule instead, so no feature is affected); Absent/NotFinal games
+- box (script layer): past-season empty game lists are cached; Absent/NotFinal games
   leave exit status 0 (the table's `complete` flag is correct); `--games`
   duplicates are not de-duplicated; checkpoint restamps on no-op runs.
   `dnp` mixes coach's decisions with dressed-but-injured (DND_INJURY) rows: the
