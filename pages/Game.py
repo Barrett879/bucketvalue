@@ -15,7 +15,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bucketlib import live, store, teams  # noqa: E402
+from bucketlib import live, props_ui, store, teams  # noqa: E402
 from bucketlib.theme import SITE_NAME, render_footer, render_nav, render_page_chrome  # noqa: E402
 from bucketlib.util import esc  # noqa: E402
 
@@ -28,8 +28,9 @@ try:
     date = dt.date.fromisoformat(str(qp.get("date")))
 except ValueError:
     date = None
-keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light"}
-render_nav("Game", keep={"date": date.isoformat() if date else ""})
+TOKEN = props_ui.board_token()
+keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light", **props_ui.keep_params(TOKEN)}
+render_nav("Game", keep={"date": date.isoformat() if date else "", **props_ui.keep_params(TOKEN)})
 back = store.page_url("/", keep, date=date.isoformat() if date else None)
 
 if not (away and home and date):
@@ -48,6 +49,19 @@ except RuntimeError as e:
                 unsafe_allow_html=True)
     render_footer()
     st.stop()
+
+# The paste popover lives in the nav on this page too. A paste here can mint a
+# NEW token, so every link below is rebuilt from it (the back link included).
+try:
+    _roster_for_paste = live.roster().value
+except RuntimeError:
+    _roster_for_paste = None
+if _roster_for_paste is not None:
+    from bucketlib.util import today_et
+    _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), date})
+    TOKEN = props_ui.render_update_lines_popover(date, sched, _roster_for_paste, dates=_route_dates) or TOKEN
+    keep.update(props_ui.keep_params(TOKEN))
+    back = store.page_url("/", keep, date=date.isoformat())
 
 g = sched[(sched["game_date"] == date) & (sched["away"] == away) & (sched["home"] == home)]
 if g.empty:

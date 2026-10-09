@@ -14,7 +14,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bucketlib import live, store  # noqa: E402
+from bucketlib import live, props, props_ui, store  # noqa: E402
 from bucketlib.theme import SITE_NAME, render_footer, render_nav, render_page_chrome  # noqa: E402
 from bucketlib.util import esc, today_et  # noqa: E402
 
@@ -68,8 +68,22 @@ if st.query_params.get("date") != view.isoformat():
     st.query_params["date"] = view.isoformat()
     st.session_state["_url_date_seen"] = view.isoformat()
 
-keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light"}
-render_nav("Home", keep={"date": view.isoformat()})
+try:
+    ROSTER = live.roster().value
+except RuntimeError:
+    ROSTER = None
+# Every internal link is a full page load (a new Streamlit session), so a
+# visitor's pasted board travels as ?board=<token> on every minted URL.
+TOKEN = props_ui.board_token()
+keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light", **props_ui.keep_params(TOKEN)}
+render_nav("Home", keep={"date": view.isoformat(), **props_ui.keep_params(TOKEN)})
+if ROSTER is not None:
+    # Board text carries no dates: lines route to each player's game today or
+    # tomorrow (all PrizePicks posts), plus the date on screen. Tipped games are
+    # never a destination, so a past date on screen adds nothing.
+    _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), view})
+    TOKEN = props_ui.render_update_lines_popover(view, SCHED, ROSTER, dates=_route_dates) or TOKEN
+    keep.update(props_ui.keep_params(TOKEN))
 
 # ── Date bar ─────────────────────────────────────────────────────────────────
 today = today_et()
@@ -128,5 +142,16 @@ else:
            if upcoming else "")
     st.markdown(store.render_notice(f"<b>No NBA games on {view.strftime('%A, %B %-d')}.</b>{nxt}"),
                 unsafe_allow_html=True)
+
+# ── Pasted lines (projections not shipped yet) ─────────────────────────────
+if TOKEN:
+    board = props.get_board(TOKEN)
+    todays = props.lines_for_date(board, view) if board is not None else None
+    n = 0 if todays is None else len(todays)
+    if n:
+        st.markdown(store.render_notice(
+            f"<b>{n} PrizePicks lines saved for {view.strftime('%B %-d')}.</b> The model "
+            "comparison appears here once projections ship; your board stays attached to "
+            "this link until then."), unsafe_allow_html=True)
 
 render_footer()
