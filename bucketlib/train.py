@@ -17,7 +17,8 @@ from .util import ET, season_end_year, seasons_between
 
 # ── Column contract ──────────────────────────────────────────────────────────
 ID_COLS = {"person_id", "game_id", "season", "season_end", "game_date", "tip_utc", "team",
-           "opp", "home", "is_target", "last_played_date", "last_team", "src", "season_type"}
+           "opp", "home", "is_target", "last_played_date", "last_team", "src", "season_type",
+           "horizon"}
 OUTCOME_COLS = {"status", "starter", "played", "played_seconds", "min", "sec"} | set(F.RATE_STATS) | {
     "pra", "pr", "pa", "ra", "stocks", "fantasy", "fg2m", "fg2a"}
 FEATURE_PREFIXES = (
@@ -31,8 +32,14 @@ FEATURE_PREFIXES = (
 NOT_FEATURES = {"total_line_src"}
 
 
+# Injury/teammate context at a horizon (livectx): pre-game by construction.
+CONTEXT_FEATURES = set(__import__("bucketlib.livectx", fromlist=["CTX_COLS"]).CTX_COLS)
+
+
 def classify(col: str) -> str:
     """'id' | 'outcome' | 'feature'. Raises on anything else."""
+    if col in CONTEXT_FEATURES:
+        return "feature"
     if col in ID_COLS:
         return "id"
     if col in OUTCOME_COLS:
