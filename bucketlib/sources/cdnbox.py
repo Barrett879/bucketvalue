@@ -3,11 +3,22 @@ stats.nba.com logs the models trained on (statsnba.player_games / team_games).
 
 Why: GitHub Actions cannot reach stats.nba.com (it hangs from Azure, measured
 2026-10-09), so the daily bot builds the current season from cdn box scores.
-A feature computed from a cdn-built row must equal the one computed from a
-stats-built row, so this module is verified field by field against the stats
-logs on every cached game (tests/test_cdnbox.py; scripts in the docstring of
-check_parity). Seconds come from the ISO duration ('PT25M01.00S'), which is the
-precise value; points/rebounds/etc. are integers in both sources.
+A feature computed from a cdn-built row should equal the one computed from a
+stats-built row, so the two are compared field by field:
+
+  - tests/test_cdnbox.py pins two real 2019-20 games offline (fixtures): every
+    count equal, seconds within 2, team TOV including team turnovers. The same
+    comparison was run once on all 647 cached 2019-20 games (1,294 team-games).
+  - tests/test_serve_parity.py measures every cached 2025-26 game through the
+    bot's own ingestion: the counts are NOT equal everywhere. 148 of 26,757
+    player lines (at most 2 in any count) and 36 of 2,470 team lines (at most
+    1) differ, all stats.nba.com stat corrections made after the game, which
+    the cdn liveData box never receives. The test bounds what that moves
+    (only box-count features, and the projections by a fixed tolerance);
+    training keeps the corrected logs (docs/serving_design.md section 6).
+
+Seconds come from the ISO duration ('PT25M01.00S'), which is the precise
+value; points/rebounds/etc. are integers in both sources.
 """
 from __future__ import annotations
 

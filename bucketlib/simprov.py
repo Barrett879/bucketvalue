@@ -223,6 +223,14 @@ def _degenerate(inp: D.PlayerInput) -> frozenset[str]:
     return frozenset(out)
 
 
+# The one BASELINE stat a clipped FG3A share also breaks. FG2A's composed mean,
+# FGA - FG3A, is <= 0 once the share clips, and exactly 0 at models.predict's
+# rate_fg3a cap, where the baseline would price it as the point mass at zero:
+# a certain Less on every 2-PT Attempted line. That zero is a cap, not a
+# forecast. FG2M and FGM keep positive means and ordinary baseline pmfs.
+_BASELINE_DEGENERATE = frozenset({"fg2a"})
+
+
 def price(inp: D.PlayerInput, params: D.SimParams, seed: int, n: int = D.N_DRAWS,
           stats=STATS) -> dict[str, Pmf] | None:
     """Re-centred simulator pmfs for each of `stats` that can be priced, or
@@ -287,6 +295,7 @@ class SimProvider:
         # props' own baseline on the same rows (it also keeps the last duplicate).
         self._baseline = P.MeanDispersionProvider(frame)
         self._cache: dict[tuple[int, str], dict[str, Pmf] | None] = {}
+        self._refused: dict[tuple[int, str], frozenset[str]] = {}
 
     def _pmfs(self, key: tuple[int, str]) -> dict[str, Pmf] | None:
         """The row's simulator pmfs, or None when the ROW cannot be priced."""
@@ -296,8 +305,9 @@ class SimProvider:
         row = self._rows.get(key)
         if row is not None:
             try:
-                out = price(player_input(row, prefix=""), self._params, seed_of(*key), self._n,
-                            stats=GATED)
+                inp = player_input(row, prefix="")
+                self._refused[key] = _degenerate(inp) & _BASELINE_DEGENERATE
+                out = price(inp, self._params, seed_of(*key), self._n, stats=GATED)
             except ValueError as e:
                 logger.warning("simprov: cannot price %s in %s: %s", key[0], key[1], e)
         self._cache[key] = out
@@ -316,6 +326,8 @@ class SimProvider:
             return None
         if stat in _GATED_SET:
             return pm.get(stat)
+        if stat in self._refused.get(key, ()):
+            return None
         return _settle(self._baseline.pmf(key[0], key[1], stat),
                        P.shipped_mean(self._rows[key], stat), stat)
 

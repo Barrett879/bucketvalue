@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 import streamlit as st
 
-from . import props
+from . import props, simprov
 from .cache import logger
 from .util import SENTINEL, esc
 
@@ -140,6 +140,35 @@ def board_view(token, date, provider, projections, roster=None, void_ids=()) -> 
         meta = {"posted": int(len(lines)), "error": True}
         return BoardView(_empty(), _empty(), _empty(), _empty(), meta, lines)
     return BoardView(shown, hidden, thin, void, meta, lines)
+
+
+def void_ids(projections: pd.DataFrame | None) -> set[int]:
+    """The players whose picks PrizePicks voids, for board_rows: exactly the
+    rows the served frame reads Out (the report, and any mark-out the live
+    layer APPLIED, which reads Out too). Never the raw ?out= marks: on a
+    frozen game or the committed stand-in the marks are not applied, the
+    page shows the player with numbers, and voiding his lines there made the
+    board and the card pill contradict the page."""
+    if projections is None or not len(projections) or "inj_status" not in projections.columns:
+        return set()
+    return props.void_id_set(projections.loc[projections["inj_status"] == "Out", "person_id"].tolist())
+
+
+def date_board(token, date, projections: pd.DataFrame | None, params, roster=None) -> BoardView:
+    """board_view for one ET date with the simulator provider. The provider is
+    simprov.provider_for(projections, params), the one the Game tables' medians
+    read, so a line's model value and the table's median come from one
+    simulation; the void set is void_ids(projections). Never raises."""
+    try:
+        provider = simprov.provider_for(projections, params)
+    except Exception as e:  # noqa: BLE001 - a broken frame is an explained empty board
+        logger.warning("date_board: no provider (%s: %s)", type(e).__name__, e)
+        try:
+            posted = len(props.lines_for_date(props.get_board(token) if token else None, date))
+        except Exception:  # noqa: BLE001
+            posted = 0
+        return BoardView(_empty(), _empty(), _empty(), _empty(), {"posted": posted, "error": True})
+    return board_view(token, date, provider, projections, roster, void_ids(projections))
 
 
 def line_counts_by_game(shown: pd.DataFrame) -> dict:

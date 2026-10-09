@@ -993,7 +993,26 @@ def test_training_window():
     assert props.is_in_training_window("2025-26", reg) is True
     assert props.is_in_training_window(2026, reg) is True
     assert props.is_in_training_window("2026-27", reg) is False
-    assert props.is_in_training_window("2026-27", None) is False
+    # A season that cannot be read cannot be shown to be out of sample.
+    for unreadable in (None, "not-a-season", float("nan")):
+        assert props.is_in_training_window(unreadable, reg) is True
+
+
+# A registry whose window is unknown: the key missing, None, or not a season
+# label. Each one used to read as "nothing is in sample" (fails open).
+UNKNOWN_WINDOW = {"no trained_through": {"model_version": "v"},
+                  "trained_through None": {"trained_through": None},
+                  "trained_through empty": {"trained_through": ""},
+                  "trained_through not a season": {"trained_through": "latest"},
+                  "trained_through inconsistent": {"trained_through": "2025-27"},
+                  "trained_through a bare year": {"trained_through": 2026},
+                  "no registry": None, "empty registry": {}}
+
+
+@pytest.mark.parametrize("case", list(UNKNOWN_WINDOW))
+def test_training_window_fails_closed_without_a_readable_trained_through(case):
+    with pytest.raises(ValueError, match="no readable trained_through"):
+        props.is_in_training_window("2026-27", UNKNOWN_WINDOW[case])
 
 
 def test_the_record_is_not_wired_into_any_public_page():
@@ -1837,6 +1856,30 @@ def test_season_record_drops_the_training_window():
     assert props.season_record([g])["decided"] == 50
 
 
+def _window_picks() -> pd.DataFrame:
+    """30 picks from 2025-26 (the shipped models trained on them) and 20 from
+    2026-27 (the first season they never saw)."""
+    return pd.DataFrame([{"outcome": "correct", "result": "More", "game_date": "2026-03-01"}] * 30
+                        + [{"outcome": "incorrect", "result": "Less", "game_date": "2026-11-01"}] * 10
+                        + [{"outcome": "correct", "result": "More", "game_date": "2026-11-02"}] * 10)
+
+
+def test_season_record_with_the_shipped_registry_keeps_only_2026_27():
+    from bucketlib import models
+    reg = models.read_registry()            # models/registry_v1.json, as the record reads it
+    assert reg["trained_through"] == "2025-26"
+    out = props.season_record([_window_picks()], registry=reg)
+    assert out["in_sample_dropped"] == 30 and out["decided"] == 20 and out["hits"] == 10
+
+
+@pytest.mark.parametrize("case", [c for c in UNKNOWN_WINDOW if UNKNOWN_WINDOW[c] is not None])
+def test_season_record_refuses_a_registry_without_a_readable_window(case):
+    """Without trained_through the 30 in-sample picks used to count: a 40-of-50
+    record that was 10 of 20 out of sample."""
+    with pytest.raises(ValueError, match="no readable trained_through"):
+        props.season_record([_window_picks()], registry=UNKNOWN_WINDOW[case])
+
+
 # ── Defect 13: Fantasy ties, and the board cap's silent drop ────────────────
 def test_a_fantasy_line_on_the_tenths_grid_can_tie_and_says_so(no_reliability):
     pmf = Pmf(np.round(np.arange(340, 371) / 10, 1), np.ones(31) / 31)
@@ -1858,3 +1901,16 @@ def test_the_board_cap_counts_what_it_drops(monkeypatch, roster, schedule):
     assert report["on_board"] == 3 and report["dropped_by_cap"] == 2
     msgs = " ".join(t for _k, t in props_ui.report_messages({**report, "view_date": NEXT}))
     assert "limit of 3 lines" in msgs and "2 oldest" in msgs
+
+
+def test_combo_inherits_the_lowest_edge_within_its_worst_tier():
+    """PRA, P+R... inherit their WEAKEST component. Within the worst tier that
+    is the lowest measured edge, not the first row in table order (which is
+    the highest): PRA must name Assists (moderate, lowest edge), not Rebounds."""
+    tbl = props.reliability_table()
+    for combo, parts in (("pra", ("pra", "pts", "reb", "ast")), ("ra", ("ra", "reb", "ast"))):
+        rows = tbl[tbl["stat"].isin(parts)]
+        worst = max(rows["tier"], key=lambda t: props.TIER_ORDER.get(t, 3))
+        want = rows[rows["tier"] == worst]["side_edge_pts"].min()
+        got = props.reliability_for(combo)
+        assert got["tier"] == worst and got["edge"] == want, (combo, got)

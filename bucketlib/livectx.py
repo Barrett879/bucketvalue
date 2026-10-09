@@ -118,12 +118,16 @@ def build_context(rows: pd.DataFrame, inj_players: pd.DataFrame, inj_teams: pd.D
         out = out.merge(ip[["game_id", "person_id", "status", "reason_cat"]].rename(
             columns={"status": "_st", "reason_cat": "_rc"}), on=["game_id", "person_id"], how="left")
     else:
-        out["_st"], out["_rc"] = np.nan, np.nan
+        # Object dtype: a mark-out below writes strings into them, which a
+        # float NaN column refuses (FutureWarning in pandas 2, an error in 3).
+        out["_st"] = pd.Series(np.nan, index=out.index, dtype=object)
+        out["_rc"] = pd.Series(np.nan, index=out.index, dtype=object)
     tstate = inj_teams[["game_id", "team", "state", "report_ts_et", "cutoff_utc"]].drop_duplicates(
         ["game_id", "team"], keep="last")
     out = out.merge(tstate, on=["game_id", "team"], how="left")
 
     if marked_out:
+        out["state"] = out["state"].astype(object)      # all-NaN (float) when no team rows matched
         mk = out["person_id"].isin(marked_out)
         out.loc[mk, "_st"] = "Out"
         out.loc[mk, "_rc"] = "injury_illness"

@@ -1,6 +1,7 @@
 """Injury/teammate context: hand-built teams with known answers."""
 import numpy as np
 import pandas as pd
+import pytest
 
 from bucketlib import livectx as L
 
@@ -52,6 +53,30 @@ def test_mark_out_is_status_out_at_age_zero():
     assert c.loc[4, "tm_out_min"] == 40.0          # 1 (30) + 3 (10)
     # marking out conserves the team's expected minutes among the rest
     assert c.loc[2, "tm_out_min"] == 40.0
+
+
+NO_ROWS = pd.DataFrame({"game_id": pd.Series(dtype=object), "team": pd.Series(dtype=object),
+                        "person_id": pd.Series(dtype=float), "status": pd.Series(dtype=object),
+                        "reason_cat": pd.Series(dtype=object)})
+
+
+@pytest.mark.filterwarnings("error")
+def test_mark_out_with_no_injury_rows_writes_strings_into_object_columns():
+    """No report filed (every team no_report, no player rows) and a visitor
+    mark-out: the status and reason columns started as float NaN and took
+    'Out' / 'injury_illness' (pandas FutureWarning now, an error in pandas 3).
+    Run with warnings as errors; the encoding must equal a reported Out."""
+    t = pd.DataFrame({"game_id": ["g", "g"], "team": ["AAA", "BBB"], "state": ["no_report"] * 2,
+                      "report_ts_et": [pd.NaT] * 2, "cutoff_utc": [CUT] * 2})
+    c = L.build_context(rows(), NO_ROWS, t, marked_out={3}).set_index("person_id")
+    assert c.loc[3, "inj_out"] == 1 and c.loc[3, "inj_reason_injury"] == 1
+    assert c.loc[3, "report_age_h"] == 0.0 and c.loc[3, "inj_unknown"] == 0
+    assert c.loc[1, "tm_out_min"] == 10.0 and c.loc[1, "inj_unknown"] == 1
+    assert (c[[f"inj_{s.lower()}" for s in L.STATUSES]].drop(index=3) == 0).all().all()
+    # No team rows at all (state merges in all-NaN): the mark-out still encodes.
+    none = t.iloc[:0].astype({"state": float})
+    c = L.build_context(rows(), NO_ROWS, none, marked_out={3}).set_index("person_id")
+    assert c.loc[3, "inj_out"] == 1 and c.loc[5, "inj_unknown"] == 1
 
 
 def test_resolve_names_scoped_to_game_roster():

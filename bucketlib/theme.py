@@ -12,7 +12,9 @@ dash permitted in a string literal; it renders in cells for missing values.
 """
 from __future__ import annotations
 
-from .util import today_et
+from urllib.parse import urlencode
+
+from .util import esc, today_et
 
 import streamlit as st
 
@@ -487,6 +489,9 @@ COMMON_CSS = """
         color: var(--fg-5); line-height: 1.35; white-space: nowrap;
     }
     .bv-slate-tag.live { color: var(--value-bad); border-color: var(--value-bad); }
+    /* A card with both the line-count pill and a status tag: the pill keeps
+       the top-left, the tag moves to the top-right (they used to overlap). */
+    .bv-slate-lines ~ .bv-slate-tag { left: auto; right: 7px; }
     .bv-slate-tag.final { color: var(--fg-4); }
 
     /* ── Game page ───────────────────────────────────────────────────────── */
@@ -784,6 +789,61 @@ COMMON_CSS = """
     .bv-st.prob { background: var(--tint-good); color: var(--value-good); }
     .bv-st.gl  { background: var(--hairline); color: var(--fg-4); }
     .bv-st.tw  { border: 1px solid var(--panel-line); color: var(--fg-5); }
+    .bv-st.avail { background: var(--tint-good); color: var(--fg-4); }
+    /* Report not filed / no report yet: unknown, drawn on every row. */
+    .bv-st.unk { border: 1px dashed var(--amber); color: var(--amber); cursor: help; }
+
+    /* Projected tables: "Average / Median if he plays" over the numbers, the
+       P(play) column, the collapsed deep bench, the Out reason. */
+    .bv-pt tr.hgrp th { font-size: 0.54rem; letter-spacing: 0.1em; color: var(--fg-5);
+        text-align: center; padding: 0.4rem 0.45rem 0.12rem; border-bottom: none; }
+    .bv-pt tr.hgrp th.avg { text-align: right; }
+    .bv-pt tr.hgrp th.ifp { border-bottom: 1px solid var(--hairline); }
+    .bv-pt td.pp { color: var(--amber); font-weight: 600; font-size: 0.76rem; }
+    .bv-pt td.reason { color: var(--fg-5); font-size: 0.74rem; font-style: italic;
+        white-space: normal; }
+    .bv-pt table.bv-pt-out { border-top: 1px solid var(--hairline); }
+    .bv-pt-cap .bv-chip { margin-left: 0.2rem; }
+    details.bv-deep { border-top: 1px solid var(--hairline); }
+    details.bv-deep > summary { cursor: pointer; padding: 0.5rem 0.9rem;
+        font-family: 'Space Grotesk', sans-serif; font-size: 0.6rem; font-weight: 600;
+        letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-4); }
+    details.bv-deep > summary:hover { color: var(--accent-teal); }
+    details.bv-deep[open] > summary { border-bottom: 1px solid var(--hairline); }
+    @media (max-width: 760px) {
+        .bv-pt { overflow-x: auto; }
+        .bv-pt table { min-width: 46rem; }
+    }
+
+    /* Mark-outs: the visitor's own numbers, never the published ones. */
+    .bv-adjust { background: var(--panel); border: 1px solid var(--accent-teal);
+        border-left: 3px solid var(--accent-teal); border-radius: 10px;
+        padding: 0.75rem 1.05rem; margin: 0.6rem 0 0.9rem; color: var(--fg-3);
+        font-size: 0.86rem; line-height: 1.5; }
+    .bv-adjust b { color: var(--fg-1); font-weight: 700; }
+
+    /* About: the trust table, generated from data/stat_reliability.csv */
+    .bv-trust { border: 1px solid var(--panel-line); border-radius: 12px; overflow: hidden;
+        background: var(--panel); box-shadow: var(--shadow-card); margin: 0.6rem 0 0.8rem;
+        font-variant-numeric: tabular-nums; }
+    .bv-trust table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .bv-trust th { font-family: 'Space Grotesk', sans-serif; font-weight: 600;
+        font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--fg-5); text-align: right; padding: 0.45rem 0.6rem;
+        border-bottom: 1px solid var(--hairline); }
+    .bv-trust td { padding: 0.42rem 0.6rem; font-size: 0.82rem; color: var(--fg-2);
+        text-align: right; border-bottom: 1px solid var(--hairline-soft); }
+    .bv-trust th.l, .bv-trust td.l { text-align: left; }
+    .bv-trust td.pl { color: var(--fg-1); font-weight: 600; }
+    .bv-trust td.basis { color: var(--fg-4); font-size: 0.76rem; }
+    .bv-trust tr:nth-child(even) td { background: var(--row-tint); }
+    .bv-trust tr.grp td { font-family: 'Space Grotesk', sans-serif; font-size: 0.58rem;
+        letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-5);
+        background: transparent !important; padding-top: 0.7rem; }
+    @media (max-width: 760px) {
+        .bv-trust { overflow-x: auto; }
+        .bv-trust table { min-width: 34rem; }
+    }
 
     /* Notices: a quiet panel for "no games" / "data not published yet" states.
        Never let an empty result render as silence; say why it is empty. */
@@ -872,9 +932,11 @@ def render_nav(current: str, keep: dict[str, str] | None = None) -> None:
     each Streamlit page navigation is a fresh session and a bare href would
     reset it.
     """
-    parts = [f"{k}={v}" for k, v in (keep or {}).items() if v not in (None, "")]
-    parts.append("theme=" + ("dark" if st.session_state.get("theme_dark") else "light"))
-    qs = "?" + "&".join(parts)
+    # Encoded and escaped here, so a caller that forgets to validate a value
+    # cannot break out of the href (commas stay readable for ?out=).
+    params = {k: v for k, v in (keep or {}).items() if v not in (None, "")}
+    params["theme"] = "dark" if st.session_state.get("theme_dark") else "light"
+    qs = esc("?" + urlencode(params, safe=",-:"))
 
     home_cls = "active" if current == "Home" else ""
     links = (f'<a class="home-link {home_cls}" href="/{qs}" '

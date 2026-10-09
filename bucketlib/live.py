@@ -27,6 +27,7 @@ from . import cache as C
 from . import context as CTX
 from . import horizons as HZ
 from . import http as H
+from . import state as S
 from .sources import cdn, espn
 from .sources import injury as INJ
 from .util import now_et, now_utc, to_et
@@ -86,8 +87,11 @@ def _cached(key: str, ttl: float, fail_ttl: float, fn: Callable[[], Any],
 
 
 def _committed_parquet(name: str):
+    """The bot's committed copy, state/current/{name}_v1.parquet. The path is
+    resolved through bucketlib.state at call time (state owns every path
+    under state/, and a test that points STATE_DIR elsewhere moves it too)."""
     def load():
-        p = C.CACHE_DIR / name
+        p = S.current_path(name)
         df = C.read_parquet(p)
         return (df, C.read_parquet_meta(p).get("fetched_at")) if df is not None else (None, None)
     return load
@@ -99,14 +103,14 @@ def schedule() -> Live:
     change through the night, and the post-Cup games get added mid-season."""
     return _cached("schedule", 600, 90,
                    lambda: cdn.parse_schedule(H.fetch(cdn.SCHEDULE_URL, timeout=TIMEOUT, retries=0)),
-                   _committed_parquet("schedule_current_v1.parquet"))
+                   _committed_parquet("schedule"))
 
 
 def roster() -> Live:
     """Current rostered players with the two-way flag. TTL 1 hour."""
     return _cached("roster", 3600, 120,
                    lambda: cdn.parse_player_index(H.fetch(cdn.PLAYER_INDEX_URL, timeout=TIMEOUT, retries=0)),
-                   _committed_parquet("roster_current_v1.parquet"))
+                   _committed_parquet("roster"))
 
 
 def games_on(sched: pd.DataFrame, date) -> pd.DataFrame:

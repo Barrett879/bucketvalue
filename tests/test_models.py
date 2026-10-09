@@ -262,8 +262,9 @@ def test_loaded_models_predict_exactly_what_the_fitted_ones_do(fitted, saved, ta
 
 
 def test_predict_is_the_estimators_own_output(fitted, table):
-    """predict() adds nothing to the estimators but the gated clip and the
-    E[stat | plays] = mu_min x rate composition (p_play is NOT multiplied in)."""
+    """predict() adds nothing to the estimators but the gated clip, the
+    FG3A <= FGA cap and the E[stat | plays] = mu_min x rate composition (p_play
+    is NOT multiplied in)."""
     rows = table[1]
     X = rows[fitted.features]
     out = M.predict(fitted, rows)
@@ -271,7 +272,10 @@ def test_predict_is_the_estimators_own_output(fitted, table):
     np.testing.assert_array_equal(out["p_play"], fitted.availability.predict_proba(X)[:, 1])
     np.testing.assert_array_equal(out["mu_min"], np.clip(fitted.minutes.predict(X), 0, 53))
     for s in CONTRACT_STATS:
-        np.testing.assert_array_equal(out[f"rate_{s}"], fitted.rates[s].predict(X))
+        raw = fitted.rates[s].predict(X)
+        if s == "fg3a":
+            raw = np.minimum(raw, fitted.rates["fga"].predict(X))
+        np.testing.assert_array_equal(out[f"rate_{s}"], raw)
         np.testing.assert_array_equal(out[s], out["mu_min"] * out[f"rate_{s}"])
     assert out["p_play"].between(0, 1).all() and out["p_play"].nunique() > 10
 
@@ -284,6 +288,29 @@ def test_mu_min_is_clipped_to_the_gated_range(fitted, table):
     out = M.predict(m, table[1].head(3))
     assert out["mu_min"].tolist() == [0.0, 53.0, 20.0]
     assert out["pts"].iloc[0] == 0.0
+
+
+def test_fg3a_rate_is_capped_at_the_fga_rate(fitted, table):
+    """A three is a field-goal attempt. The two rate models are fit apart, so a
+    raw fg3a rate above the fga rate made FG2A negative and the simulator's
+    FG3A share clip to 1 (14 played rows of the real table). predict() caps
+    the rate and builds the fg3a mean from the capped rate; rows at or below
+    the fga rate are untouched."""
+    rows = table[1].head(300)
+    X = rows[fitted.features]
+    fga = fitted.rates["fga"].predict(X)
+    factor = np.resize([0.5, 1.0, 1.5, 3.0], len(X))
+
+    class Fixed:
+        def predict(self, X_):
+            return fga * factor
+    m = dataclasses.replace(fitted, rates={**fitted.rates, "fg3a": Fixed()})
+    out = M.predict(m, rows)
+    np.testing.assert_array_equal(out["rate_fg3a"], np.minimum(fga * factor, fga))
+    np.testing.assert_array_equal(out["fg3a"], out["mu_min"] * out["rate_fg3a"])
+    assert (out["fg3a"] <= out["fga"]).all() and (out["fga"] - out["fg3a"] >= 0).all()
+    np.testing.assert_array_equal(out["rate_fg3a"].to_numpy()[factor < 1], (fga * factor)[factor < 1])
+    np.testing.assert_array_equal(out["rate_fga"], fga)          # the cap moves fg3a only
 
 
 def test_predict_accepts_extra_columns_any_order_and_keeps_the_index(fitted, table):
@@ -604,6 +631,22 @@ def test_shipped_models_predict_real_rows_sanely(real):
     assert abs(out["p_play"].mean() - played.mean()) < 0.05
     assert abs(out.loc[played, "mu_min"].mean() - rs.loc[played, "min"].mean()) < 2.0
     assert abs(out.loc[played, "pts"].mean() - rs.loc[played, "pts"].mean()) < 1.5
+
+
+def test_shipped_models_never_project_more_threes_than_shots():
+    """Every row of the real table: the shipped fg3a and fga rate models
+    disagree on some rows (21 measured 2026-10-09), and predict() still never
+    serves an FG3A rate or mean above FGA's."""
+    table_or_skip()
+    m = M.load()
+    rows = pd.read_parquet(TABLE, columns=m.features)
+    X = M.feature_matrix(m, rows)
+    raw_over = m.rates["fg3a"].predict(X) > m.rates["fga"].predict(X)
+    assert raw_over.sum() > 0, "no raw disagreement left: this test measures nothing"
+    out = M.predict(m, rows)
+    assert (out["rate_fg3a"] <= out["rate_fga"]).all() and (out["fg3a"] <= out["fga"]).all()
+    np.testing.assert_array_equal(out["rate_fg3a"].to_numpy()[raw_over],
+                                  out["rate_fga"].to_numpy()[raw_over])
 
 
 def test_shipped_null_check_passes_real_slates_and_catches_serve_skews(real):

@@ -2,7 +2,11 @@
 
 Pick a date, see every game grouped by tip time, open one for its page. The
 schedule and rosters come from cdn.nba.com through bucketlib.live (short budget,
-circuit breaker, stale-beats-empty with a visible notice).
+circuit breaker, stale-beats-empty with a visible notice). Projections come
+from store.load_projections, the same cached frame the Game page reads, so a
+card's line-count pill (SHOWN rows of the board only) equals the count on that
+game's page, and "Model vs the board" uses the same simulator provider as the
+Game tables.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bucketlib import live, props, props_ui, store  # noqa: E402
+from bucketlib import live, pipeline, props, props_ui, store  # noqa: E402
 from bucketlib.theme import SITE_NAME, render_footer, render_nav, render_page_chrome  # noqa: E402
 from bucketlib.util import esc, today_et  # noqa: E402
 
@@ -65,8 +69,13 @@ def _jump(d: dt.date):
 
 view = st.session_state["view_date"]
 if st.query_params.get("date") != view.isoformat():
+    if st.query_params.get("date") is not None and "out" in st.query_params:
+        # Mark-outs belong to the date they were made on: stepping the date
+        # drops them rather than marking the same players out tomorrow.
+        del st.query_params["out"]
     st.query_params["date"] = view.isoformat()
     st.session_state["_url_date_seen"] = view.isoformat()
+MARKS = store.parse_out(st.query_params.get("out"))
 
 try:
     ROSTER = live.roster().value
@@ -75,15 +84,16 @@ except RuntimeError:
 # Every internal link is a full page load (a new Streamlit session), so a
 # visitor's pasted board travels as ?board=<token> on every minted URL.
 TOKEN = props_ui.board_token()
-keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light", **props_ui.keep_params(TOKEN)}
-render_nav("Home", keep={"date": view.isoformat(), **props_ui.keep_params(TOKEN)})
+keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
+        **store.view_params(TOKEN, MARKS)}
+render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS)})
 if ROSTER is not None:
     # Board text carries no dates: lines route to each player's game today or
     # tomorrow (all PrizePicks posts), plus the date on screen. Tipped games are
     # never a destination, so a past date on screen adds nothing.
     _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), view})
     TOKEN = props_ui.render_update_lines_popover(view, SCHED, ROSTER, dates=_route_dates) or TOKEN
-    keep.update(props_ui.keep_params(TOKEN))
+    keep.update(store.view_params(TOKEN, MARKS))
 
 # ── Date bar ─────────────────────────────────────────────────────────────────
 today = today_et()
@@ -114,15 +124,53 @@ games = live.games_on(SCHED, view)
 nba = games[games["game_type"].isin(["RS", "PI", "PO", "CUP_FINAL"])] if len(games) else games
 pre = games[games["game_type"] == "PRE"] if len(games) else games
 
+# One cached frame per (date, report, lines, mark-outs): the Game page reads
+# the same one, so the cards, the board and the tables cannot disagree.
+served = store.load_projections(view, MARKS) if store.projected_ids(SCHED, view) else None
+FRAME = served.frame if served is not None else None
+BOARD = None
+if TOKEN and FRAME is not None and len(FRAME):
+    try:
+        _params = store.sim_params()
+    except (OSError, ValueError, KeyError):
+        _params = None
+    BOARD = props_ui.date_board(TOKEN, view, FRAME, _params, ROSTER)
+
 _odds_for_mast = live.odds_on(view).value if len(nba) else {}
-st.markdown(store.render_masthead(view, nba, len(_odds_for_mast)), unsafe_allow_html=True)
+_inj_note = ""
+_inj = store.injury_fact(FRAME, served.info) if FRAME is not None and len(FRAME) else None
+if _inj:
+    _inj_note = f"Injury report: {_inj[0]}{f' ({esc(_inj[1])})' if _inj[1] else ''}."
+st.markdown(store.render_masthead(view, nba, len(_odds_for_mast), injury_note=_inj_note,
+                                  reports=store.reports_filed(FRAME)), unsafe_allow_html=True)
 
 if len(nba):
     states = {r["game_id"]: live.game_state(r) for _, r in nba.iterrows()}
     odds = live.odds_on(view)
     by_game = {r["game_id"]: odds.value.get((r["away"], r["home"])) for _, r in nba.iterrows()}
-    st.markdown(store.render_slate(nba, view, keep, odds_by_game=by_game, states=states),
+    if served is not None and FRAME.empty:
+        if served.info.withheld and served.info.reason is None:
+            st.markdown(store.render_notice(
+                f"<b>{esc(pipeline.NO_LINE)}.</b> The models were trained with the spread and "
+                "total, so a game is projected once both are posted."), unsafe_allow_html=True)
+        else:
+            st.markdown(store.render_notice(
+                "<b>Projections not published yet for this date.</b> The bot publishes them "
+                "once the history features, the injury report and the lines are in."),
                 unsafe_allow_html=True)
+    elif served is not None:
+        if served.applied:
+            # Counted from the rows the live layer marked out: a mark on a
+            # tipped game or on the committed stand-in moved nothing.
+            _clear = store.page_url("/", {k: v for k, v in keep.items() if k != "out"},
+                                    date=view.isoformat())
+            st.markdown(store.adjusted_banner(len(served.applied), _clear), unsafe_allow_html=True)
+        for block in store.projection_notes(served, today=today):
+            st.markdown(block, unsafe_allow_html=True)
+    st.markdown(store.render_slate(
+        nba, view, keep, odds_by_game=by_game, states=states,
+        line_counts=props_ui.line_counts_by_game(BOARD.shown) if BOARD is not None else None,
+        subs=store.card_subs(served)), unsafe_allow_html=True)
     if odds.stale and odds.source == "none":
         st.markdown(store.render_notice(
             "<b>Game lines are unavailable right now.</b> The ESPN feed did not answer, "
@@ -143,15 +191,20 @@ else:
     st.markdown(store.render_notice(f"<b>No NBA games on {view.strftime('%A, %B %-d')}.</b>{nxt}"),
                 unsafe_allow_html=True)
 
-# ── Pasted lines (projections not shipped yet) ─────────────────────────────
-if TOKEN:
+# ── Model vs the board (only when the visitor pasted lines for this date) ────
+if BOARD is not None:
+    _labels = {str(r["game_id"]): f"{r['away']} at {r['home']}" for _, r in nba.iterrows()}
+    props_ui.render_board(BOARD.shown, BOARD.hidden, BOARD.thin, BOARD.void,
+                          scope_label=view.strftime("%B %-d"), meta=BOARD.meta,
+                          game_labels=_labels)
+elif TOKEN:
     board = props.get_board(TOKEN)
     todays = props.lines_for_date(board, view) if board is not None else None
     n = 0 if todays is None else len(todays)
     if n:
         st.markdown(store.render_notice(
             f"<b>{n} PrizePicks lines saved for {view.strftime('%B %-d')}.</b> The model "
-            "comparison appears here once projections ship; your board stays attached to "
-            "this link until then."), unsafe_allow_html=True)
+            "comparison appears here once projections are published for this date; your "
+            "board stays attached to this link until then."), unsafe_allow_html=True)
 
 render_footer()

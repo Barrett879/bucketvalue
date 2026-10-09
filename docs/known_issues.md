@@ -45,3 +45,72 @@ against the code on 2026-10-09; items fixed since are removed, not struck.
   from the 2016-17 allow-list (lines still computed from the other books).
 - names: the prefix fallback can bind 'Jay Williams' to Jaylin Williams when
   the index is built without teams; build per-team indexes (livectx does).
+
+## Open: serving build 1 follow-ups (2026-10-09)
+Found by the build 1 verifiers and the cross-module fix pass that followed.
+- Simulator FTA is always EVEN. dist.simulate draws free-throw TRIPS and sets
+  FTA = 2 x trips (no and-ones, no technicals, no three-shot fouls), so an odd
+  FTA has zero probability and FTM inherits the gaps. Until and-ones are
+  modelled AND scripts/prob_gate.py covers them, FTA, FTM, FGM, FGA, FG3A,
+  FG2M, FG2A, OREB, DREB and PF are served from the LABELLED baseline
+  (props.MeanDispersionProvider, source "baseline", tier unmeasured;
+  simprov.BASELINE). The gated PTS (and every combo with PTS) is drawn from
+  the same even FTA; the probabilistic gate measured it that way and it passed.
+- FG3A share of 1. models.predict now caps rate_fg3a at rate_fga (the raw
+  models disagreed on 21 rows of the training table, 14 of them played). At
+  the cap the FG3A share is exactly 1, so those rows still draw NO two-point
+  attempts, and the gated PTS distribution for such a player is built from
+  threes and free throws only, then re-centred. The FG3A mean is no longer
+  above the FGA mean, but the composed FG2A mean (FGA - FG3A) is now exactly
+  0 where it used to be negative.
+  MUST FIX BEFORE THE CAP SHIPS (simprov, not yet done on 2026-10-09):
+  simprov._degenerate refuses FG2M, FG2A and FGM only inside price(), which
+  runs on the GATED stats. All three are BASELINE stats: SimProvider.pmf
+  sends them to props.MeanDispersionProvider and never through _degenerate.
+  A negative FG2A mean was refused there (recentre cannot reach it), but a
+  zero mean prices as the point mass at zero. On all 21 capped training rows
+  FG2A went from refused to a point mass at 0: a certain Less (q_less = 1) on
+  every 2-PT Attempted line and a Game-table median of 0. In 5 of the 14
+  played rows the player did attempt a two. The fix is to refuse FG2A on the
+  baseline path when the row's FG3A share clips (FG2M and FGM keep positive
+  means and ordinary baseline pmfs, which tests/test_simprov.py already
+  pins), with a test that a capped row's 2-PT Attempted line is unprojected.
+  A share below 1 (from the player's own history, or a cap under 1) is a
+  model decision for dist/simprov, not made here.
+- docs/model_report_full_v1.csv was produced with DUPLICATED feature columns:
+  scripts/validate_full.py appended livectx.CTX_COLS to a feature list that
+  already held them, so its models saw 215 columns (193 unique; the 22 context
+  columns twice). The script is fixed; the report was NOT rerun (hours). The
+  ship gate (scripts/train_eval.py, docs/gate_*.csv) and production
+  (models.train, models/registry_v1.json) used the correct 193. The
+  published AVAILABILITY numbers come from that duplicated-column run:
+  docs/model_report.md lines 57-60 (the log losses by horizon and the
+  0.98-1.02 sum of P(play), section "v1, full features (2026-10-09): THE
+  GATE") are read from docs/model_report_full_v1.csv. scripts/validate_full.py
+  is the only writer of availability log loss; no gate artifact and neither
+  scripts/train_eval.py nor scripts/gate.py measures it. Treat those numbers
+  as unconfirmed until scripts/validate_full.py is rerun.
+- iCloud eviction. The repo lives on the iCloud-synced Desktop, on a disk at
+  97% (15 GiB free of 460 on 2026-10-09), and macOS evicted files mid-session:
+  cache/train_table_full_v1.parquet and packages under .venv. An evicted file
+  still exists() but reads as corrupt ("magic bytes", ArrowInvalid) or fails
+  to import. Touch-read it (cat FILE > /dev/null) before concluding anything.
+  tests/test_models.py SKIPS (does not fail) its table tests on an unreadable
+  table, so a green run can hide an eviction: read the skip count. The fix is
+  to free disk or move the repo out of the synced Desktop.
+- The seed serves ONE season. state/seed was built for 2026-27; for 2027-28
+  state.history raises SeedMismatch ("rebuild the seed") because its priors
+  need the 2026-27 logs. Rebuilding (scripts/build_serving_seed.py --serves
+  2027-28) runs LOCALLY on complete 2026-27 participation and log tables from
+  the stats.nba.com backfill, which the bot cannot reach. Schedule it between
+  the 2026-27 Finals and the 2027-28 opener, or the bot stops projecting.
+- The props record: props.is_in_training_window now RAISES on a registry
+  without a readable trained_through (it used to count every season as out of
+  sample). season_record(graded) with NO registry still returns the
+  unfiltered record by design; the local Accuracy page must always pass
+  models.read_registry().
+- scripts/build_train_table.py now takes its inputs from state.seed_inputs
+  (one assembly for training and the seed; proven frame-identical to the old
+  code on 2026-10-09). The per-season "phantoms / zero-second" diagnostic it
+  printed is gone (pd.concat drops the per-season attrs inside seed_inputs);
+  it now prints roster rows per season.

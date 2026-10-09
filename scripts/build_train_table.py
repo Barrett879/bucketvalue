@@ -33,7 +33,7 @@ from bucketlib import cache as C  # noqa: E402
 from bucketlib import features as F  # noqa: E402
 from bucketlib import horizons as HZ  # noqa: E402
 from bucketlib import livectx as L  # noqa: E402
-from bucketlib import tables  # noqa: E402
+from bucketlib import state as S  # noqa: E402
 from bucketlib import train as T  # noqa: E402
 
 OUT = C.CACHE_DIR / "train_table_full_v1.parquet"
@@ -53,29 +53,20 @@ def main() -> int:
     args = ap.parse_args()
     t0 = time.time()
     part_seasons = T.seasons(args.first, args.last)
-    warm_seasons = [s for s in T.seasons(args.warmup_from, args.last) if s not in part_seasons]
 
-    logs = T.load_table("player_games", T.seasons("2011-12", args.last))
-    sched = T.load_table("schedule", T.seasons(args.warmup_from, "2026-27"))
-    tg = T.load_table("team_games", T.seasons(args.warmup_from, args.last))
-    tg = tg[tg["season_type"].isin(["RS", "PI"])].copy()
-    tg["game_date"] = pd.to_datetime(tg["game_date"])
-
-    rgs = []
-    for s in part_seasons:
-        rg = tables.roster_games(s, require_complete=True)
-        print(f"{s}: {len(rg)} roster rows, phantoms {len(rg.attrs['phantom_log_rows'])}, "
-              f"zero-second {len(rg.attrs['zero_second_appearances'])}")
-        rgs.append(rg)
-    rg = pd.concat(rgs, ignore_index=True)
-    ev_part = F.events_from_roster_games(rg)
-    ev_part["game_date"] = pd.to_datetime(ev_part["game_date"])
-    ev_warm = T.logs_events(logs[logs["season"].isin(warm_seasons)], sched)
-    ev = pd.concat([ev_warm, ev_part], ignore_index=True)
+    # The history, assembled ONCE for training and the committed serving seed
+    # (state.seed_inputs): log-only warm-up events, then participation events
+    # through tables.roster_games; RS + PI team games; priors over every log
+    # season since 2011-12; schedule dates (schedule loaded through 2026-27);
+    # every name spelling. The serving seed is this same history.
+    hist = S.seed_inputs(args.last, part_first=args.first, warmup_from=args.warmup_from,
+                         schedule_through="2026-27")
+    rg, ev = hist["roster_games"], hist["events"]
+    warm_seasons = sorted(set(ev["season"]) - set(part_seasons))
+    print(rg.groupby("season").size().rename("roster rows").to_string())
 
     lines = T.load_table("game_lines", T.seasons(args.warmup_from, args.last))
-    pri = F.prior_seasons(logs)
-    df = F.build(ev, None, tg, T.schedule_dates(sched), pri,
+    df = F.build(ev, None, hist["team_games"], hist["schedule_dates"], hist["priors"],
                  lines=lines[["game_id", "home_line", "total"]])
     df = df[df["season"].isin(part_seasons)].copy()
     print(f"features {df.shape} ({time.time() - t0:.0f}s)")
@@ -84,8 +75,7 @@ def main() -> int:
     df["horizon"] = df["game_id"].map(horizon_of)
     roster = rg[["game_id", "team", "person_id", "player_name"]]
     # Every spelling each person id has carried, from both sources and all seasons.
-    known = pd.concat([rg[["person_id", "player_name"]],
-                       logs[["person_id", "player_name"]]], ignore_index=True).drop_duplicates()
+    known = hist["names"]
     ctx_parts = []
     for s in part_seasons:
         ip = C.read_parquet(C.CACHE_DIR / f"injury_horizons_{s}_v1.parquet")

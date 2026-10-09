@@ -83,7 +83,11 @@ def main() -> int:
     train_seasons = T.seasons(args.train_first, "2022-23")
     train = rs[rs["season"].isin(train_seasons)]
     folds = {"validate": rs[rs["season"] == VALIDATE], "test": rs[rs["season"] == TEST]}
-    feats = T.feature_columns(df) + [c for c in L.CTX_COLS if c in df.columns]
+    # feature_columns already holds the livectx context columns
+    # (train.CONTEXT_FEATURES). Appending them again fed every model 22
+    # duplicate columns (215 for 193); docs/model_report_full_v1.csv was
+    # written that way (docs/known_issues.md).
+    feats = T.feature_columns(df)
     print(f"{len(feats)} features; train rows {len(train)}")
     rows = []
 

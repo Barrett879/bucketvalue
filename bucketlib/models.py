@@ -438,7 +438,19 @@ def predict(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
     """Per row: p_play, mu_min (clipped 0..MAX_MIN), rate_<s>, and the
     E[stat | plays] means under plain stat names (mu_min x rate), plus the
     combos and Fantasy as sums of those means. Indexed like `rows`. It does
-    not check null fractions; serving calls check_nulls() on the same rows."""
+    not check null fractions; serving calls check_nulls() on the same rows.
+
+    rate_fg3a is capped at rate_fga (a three is a field-goal attempt), and the
+    fg3a mean is built from the capped rate. The two rate models are fit
+    separately and the raw fg3a rate came out above the fga rate on 21 rows of
+    the training table (14 played, measured 2026-10-09 with the v1 models),
+    where the means said FG2A < 0 and the FG3A distribution was re-centred
+    above the FGA one. The FG3A mean is now never above the FGA mean, but at
+    the cap the FG3A share is exactly 1 and the composed FG2A mean (FGA -
+    FG3A) is exactly 0. That zero is the cap, not a forecast of no twos, and
+    the simulator draws no twos for such a row: a consumer must not price
+    FG2A from it, nor FG2M or FGM from the simulator (docs/known_issues.md
+    says which consumers do so today)."""
     X = feature_matrix(models, rows)
     stats = models.stats
     if len(X) == 0:
@@ -448,6 +460,7 @@ def predict(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
            "mu_min": np.clip(models.minutes.predict(X), 0.0, MAX_MIN)}
     for s in stats:
         out[f"rate_{s}"] = models.rates[s].predict(X)
+    out["rate_fg3a"] = np.minimum(out["rate_fg3a"], out["rate_fga"])
     for s in stats:
         out[s] = out["mu_min"] * out[f"rate_{s}"]
     for c, parts in T.COMBOS.items():

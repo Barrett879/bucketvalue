@@ -464,6 +464,31 @@ def test_fg3a_above_fga_refuses_the_two_point_and_fg_made_draws(params):
     assert 0 < hi < 1 and lo > 0
 
 
+def test_a_capped_fg3a_never_serves_fg2a_as_a_certain_less(params):
+    """models.predict caps rate_fg3a at rate_fga, so a capped row ships an
+    FG2A mean of exactly 0, and the baseline prices a zero mean as the point
+    mass at zero: a certain Less on every 2-PT Attempted line, wrong the first
+    time he takes a two. The clipped share refuses FG2A on the baseline path
+    too; FG2M, FGM and the unclipped row keep the baseline."""
+    row = synth(fg3a=0.40, fga=0.40)
+    assert P.shipped_mean(row, "fg2a") == 0.0
+    frame = pd.DataFrame([row, synth(pid=2)])
+    prov = S.SimProvider(frame, params)
+    base = P.MeanDispersionProvider(frame)
+    assert prov.pmf(203999, GID, "fg2a") is None
+    assert base.pmf(203999, GID, "fg2a") is not None           # the baseline alone would price it
+    for s in ("fg2m", "fgm", "fga", "fg3a"):
+        assert _same(prov.pmf(203999, GID, s), base.pmf(203999, GID, s)), s
+    assert _same(prov.pmf(2, GID, "fg2a"), base.pmf(2, GID, "fg2a"))
+    med = prov.medians(["fg2a"]).set_index("person_id")["med_fg2a"]
+    assert math.isnan(med[203999]) and med[2] > 0
+    table, meta = P.compare(_lines([(203999, "2-PT Attempted", 0.5), (2, "2-PT Attempted", 4.5)]),
+                            prov, frame)
+    assert meta["matched"] == 1 and meta["unprojected"] == 1
+    assert list(table["person_id"]) == [2], table
+    assert meta["unprojected_why"] == {"no distribution for this stat": 1}
+
+
 def test_ftm_at_or_above_fta_refuses_the_even_only_ftm_draw(params):
     """pft clips to 1, so every simulated FTM equals FTA (2 x trips): an FTM
     pmf with no odd count whose MEAN still matches."""

@@ -185,3 +185,24 @@ generated from data/stat_reliability.csv.
   dist.py first). Build providers with `simprov.provider_for(...)` so the board
   and the Game tables share one simulation. A frame missing a required column
   raises `MissingColumns`.
+
+## 7. Amendments after build 2 (2026-10-09)
+
+- Projection frame: `adjusted` (row recomputed with the visitor's mark-outs)
+  joins section 3; `frozen` is always False in the bot's file and set by the
+  app. Files carry metadata `history` (the ingested games the features were
+  built from, so the app can tell stale features) and a per-game input hash
+  (`basis`) so a rerun with unchanged inputs leaves the file byte-identical.
+- Freeze point is tip minus 5 minutes (`pipeline.FREEZE_LEAD`); a provisional
+  row is never frozen, and a game that tips on provisional rows has no frozen
+  projection (the local record skips it).
+- No injury report at all: `pipeline.project` raises `NoReport`; nothing is
+  published (bot) and the app serves the committed projections.
+- Missing lines: WITHHELD ("Projections post when the line does"). Measured in
+  `scripts/measure_missing_lines.py`: overall cost under 1% RMSE, but up to
+  5.9% minutes bias for 10+ point favourites.
+- A team with fewer than 12 projected rows (`pipeline.MIN_TEAM_ROWS`, the
+  fewest in 19,112 training team-games) turns today's run RED.
+- Board voids come from the served frame only (`props_ui.void_ids`), so a
+  mark-out the pipeline did not apply (frozen game, stale fallback) never voids
+  a line the page still shows.

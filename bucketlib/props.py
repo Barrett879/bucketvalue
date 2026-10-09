@@ -1275,7 +1275,9 @@ def reliability_for(stat: str) -> dict:
         return {"tier": "unmeasured", "edge": None,
                 "note": str(rows.iloc[0].get("note") or "")}
     worst = max(rows["tier"].astype(str), key=lambda t: TIER_ORDER.get(t, 3))
-    hit = rows[rows["tier"].astype(str) == worst].iloc[0]
+    # Weakest WITHIN the worst tier too: the lowest measured edge (table order
+    # is highest first, so .iloc[0] named Rebounds for PRA when Assists is weaker).
+    hit = rows[rows["tier"].astype(str) == worst].sort_values("side_edge_pts", kind="mergesort").iloc[0]
     tier = worst if worst in TIER_ORDER else "unmeasured"
     return {"tier": tier, "edge": float(hit["side_edge_pts"]),
             "note": str(hit.get("note") or "")}
@@ -2009,7 +2011,9 @@ def season_record(graded: list[pd.DataFrame], registry: dict | None = None) -> d
     OUT OF SAMPLE ONLY when a model `registry` is given: picks from a season
     inside its training window are the model marking its own homework, so they
     are dropped and counted in 'in_sample_dropped'. A pick with no readable
-    game_date is dropped too, since it cannot be shown to be out of sample.
+    game_date is dropped too, since it cannot be shown to be out of sample. A
+    registry without a readable trained_through raises ValueError
+    (is_in_training_window): a record over an unknown window is not computed.
     """
     frames = [g for g in graded if g is not None and not g.empty]
     if not frames:
@@ -2048,13 +2052,26 @@ def season_record(graded: list[pd.DataFrame], registry: dict | None = None) -> d
 
 def is_in_training_window(season, registry: dict | None) -> bool:
     """True when `season` ('2025-26' or its end year 2026) is inside the
-    model's training window: grading it is the model marking its own homework."""
-    if not registry or registry.get("trained_through") is None:
-        return False
+    model's training window: grading it is the model marking its own homework.
 
-    def end_year(s) -> int:
-        return season_end_year(s) if isinstance(s, str) and "-" in s else int(s)
+    Fails CLOSED. A registry without a readable trained_through (missing, None,
+    not a season label; models.save always writes one) RAISES ValueError: the
+    window is unknown, so no pick can be shown to be out of sample. It used to
+    return False, which counted the model's own training seasons as out of
+    sample. It raises rather than returning True because True would empty the
+    record and file every pick under 'in_sample_dropped', a count that claims
+    a window nobody knows. A `season` that cannot be read is inside the window
+    (True), as season_record already treats a pick with no readable game_date.
+    """
+    through = registry.get("trained_through") if isinstance(registry, dict) else None
     try:
-        return end_year(season) <= end_year(registry["trained_through"])
+        last = season_end_year(through)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"model registry has no readable trained_through ({through!r}): the "
+                         "training window is unknown, so no pick can be shown to be out of "
+                         "sample (read it with models.read_registry)") from e
+    try:
+        year = season_end_year(season) if isinstance(season, str) and "-" in season else int(season)
     except (TypeError, ValueError):
-        return False
+        return True
+    return year <= last

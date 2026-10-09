@@ -1,0 +1,99 @@
+# The bot: scripts/daily_update.py refreshes state/ (schedule, rosters, final
+# box scores, the injury report, pregame odds) and publishes projections, then
+# commits ONLY state/. docs/serving_design.md section 4.
+#
+# Manual runs only for now. The schedule below is written and commented out:
+# enable at the deploy STOP (a private repo spends Actions minutes).
+# Dense off-minute crons (:17 and :47, 13:00-06:47 UTC = 9 AM to 2:47 AM EDT,
+# 8 AM to 1:47 AM EST); the cadence logic lives in Python, which derives the
+# ET date every run (cron starts were measured hours late on DiamondValue).
+name: daily-update
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "ET date to treat as today (YYYY-MM-DD; empty = now)"
+        required: false
+        default: ""
+  # schedule:
+  #   - cron: "17,47 13-23 * * *"
+  #   - cron: "17,47 0-6 * * *"
+permissions:
+  contents: write
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python version from runtime.txt
+        id: py
+        run: echo "version=$(sed -e 's/^python-//' runtime.txt | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.py.outputs.version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Tests (the local-cache tests skip here)
+        run: python -m pytest -q
+      - name: Bot
+        id: bot
+        env:
+          DATE_INPUT: ${{ inputs.date }}
+        run: |
+          if [ -n "$DATE_INPUT" ]; then
+            python scripts/daily_update.py --date "$DATE_INPUT"
+          else
+            python scripts/daily_update.py
+          fi
+        # A RED run still commits what it did write (stale beats empty), then
+        # the job fails at the end.
+        continue-on-error: true
+      - name: App smoke render (AppTest) on the new state
+        run: python -m pytest -q tests/test_pages_smoke.py
+      - name: Commit state/ only
+        run: |
+          # Anything changed outside state/, tracked, untracked or ignored
+          # (cache/ is ignored), fails the job: the bot writes ONLY state/.
+          # Each porcelain line is "XY path" (the path quoted when it holds a
+          # space), so every exclusion is anchored on the path right after
+          # the two status columns: state/ itself, and the interpreter's and
+          # pytest's caches at ANY depth (the Tests step leaves a root
+          # .pytest_cache/, the imports a __pycache__/ in every package).
+          other=$(git status --porcelain --untracked-files=all --ignored \
+                  | grep -v -E '^.. "?(state/|(.*/)?(__pycache__|\.pytest_cache)/)' || true)
+          if [ -n "$other" ]; then
+            echo "::error::the bot changed files outside state/:"
+            echo "$other"
+            exit 1
+          fi
+          git config user.name "BucketValue bot"
+          git config user.email "bucketvalue-bot@users.noreply.github.com"
+          git add -A state/
+          if git diff --cached --quiet; then
+            echo "state unchanged: nothing to commit"
+            exit 0
+          fi
+          git commit -m "Bot: state as of $(TZ=America/New_York date '+%Y-%m-%d %H:%M') ET"
+          branch="${GITHUB_REF_NAME}"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin "$branch" && git push origin "HEAD:$branch"; then
+              exit 0
+            fi
+            echo "push attempt $attempt failed; retrying"
+            sleep $((attempt * 15))
+          done
+          echo "::error::could not push state after 3 attempts"
+          exit 1
+      - name: Fail a RED run
+        if: steps.bot.outcome == 'failure'
+        run: |
+          echo "::error::the bot run was RED (see the Bot step)"
+          exit 1

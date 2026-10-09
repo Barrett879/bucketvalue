@@ -152,6 +152,7 @@ def bot_raw(tmp_path_factory, season_tables):
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(du, "cdn_box", _cached_cdn_box)
         mp.setattr(du, "season_dir", season_dir)
+        mp.setattr(S, "STATE_DIR", root)      # state.ingested_ids reads the same tree
         du.RED.clear()
         du.step_finals(bot_sched, last + dt.timedelta(days=1), dry=False)
         red = list(du.RED)
