@@ -61,6 +61,11 @@ def roster_games(season: str, require_complete: bool = True) -> pd.DataFrame:
     pg = _read("player_games", season)
 
     games = games.copy()
+    # The NBA Cup final (id prefix 006) is in participation but in NO season
+    # log; it counts only for rest/schedule features (taken from the schedule),
+    # never for player state, so it is not a roster-game here.
+    games = games[~games["game_id"].astype(str).str.startswith("006")]
+    part = part[~part["game_id"].astype(str).str.startswith("006")]
     games["game_type"] = games["season_type"].map(_TYPE)
     if games["game_type"].isna().any():
         raise ValueError(f"{season}: unknown season_type values "
