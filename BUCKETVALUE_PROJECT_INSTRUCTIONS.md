@@ -19,7 +19,7 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 | PrizePicks | INLINE on the board and game pages, never a tab. PASTE ONLY: no fetcher, ever (403 to servers and ToS 16(l) bars automation) | sibling precedent |
 | Repo | `Desktop/Claude/NBA Predict`, package `bucketlib/` | default |
 | Accuracy page | **LOCAL ONLY**: `pages/Accuracy.py` and its summary outputs are gitignored, never in the nav of the deployed site (DiamondValue precedent) | Barrett, 2026-10-08 |
-| GitHub repo | `Barrett879/bucketvalue`, created PRIVATE 2026-10-08 (approved by Barrett; public creation needs his explicit visibility call, and Streamlit only shares apps from public repos, so flip it at deploy) | Barrett, 2026-10-08 |
+| GitHub repo | `Barrett879/bucketvalue`, created PRIVATE 2026-10-08 (token has `workflow` scope, verified) (approved by Barrett; public creation needs his explicit visibility call, and Streamlit only shares apps from public repos, so flip it at deploy) | Barrett, 2026-10-08 |
 
 ## 1. Lessons that are rules here (each was a shipped bug on a sibling)
 
@@ -36,10 +36,18 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 4. **A leak replicates in every fold.** Two-stage gating catches mirages, not leaks.
    An implausibly large gain is the alarm. Leakage tests CALL PRODUCTION CODE; a test
    that reimplements the filter it checks tests the copy.
-5. **Train/serve parity raises.** Inference RAISES on a missing trained-on column and
-   on a trained-on column that is all-NaN at serve time. (GridironValue had four silent
-   skews; DiamondValue's `reindex` still fails open.) A gate-passing feature is not
-   shipped until it is retrained AND served.
+5. **Train/serve parity raises.** Inference RAISES on a missing trained-on column.
+   Null fractions are checked STRATIFIED: serve vs training null rates for rows in the
+   same games-into-season bucket (0 / 1-2 / 3-9 / 10+) and team-change flag, because on
+   opening night every current-season column is legitimately all-NaN and a blanket
+   "all-NaN raises" would either stop the site or breed an exemption list. Parity is
+   proven by a DATE-REPLAY test (inference rows built from data truncated before D equal
+   the training rows bit for bit, on: a season opener, first game after a trade, first
+   game back from a 10+ game absence, a B2B second leg, the day after the All-Star
+   break, the game after the Cup final, a postponed-game makeup) and a FUTURE-MUTATION
+   test (randomize every outcome dated on or after D; all features for date-D rows are
+   unchanged). (GridironValue had four silent skews; DiamondValue's `reindex` still
+   fails open.) A gate-passing feature is not shipped until it is retrained AND served.
 6. **Training-only sources are never features.** A source that does not exist at
    serve time (post-game participation, closing lines treated as known in the
    morning, post-game referee assignment) is simulated as absent in a parity test.
@@ -90,121 +98,229 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 | Headshots/logos | cdn.nba.com/headshots, /logos | serve | silhouette 200 for unknown ids, never 404 |
 
 Raw payloads are cached gzipped under `cache/raw/` and never committed. Historical
-lines are never committed either (provenance); only the current season's own
-pre-tip snapshots are, because next season's training needs them and the bot's
-runner is ephemeral.
+lines are never committed (provenance). The bot commits only the compact parsed
+context each published projection used (injury statuses, line snapshot, state
+stamp), never raw JSON or PDFs: ESPN core keeps pregame closes and ak-static keeps
+old PDFs, so next season can rebuild from source.
 
-Training window: 2014-15 .. 2025-26 regular season (+ play-in, flagged). Playoffs
-are stored but excluded from v1 training (rotations shorten; different estimand).
-2019-20 bubble games and the 72-game 2020-21 season are kept and flagged.
+**GAME_UNIVERSE** (one whitelist shared by backfill, bot and app): id prefix `002`
+regular season (training + state), `005` play-in (state, flagged), `004` playoffs
+(stored, excluded from v1 training), `001` preseason and `003` All-Star never enter
+state, `006` Cup final used ONLY for rest/schedule features (it is in no season log).
+Training window 2014-15..2025-26; LeagueGameLog 2011-12..2013-14 is pulled for
+priors only. 2019-20 bubble games and the 72-game 2020-21 season are kept and
+flagged. Serving features are computed from BOX COUNTS only (possessions, pace and
+usage derived from counts in both paths), because the cdn liveData box score the
+bot can reach has no pace/usage fields.
+
+**Times.** One tz-aware `tip_et` built from `gameDateTimeUTC`. Trap: the schedule's
+`gameDateTimeEst` is ET WALL CLOCK with a "Z" suffix, so parsing it as UTC is off by
+4-5 hours (921 of 1,207 2026-27 games have a UTC date different from the ET date).
+"Report time < tip" is a production assertion on every injury row. Historical team
+membership comes from each game's participation row, never from playerindex (which
+returns END-of-season state; 7.8% of 2025-26 rows had a different end-of-season
+team). Two-way status as of a date comes from the movement log or the report's
+"G League - Two-Way" reason.
 
 ## 3. Model
 
 ### 3.1 Targets
-Per player-game, conditional on playing: MIN, PTS, REB, AST, FG3M, STL, BLK, TOV,
-FGM, FGA, FG3A, FTM, FTA, OREB, DREB, PF. Derived from the same draws: PRA, P+R,
-P+A, R+A, Blks+Stls, two-pointers made/attempted, and Fantasy Score
-(PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK - TOV, which equals stats.nba.com
-FANTASY_PTS exactly). Overtime counts in full-game props.
+Per player-game, conditional on playing (row presence or seconds > 0, never MIN > 0;
+the played threshold is one constant, to be confirmed from a real paste): MIN, PTS,
+REB, AST, FG3M, STL, BLK, TOV, FGM, FGA, FG3A, FTM, FTA, OREB, DREB, PF. Composed from
+the same simulated draws: PRA, P+R, P+A, R+A, Blks+Stls, two-pointers made/attempted,
+Fantasy Score (PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK - TOV == stats.nba.com
+FANTASY_PTS exactly). Overtime counts.
 
-### 3.2 Structure (to be confirmed by the ship gate, not assumed)
-1. **Availability** P(plays at least one second) per rostered player-game: rows are
-   every player on the participation table (played + DNP + inactive). Features:
-   injury-report status and reason category as of the last report before tip
-   (2018-19+), games missed streak, days since last appearance, recent minutes,
-   back-to-back, age/workload, two-way and G League flags.
-2. **Minutes | plays**: short-memory minutes EWMA (half-life ~2 games beat
-   season-to-date, 6.44 vs 7.08 RMSE), starts share, games-back-from-absence by
-   absence length, minutes vacated by teammates ruled out pre-game, rotation depth,
-   |spread| and total, rest/B2B, prior-season MPG for cold start (prior worth only
-   ~1-4 games for minutes), age.
-3. **Per-minute rates** per stat, longer memory (half-life 5-20 games, Marcel-style
-   prior: 6/3/1 seasons with league-average ballast), usage vacated by absent
-   teammates, opponent allowed rates (shrunk), expected pace (team x opp / league),
-   implied team total, home (small).
-4. **E[stat | plays] = E[min | plays] x rate**, compared at the gate against a direct
-   per-stat model that takes predicted minutes as a feature (out-of-fold).
+### 3.2 The information horizon (design review, adopted)
+The product serves and freezes HOURS before tip (bot runs land a median 2-4h late;
+the record freezes at first paste, often the night before). So every injury and
+absence feature is defined AS OF A HORIZON h, never "at tip":
+- own status = the latest injury report with title time <= h; `report_age_min`;
+  a three-way encoding (listed with a status / team NOT YET SUBMITTED or no report
+  yet / no-report era before 2018-12) and a test that serving never emits the era
+  value;
+- teammate features = minutes of teammates listed Out, Doubtful, Questionable at h,
+  split by status, and NEWLY vacated minutes (out at h but played in the player's
+  last game) with the absentee's absence length, because ~70% of vacated rows
+  describe absences the player's own EWMA has already absorbed;
+- the inactive list and DNP outcomes are TARGETS only, never features;
+- rotation depth = rostered players not listed Out at h with an EWMA of 10+ minutes
+  (the post-game count of who appeared is a 6.8% leak that looks plausible);
+- training rows are built at sampled horizons from the PDF archive: 5:30pm ET the
+  day before, game-day late morning, and the last report before tip. The gate is
+  scored at the morning horizon; the tip horizon is reported separately.
+- lines: training on closes, so validation runs twice (close vs open, where open
+  exists: 2014-17 and per book 2023-24+) and reports the gap. A missing line at
+  serve never reaches a model as NaN: a no-line fallback model (or a rating-derived
+  line with a source flag, trained with random masking).
+"Mark out" = status Out at age 0, which the trained definition already covers.
 
-"Ruled out pre-game" in training = on the inactive list or listed Out on the last
-injury report before tip. DNP-coach's-decision is an IN-GAME decision and never
-counts as "out" for a teammate feature (that would leak blowouts).
+### 3.3 Structure (candidates; the gate decides)
+1. **Availability** P(plays) on every participation row (played + DNP + inactive).
+   Trained 2018-19+ (or with an era intercept: 28+ MPG absence rose from ~0.10 to
+   0.177 by 2025-26; B2B second legs 0.13 -> 0.24). Gated on log loss/Brier against a
+   status-lookup baseline and a recent-absence-rate baseline, reliability by status
+   and lead time; sum of P(play) per team-game checked against appearances.
+2. **Minutes | plays**: EWMA candidates, starts share, return-from-absence by
+   absence length, horizon injury features (Questionable players who play may be on
+   restrictions), newly vacated minutes, rotation depth, |spread|, total, rest/B2B
+   (including the Cup final), prior-season MPG excluding post-elimination games,
+   games this season, team-changed flag, age, league-new from DRAFT_YEAR/FROM_YEAR,
+   `n_prior_seasons`. SHORT-MEMORY STATE RESETS EACH SEASON (an EWMA carried across
+   the summer has opener RMSE 8.98 vs 7.64 for prior-season MPG).
+3. **Rates**: Poisson with exposure (target stat/min, sample_weight = precise
+   minutes; cameo rows kept), half-life candidates 10/20/40/season per stat with a
+   Marcel prior (6/3/1, league ballast as of date), usage vacated, opponent allowed
+   rates (shrunk, as-of norms), expected pace from counts, implied team total.
+   PF and TOV modelled directly (minutes x rate over-predicts PF 3-8%).
+4. **Direct alternative**: Poisson HistGB per board stat with out-of-fold predicted
+   minutes and the minutes x rate product as features. Compared within
+   predicted-minutes-change strata, not pooled.
+League norms (pace, ballast, opponent shrink targets) are AS-OF-DATE expanding means
+blended with the prior season, never `groupby(season).mean()` (that includes future
+games; first-month pace runs 1.2-2.8% above the season mean).
 
-### 3.3 Validation
-Walk-forward by season: train <= 2022-23, validate 2023-24, test 2024-25, holdout
-2025-26 touched ONCE at the end of the programme. Baselines: (1) season-to-date mean
-(this game excluded), (2) shrunk EWMA/Marcel rate x minutes. Gate: beat BOTH baselines
-on BOTH validate and test, stratified (starters / bench / cold start <10 games /
-rookies) because pooled MAE hides damage. Counts are also scored on Poisson deviance
-(MAE is minimised by the median; GridironValue's TD verdict was a metric artifact).
-A hypothesis read off a fold is not evidence from that fold (the selection trap).
-Targets that fail ship a baseline, labelled as such in the UI.
+### 3.4 Validation
+Walk-forward: train <= 2022-23, validate 2023-24, test 2024-25, holdout 2025-26 used
+ONCE. Calibration fit seasons are produced walk-forward for 2020-21..2022-23.
+Baselines use strictly prior games: season-to-date, falling back to prior-season
+per-game, then a league role mean (game 1 is 2.1% of rows and every opener row).
+Gate: paired, player-cluster bootstrap CIs (pooled must win with the CI above 0; no
+stratum may lose beyond its CI); RMSE for MIN and Fantasy, MAE + Poisson deviance for
+counts. Strata: starters/bench, cold start (<10 games), rookies/league-new, opener
+(first 3 team games), predicted-minutes change, teammate-out, return-from-absence.
+Additional gates the point gate cannot see: (a) availability (above); (b) team
+minutes coherence, sum p_play x E[MIN|plays] vs 240 + 25 x E[OT], full roster and
+played-only, and "mark out" conserves team minutes; (c) probabilistic: RPS/log score
+of the discrete pmf and graded side-picking against proxy lines rounded to the
+PrizePicks grid (whole numbers included), lines spanning the 10th-90th predictive
+percentiles. Targets that fail ship a labelled baseline.
 
-### 3.4 Distributions and props
-Count stats have point mass, and PrizePicks posts whole-number lines (ties are their
-own bucket, neither win nor loss). For every line compute P(>), P(=), P(<) from a
-discrete distribution; lean = argmax(P(>), P(<)) with an explicit Even branch.
-Candidate distribution families (chosen out of sample on the validation season by
-calibration error, confirmed on test): per-stat negative binomial with level-dependent
-dispersion; empirical conditional pmf by projection bin; simulation from a minutes
-distribution x per-stat counts with combos and Fantasy from the SAME draws (keeps
-correlations). FTM/FTA and PTS are overdispersed even given minutes; REB/AST/3PM/STL/
-BLK/TOV are near-Poisson given minutes; PF is underdispersed.
-PrizePicks rules (first-party, 2026): DNP = zero seconds played, pick removed. NBA
-Reboot: a MORE pick on a full-game projection is voided when the player leaves in the
-1st half and does not return, unless he had already cleared the line. So P(More wins)
-excludes P(1H-only exit AND not yet over); Less includes it. Period props (1H, 1Q,
-First 5 Minutes), Dunks, and combo-player squares are counted as unsupported.
-Display the median (consistent with the lean by construction) and rank by
-|P - 0.5|, tier first. Demon/Goblin direction is read PER ROW from the pasted board
-(Less/More buttons) or the feed's allowed_wager_types; never assumed (PrizePicks'
-own pages contradict each other about NBA as of 2026-10-08).
+### 3.5 Distributions and props
+- Simulation per game (memory-capped: 2-4k draws, float32, per game, cache pmfs not
+  draws): minutes from an empirical role-binned residual with an explicit OT component
+  and a spread-dependent low tail; counts with a minutes ELASTICITY per stat
+  (log E[Y|M] = log(r E[M]) + beta_s log(M/E[M]); PTS/3PM/FTA ~1.2, PF/TOV ~0.6-0.7)
+  and Gamma rate uncertainty; shots COMPOSITIONALLY (FGA -> FG3A -> FG3M, FG2M;
+  FTA -> FTM; PTS and REB composed) so PTS/3PM/FTM/2PM are coherent and points
+  parity falls out. Acceptance: the scaling-by-minutes-surprise table is flat on
+  simulated draws; randomized PIT is flat within minutes-surprise bins.
+- Every distribution is RE-CENTRED on the shipped mean (test: E_sim[Y] equals the
+  shipped E[Y|plays]); baseline-served components draw from the same minutes draw.
+- Per line: P(>), P(=), P(<). PrizePicks grading: More wins on Y > L; a 1st-half exit
+  with no return before clearing VOIDS More (Reboot); ties are their own bucket. Per
+  side q = P_win / (P_win + P_loss), excluding ties and voids; lean = argmax q with an
+  Even band; rank tier first, then q. Until an exit model exists (needs play-by-play,
+  v1.1), q ignores the Reboot and More leans show a role-based "void risk" note.
+- Display the MID-P median m = (k - 0.5) + (0.5 - F(k-1)) / p(k) (agrees with the lean
+  on 100% of whole-line and half-line cases measured); P(=) shown on whole lines;
+  combos are their own medians (footnoted). Test: sign(m - line) == lean.
+- Tiers come from an NBA `validate_lean_accuracy` on validate/test seasons, written to
+  `data/stat_reliability.csv`; combos inherit their weakest component; the About trust
+  table is generated from it. Displayed confidence is capped at the validated maximum.
 
 ## 4. Serving
 
-The bot precomputes; the app recomputes the volatile part.
-
-- **Bot** (GitHub Actions, if it can reach the sources; probe first): after each
-  night, append box logs and participation for the current season, rebuild the
-  player-state table, score yesterday into the accuracy history, snapshot rosters,
-  schedule, injury report and ESPN odds, and precompute today's and tomorrow's
-  projections. Commit. Actions cron starts were measured at a MEDIAN of 3.9 hours late
-  on DiamondValue (range 2.25-7.4h), so: many cron entries, every run idempotent, the
-  ET date derived inside the script every time, and nothing time-critical depends on
-  one run landing.
-- **App** reads the committed state and, for today's slate, fetches the latest
-  injury report and ESPN odds live (embedded-stamp cache, ~10 min TTL) and re-runs
-  inference (state + context -> rows -> models; milliseconds). If the live fetch fails
-  it serves the bot's committed projections with a visible "as of" stamp. A per-game
-  "mark out" control re-runs the teammate redistribution in-session (late scratches
-  land 30 minutes before tip; no cron can follow them).
-- One feature builder serves training and inference: the player-state table is the
-  post-game rolling state; training features are that state shifted one game;
-  inference features are the latest state. A test asserts the two paths agree on the
-  last historical game.
+- **Ingestion** runs where the probe proves the sources answer. Daily box scores come
+  from the cdn liveData box score (one call per game: every counting stat, status,
+  starter, seconds, Final flag); stats.nba.com is used for the backfill and slow data
+  (playerindex, bio). Fallbacks in order: cdn from Actions; a launchd job on Barrett's
+  Mac as the single writer; ESPN summary box scores; a visible "data through" stamp.
+- **State**: player state keyed by PLAYER (season and team boundary rules written once,
+  shared); one context function f(state, target game, team schedule, horizon inputs)
+  called by training AND serving. A committed end-of-2025-26 state seed plus a
+  latest-state snapshot (~600 rows), never the full per-game state history.
+- **Completeness**: each team's game sequence comes from the INGESTED participation
+  table (never the schedule: an un-ingested game would read as an absence). Before
+  serving date D, every Final game of both teams before D must be ingested, else a
+  stale-state badge and no freeze. Tomorrow's projections are provisional and never
+  freezable.
+- **No post-tip leak**: inference for date D uses state < D and context as of
+  min(now, tip). Projections FREEZE PER GAME AT TIP: the bot never writes a tipped
+  game; the app stops recomputing at tip and shows the frozen pre-tip version. The
+  record = first published + last pre-tip snapshot, each stamped; scored per game
+  when Final. In-session recomputes (mark-outs) are never scored.
+- **App live layer**: render committed projections first, then upgrade with the
+  latest injury PDF (floor(now ET, 15 min), step back <= 8 slots) and ESPN odds;
+  budget ~5s, 0 retries, failures cached with their own TTL (circuit breaker). The app
+  never calls stats.nba.com. Under READ_ONLY app writes go to a temp LIVE_DIR outside
+  the checkout; app-written and bot-written path sets are disjoint by construction.
+- **Bot hygiene**: dense crons at off-minutes (e.g. :17/:43), cadence logic in Python;
+  `if_changed=True` on every committed write (byte-stable when unchanged); append-only
+  per-date partitions immutable once Final; an allow-list of bot-owned paths, one
+  writer per path; pytest + an AppTest smoke render before committing; push with
+  `pull --rebase` and retries; the run goes RED on any Blocked source, on logs trailing
+  the last Final game by more than a game-day, or on a date with Finals yielding 0 rows;
+  a dead-man's switch for runs that never start; an offseason keepalive (scheduled
+  workflows in a public repo disable after 60 days idle). Opening-night runbook:
+  manual runs Oct 19 evening and Oct 20 morning (roster cut-down).
+- **Memory**: models are 6-13 MB; simulation capped per game.
 
 ## 5. Site
 
-Pages: `/` (date bar in ET, game cards with team-colour split stripe, tip time,
-spread/total, injury count, PrizePicks line-count pill top-left, slate-wide model vs
-board), `/Game` (team-colour header, matchup context, two team tables: status badge,
-P(play), MIN, PTS, REB, AST, 3PM, STL, BLK, TOV, PRA, Fantasy; expandable rows with
-the player's pasted lines and, after the final, actuals), `/About`. Same look family
-as DiamondValue/GridironValue (themed HTML tables, light/dark, Space Grotesk headers),
-headshots from the NBA CDN. Shareable links minted explicitly with readable params.
-Paste via an "Update lines" popover; pastes live in session_state on the shared
-deployment; only local pastes reach the frozen record.
+- **Pastes and mark-outs survive navigation**: every internal link is a full page load
+  (a new Streamlit session), so a visitor's board lives SERVER-SIDE in an in-process
+  LRU store keyed by an unguessable `?board=` token carried by every minted URL (nav,
+  cards, back links, share); mark-outs live in the URL as `?out=pid,pid`. Never on
+  disk, never frozen. Test: paste on `/`, follow a card, the /Game line count equals
+  the card pill.
+- `/`: nav (wordmark, Home, About; right cluster Update lines, Share, theme toggle);
+  masthead (NBA PROJECTIONS kicker; tiles: games, first tip ET, injury reports filed
+  X/30 with as-of time); date bar (chevrons, date, Yesterday/Today/Tomorrow; the
+  default view date is the ET date of now minus 4h so late West Coast games stay on
+  screen); player search (`?player=`, sync-on-URL-change); cards grouped by tip time
+  (team-colour split stripe, tip time, DraftKings spread/total or the sentinel, B2B
+  chips, "Out: X, Y +2" for 15+ MPG players excluding G League/two-way, Upcoming /
+  Live / Final, line-count pill top-left counting SHOWN lines only); "Model vs the
+  board": green confirmation, "N of M shown (hidden / thin / void)", top 25 one row
+  per player with "+N more", stat-family pills and a game filter inside an
+  @st.fragment, "Show all", footnotes (Demon/Goblin, Reboot, board-at-its-ceiling).
+- `/Game`: team-colour header (spread, total, implied team totals, rest/B2B, injury
+  report as-of or "report not filed"); 5-chip strip; two team tables with
+  team-tinted headers: status badge, player (headshot, projected-starter dot), P(play)
+  only when listed or below 90%, **MIN** as the bold lead column, PTS REB AST 3PM STL
+  BLK TOV PRA FS as mid-p medians under "if he plays"; starters by minutes then bench;
+  deep bench collapsed; Out rows greyed at the bottom with the reason and no numbers;
+  expandable rows with pasted lines (sides offered, badges, void risk) and, after
+  tip, actuals from the cdn box score (120s cache; "Did not play, pick voided";
+  an exact landing reads "landed on the line", never "push"); per-team mark-out /
+  mark-in (stable options) writing `?out=` with a "your adjustments, not the published
+  projection" banner.
+- Status badges: Out, Doubtful, Questionable, Probable, G League, Two-way, Not with
+  team, Suspended; team-level "Report not filed" and "No report yet". Unknown is
+  never rendered as healthy.
+- `board_rows` returns (shown, hidden, thin, void); void = Out / inactive / marked
+  out. Pills, ledger and rows all read it. Ledger balances: pasted = matched +
+  unmatched + unprojected + refused, with unmatched names listed.
+- Ported from GridironValue props_ui (acceptance items): Demon/Goblin badge and
+  footnote, hidden-side counts, "N of M lines" header and refusal reasons, GAP column
+  not a percentage, green banner + toast after a paste, each line routed to its own
+  game's ET date with a "lines saved for <date>, step the date" pointer, visitor
+  Clear all (session only), VPN warning, FEED_URL as a link only. GridironValue's
+  FREEZE_KEYS comment is false (says it includes `line`); do not copy it.
+- Preseason dates: "Preseason: no projections". Empty dates: "Next slate <date>".
+  Cup knockout placeholders render as TBD.
+- `/About` with the generated trust table, the break-even framing and the
+  board-at-its-ceiling note. Accuracy is local only (Barrett).
+- House rules: no em dashes, no emojis in UI text. Process: a re-sent screenshot
+  means the last fix missed the point; the options offered are not the whole space.
 
 ## 6. Phase plan (STOP = check in with Barrett)
 
-1. Foundation + source modules + full backfill (running).
-2. Tables: player-game, team-game, participation, lines, injury status, bio; joined
-   training table with a column contract (`columns.classify` raises on unknowns).
-3. Features + baselines + walk-forward validation report. **STOP**: show the gate
-   results and what ships as a model vs a baseline.
-4. Distributions, calibration, props layer (port GridironValue's hardened props.py
-   with the whole-line, combo and Reboot fixes).
-5. Inference + app pages + bot script; local end-to-end on a 2025-26 date and on the
-   2026-27 preseason.
-6. **STOP**: GitHub repo + Actions reachability probe + Streamlit Cloud deploy
-   (Barrett creates/approves), accuracy page visibility decision.
-7. Full audit workflow before opening night (2026-10-20).
+1. Foundation + source modules + full backfill (running) + GitHub Actions host probe
+   (repo created private 2026-10-08).
+2. **Slate viewer early** (product review): `/` and `/Game` from the schedule, ESPN
+   odds, playerindex, headshots and live injury badges, with BASELINE numbers labelled
+   as such. Barrett looks at the preseason and Oct 20 slates. Ask him for one real NBA
+   PrizePicks paste (feed JSON + board text) as soon as one posts; turn it into
+   fixtures.
+3. Tables + horizon injury features + player state + context function; replay and
+   future-mutation tests.
+4. Models + gates (point, availability, coherence, probabilistic). **STOP**: gate
+   results, what ships as a model vs a baseline.
+5. Distributions, calibration, tiers, props layer (props.py + props_ui.py ports).
+6. Bot (ingestion from the source the probe proved), per-game freeze at tip, record.
+   **STOP**: deploy (flip repo public for Streamlit Cloud sharing), clone-and-run.
+7. Full audit workflow before opening night (2026-10-20). If the gate is not done,
+   open on labelled baselines only if Barrett agrees.
