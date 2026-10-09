@@ -53,3 +53,12 @@ def test_write_failure_raises(tmp_path):
     bad.write_text("x")
     with pytest.raises(Exception):
         cache.write_parquet(pd.DataFrame({"a": [1]}), bad / "child.parquet")
+
+
+def test_meta_accepts_numpy_and_timestamps(tmp_path):
+    import numpy as np
+    p = tmp_path / "m.parquet"
+    cache.write_parquet(pd.DataFrame({"a": [1]}), p,
+                        meta={"n": np.int64(3), "f": np.float64(0.5), "t": pd.Timestamp("2026-10-20")})
+    m = cache.read_parquet_meta(p)
+    assert m["n"] == 3 and m["f"] == 0.5 and m["t"].startswith("2026-10-20")

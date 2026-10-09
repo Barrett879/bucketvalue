@@ -127,6 +127,18 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 _PQ_META_KEY = b"bucketvalue"
 
 
+def _jsonable(o):
+    """json.dumps fallback for metadata: numpy scalars, Timestamps, dates."""
+    if hasattr(o, "item"):
+        try:
+            return o.item()
+        except (TypeError, ValueError):
+            pass
+    if hasattr(o, "isoformat"):
+        return o.isoformat()
+    return str(o)
+
+
 def frame_hash(df: pd.DataFrame) -> str:
     """Content hash of a frame: values, column names and dtypes, not the index
     and not any metadata. Two writes of the same data hash the same even though
@@ -157,7 +169,8 @@ def write_parquet(df: pd.DataFrame, path: Path, meta: dict | None = None,
     meta["content_hash"] = digest
     table = pa.Table.from_pandas(df, preserve_index=False)
     existing = table.schema.metadata or {}
-    table = table.replace_schema_metadata({**existing, _PQ_META_KEY: json.dumps(meta).encode()})
+    table = table.replace_schema_metadata(
+        {**existing, _PQ_META_KEY: json.dumps(meta, default=_jsonable).encode()})
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_sibling(path)
     try:
