@@ -222,7 +222,10 @@ percentiles. Targets that fail ship a labelled baseline.
 
 ## 4. Serving
 
-- **Ingestion** runs where the probe proves the sources answer. Daily box scores come
+- **Ingestion** runs on GitHub Actions using ONLY sources the 2026-10-09 probe proved
+  reachable from Azure: cdn.nba.com (schedule, liveData box scores, playerIndex.json
+  for rosters and two-way flags), ak-static injury PDFs, ESPN. stats.nba.com HANGS from
+  Actions and is local-only (backfill, bio). Daily box scores come
   from the cdn liveData box score (one call per game: every counting stat, status,
   starter, seconds, Final flag); stats.nba.com is used for the backfill and slow data
   (playerindex, bio). Fallbacks in order: cdn from Actions; a launchd job on Barrett's

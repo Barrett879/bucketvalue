@@ -63,6 +63,26 @@ reachability from those hosts is still UNVERIFIED and must be probed.
 - nba_api's bundled static player table lacks 125 of 615 current players (every 2026
   rookie) and returns a retired Brandon Williams first. Take ids from playerindex.
 
+## Reachability from the hosts that will run the site (MEASURED)
+
+GitHub Actions probe, 2026-10-09 00:24 UTC, egress AS8075 Microsoft (San Jose),
+`scripts/probe_hosts.py` via `.github/workflows/probe.yml`, results committed under
+`docs/probes/`:
+
+| Source | From Actions |
+|---|---|
+| stats.nba.com (LeagueGameLog, playerindex, CommonTeamRoster) | **BLOCKED**: hangs to timeout, even with curl_cffi Chrome + nba_api headers |
+| cdn.nba.com schedule, todaysScoreboard, liveData box score, headshots | OK, 0.07-0.42s |
+| cdn.nba.com `staticData/playerIndex.json` | OK; IDENTICAL to stats `playerindex` for 2026-27 (615 players, same teams, same 83 two-way flags, checked 2026-10-08) |
+| ak-static injury PDFs | OK |
+| ESPN scoreboard, core odds, injuries | OK |
+
+So the bot runs on cdn + ak-static + ESPN only. stats.nba.com is a LOCAL-ONLY
+source (this Mac) for the historical backfill and bio. Streamlit Cloud has not been
+probed yet (do it at deploy; the app never calls stats.nba.com anyway).
+A liveData box score for a game that has not tipped is an S3 403 (Absent): rosters
+before a team's first game come from playerIndex.json.
+
 ## cdn.nba.com
 
 - `/static/json/*` needs a Chrome fingerprint AND `Referer: https://www.nba.com/`.
