@@ -87,7 +87,9 @@ CDN_HEADERS = {"Referer": "https://www.nba.com/", "Origin": "https://www.nba.com
 # matters; the others are CDNs that showed no throttling at these rates.
 _MIN_INTERVAL = {
     "stats.nba.com": 0.8,
-    "cdn.nba.com": 0.25,
+    # 0.25s (4/s) drew an Akamai HTML 403 after ~860 consecutive box scores on
+    # 2026-10-08 (cleared within minutes): a rate limit, not a block. 2/s.
+    "cdn.nba.com": 0.5,
     "site.api.espn.com": 0.2,
     "sports.core.api.espn.com": 0.2,
     "site.web.api.espn.com": 0.2,
