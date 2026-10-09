@@ -22,6 +22,7 @@ Per (game, team, horizon) the team state is one of:
   not_yet_submitted      the team-level "NOT YET SUBMITTED" line
   game_not_in_report     the report does not mention the game yet
   no_report              no report within 30 hours of the horizon
+  report_unparsed        the newest report failed to parse (never fall back to an older one)
   pre_archive            before 2018-12-17
 and only the first three say anything about who is healthy. Everything else is UNKNOWN and is encoded as such; a player absent from
 a team that has not filed is never "available".
@@ -59,20 +60,10 @@ def cutoff_for(horizon: str, tip: dt.datetime) -> dt.datetime:
 
 
 def report_at(cutoff_u: dt.datetime, getter, accept=None):
-    """Latest report with title time strictly before `cutoff_u` (UTC),
-    walking back at most MAX_BACK. None = unknown."""
-    for slot in INJ.slots_descending(cutoff_u.astimezone(ET), inclusive=False):
-        if slot.nominal_et.astimezone(UTC) < cutoff_u - MAX_BACK:
-            return None
-        rep = getter(slot)
-        if rep is None:
-            continue
-        if rep.meta["report_ts_et"].astimezone(UTC) >= cutoff_u:
-            continue
-        if accept is not None and not accept(rep):
-            continue
-        return slot, rep
-    return None
+    """Latest report titled strictly before `cutoff_u` (the injury module's ONE
+    selection rule, injury.report_before). Returns (slot, report) or None."""
+    sel = INJ.report_before(cutoff_u, getter=getter, accept=accept, max_back=MAX_BACK)
+    return None if sel is None else (sel.slot, sel.report)
 
 
 def snapshot_games(games: pd.DataFrame, schedule: pd.DataFrame, getter=None,
@@ -90,10 +81,9 @@ def snapshot_games(games: pd.DataFrame, schedule: pd.DataFrame, getter=None,
     sched = schedule[["game_id", "game_date", "away", "home", "tip_utc"]].dropna(subset=["home", "away"])
 
     def is_real(rep) -> bool:
-        if rep.rows is None or rep.rows.empty:
-            return rep.team_rows is not None and len(rep.team_rows) > 0
-        kept, _ = INJ.validate_rows(rep.rows, sched)
-        return len(kept) > 0
+        # Report-level: QA files (fake games) and Summer League files fail; a
+        # report holding only NOT YET SUBMITTED lines for real games passes.
+        return INJ.lists_nba_game(rep, sched)
 
     parsed_cache: dict[str, tuple] = {}
 
@@ -117,7 +107,15 @@ def snapshot_games(games: pd.DataFrame, schedule: pd.DataFrame, getter=None,
                 for team in (g["away"], g["home"]):
                     trow.append({**base, "report_ts_et": pd.NaT, "team": team, "state": "pre_archive"})
                 continue
-            found = report_at(cut, getter, accept=is_real)
+            try:
+                found = report_at(cut, getter, accept=is_real)
+            except ValueError as e:
+                # The newest candidate failed to parse. Never fall back to an
+                # older report (that would silently age the status): unknown.
+                for team in (g["away"], g["home"]):
+                    trow.append({**base, "report_ts_et": pd.NaT, "team": team,
+                                 "state": "report_unparsed", "detail": str(e)[:120]})
+                continue
             if found is None:
                 for team in (g["away"], g["home"]):
                     trow.append({**base, "report_ts_et": pd.NaT, "team": team, "state": "no_report"})
