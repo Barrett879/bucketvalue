@@ -62,3 +62,15 @@ def test_resolve_names_scoped_to_game_roster():
     r = L.resolve_names(inj, roster)
     assert r["person_id"].tolist()[:2] == [11, 12] and np.isnan(r["person_id"].iloc[2])
     assert r.attrs["unresolved"] == 1
+
+
+def test_resolve_uses_every_spelling_the_person_ever_had():
+    """The roster for this game spells him 'Enes Freedom' (cdn, current name);
+    the report says 'Kanter, Enes'. Known names bridge it, still team-scoped."""
+    roster = pd.DataFrame({"game_id": ["g"], "team": ["BOS"], "person_id": [202683],
+                           "player_name": ["Enes Freedom"]})
+    known = pd.DataFrame({"person_id": [202683, 202683, 999],
+                          "player_name": ["Enes Freedom", "Enes Kanter", "Enes Kanter"]})
+    inj = pd.DataFrame({"game_id": ["g"], "team": ["BOS"], "player_raw": ["Kanter, Enes"]})
+    assert np.isnan(L.resolve_names(inj, roster)["person_id"].iloc[0])
+    assert L.resolve_names(inj, roster, known)["person_id"].iloc[0] == 202683

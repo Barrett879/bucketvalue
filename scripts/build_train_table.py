@@ -83,6 +83,9 @@ def main() -> int:
     # ── Injury context at one horizon per game ──────────────────────────────
     df["horizon"] = df["game_id"].map(horizon_of)
     roster = rg[["game_id", "team", "person_id", "player_name"]]
+    # Every spelling each person id has carried, from both sources and all seasons.
+    known = pd.concat([rg[["person_id", "player_name"]],
+                       logs[["person_id", "player_name"]]], ignore_index=True).drop_duplicates()
     ctx_parts = []
     for s in part_seasons:
         ip = C.read_parquet(C.CACHE_DIR / f"injury_horizons_{s}_v1.parquet")
@@ -93,7 +96,7 @@ def main() -> int:
         # Keep only each game's assigned horizon.
         it = it.merge(rows[["game_id", "horizon"]].drop_duplicates(), on=["game_id", "horizon"])
         ip = ip.merge(rows[["game_id", "horizon"]].drop_duplicates(), on=["game_id", "horizon"])
-        ip = L.resolve_names(ip, roster[roster["game_id"].isin(set(rows["game_id"]))])
+        ip = L.resolve_names(ip, roster[roster["game_id"].isin(set(rows["game_id"]))], known)
         print(f"{s}: injury rows {len(ip)}, unresolved names {ip.attrs['unresolved']}")
         # Games before the archive have no horizon rows: give them the
         # pre-archive state explicitly (never "no report").

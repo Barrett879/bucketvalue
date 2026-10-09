@@ -54,15 +54,30 @@ def expected_minutes(rows: pd.DataFrame) -> pd.Series:
     return e.fillna(0.0)
 
 
-def resolve_names(inj: pd.DataFrame, roster: pd.DataFrame) -> pd.DataFrame:
+def resolve_names(inj: pd.DataFrame, roster: pd.DataFrame,
+                  known_names: pd.DataFrame | None = None) -> pd.DataFrame:
     """Attach person_id to injury rows by name, scoped to the game's own team
-    roster (roster: game_id, team, person_id, player_name). Unresolved rows keep
-    person_id NaN and are counted in attrs['unresolved']."""
+    roster (roster: game_id, team, person_id, player_name).
+
+    `known_names` (person_id, player_name): EVERY spelling a person id has ever
+    carried. The sources disagree by era and source ("Nene" / "Nene Hilario",
+    "Enes Kanter" / "Enes Freedom", "Charles" / "Charlie Brown Jr."), and the
+    report may use any of them, so each rostered player is indexed under all of
+    his names, still scoped to that game's team. Unresolved rows keep
+    person_id NaN and are counted in attrs['unresolved'] (mostly traded or
+    G League players listed by a team whose game roster no longer has them,
+    who therefore cannot affect that game)."""
     if inj is None or inj.empty:
         out = inj.copy() if inj is not None else pd.DataFrame()
         out["person_id"] = pd.Series(dtype="float")
         out.attrs["unresolved"] = 0
         return out
+    names_by_pid: dict[int, set] = {}
+    for src in (roster, known_names):
+        if src is not None and len(src):
+            for pid_, n in zip(src["person_id"], src["player_name"]):
+                if isinstance(n, str) and n:
+                    names_by_pid.setdefault(int(pid_), set()).add(n)
     out = inj.copy()
     pid = np.full(len(out), np.nan)
     idx_cache: dict[tuple, NameIndex] = {}
@@ -71,8 +86,9 @@ def resolve_names(inj: pd.DataFrame, roster: pd.DataFrame) -> pd.DataFrame:
         if key not in idx_cache:
             ix = NameIndex()
             r = roster[(roster["game_id"] == gid) & (roster["team"] == team)]
-            for n, p in zip(r["player_name"], r["person_id"]):
-                ix.add(n, int(p), team=team)
+            for p_ in set(r["person_id"]):
+                for n in names_by_pid.get(int(p_), ()):
+                    ix.add(n, int(p_), team=team)
             idx_cache[key] = ix
         m = idx_cache[key].resolve_last_first(raw, team=team)
         if m.value is not None:
