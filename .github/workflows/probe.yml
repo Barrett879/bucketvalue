@@ -1,0 +1,39 @@
+# Host reachability probe. Runs scripts/probe_hosts.py FROM GITHUB'S RUNNERS
+# and commits the result table to docs/probes/, because the daily refresh can
+# only be designed once we know whether stats.nba.com, cdn.nba.com, the injury
+# PDFs and ESPN answer an Azure IP (every fact in docs/data_notes.md came from a
+# VPN exit, which says nothing about Azure).
+name: host-probe
+on:
+  push:
+    paths:
+      - scripts/probe_hosts.py
+      - .github/workflows/probe.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: host-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the client's dependencies only
+        run: pip install curl_cffi==0.15.0 nba_api==1.11.4 pandas==2.3.3 numpy==2.3.5 pyarrow==22.0.0 requests==2.32.5
+      - name: Probe
+        run: python scripts/probe_hosts.py --out docs/probes --label github-actions
+      - name: Commit the result
+        run: |
+          git config user.name "bucketvalue-bot"
+          git config user.email "bucketvalue-bot@users.noreply.github.com"
+          git add docs/probes/
+          git diff --cached --quiet && exit 0
+          git commit -m "Host probe from GitHub Actions"
+          git pull --rebase origin main
+          git push

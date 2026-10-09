@@ -18,8 +18,8 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 | Shape | Same as the siblings: Streamlit, HistGB models, walk-forward validation, scheduled bot refresh, public Streamlit Cloud deploy | "the same as gridiron and diamond value" |
 | PrizePicks | INLINE on the board and game pages, never a tab. PASTE ONLY: no fetcher, ever (403 to servers and ToS 16(l) bars automation) | sibling precedent |
 | Repo | `Desktop/Claude/NBA Predict`, package `bucketlib/` | default |
-| Accuracy page public or local-only | OPEN, ask Barrett before deploy (DiamondValue removed its page from the public site; GridironValue kept one) | Barrett |
-| GitHub repo creation, Actions probe | needs Barrett's go-ahead (outward-facing) | Barrett |
+| Accuracy page | **LOCAL ONLY**: `pages/Accuracy.py` and its summary outputs are gitignored, never in the nav of the deployed site (DiamondValue precedent) | Barrett, 2026-10-08 |
+| GitHub repo | `Barrett879/bucketvalue`, created PRIVATE 2026-10-08 (approved by Barrett; public creation needs his explicit visibility call, and Streamlit only shares apps from public repos, so flip it at deploy) | Barrett, 2026-10-08 |
 
 ## 1. Lessons that are rules here (each was a shipped bug on a sibling)
 

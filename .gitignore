@@ -24,3 +24,11 @@ cache/*
 # stay on this machine. Scripts that read them must refuse to run unless
 # `git check-ignore` agrees this directory is excluded.
 cache/local_only/
+
+# ACCURACY IS LOCAL ONLY (Barrett, 2026-10-08). The page and anything it writes
+# never reach the repo, so the deployed site cannot link or serve them.
+# Streamlit discovers pages from pages/, so an untracked file simply does not
+# exist on the host; the nav must not list it either (theme._NAV_PAGES).
+pages/Accuracy.py
+cache/accuracy_summary_*.json
+cache/props_record_*.json
