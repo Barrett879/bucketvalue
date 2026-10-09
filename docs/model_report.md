@@ -81,3 +81,26 @@ weak. These are model-quality tiers, never market edges (DiamondValue: the poste
 line is a near-sufficient statistic for its projection).
 
 **Decision: every board stat ships as a model.** Nothing falls back to a baseline.
+
+## v1 holdout, 2025-26 (2026-10-09, run ONCE)
+
+Same code, trained on 2018-19..2024-25, scored on 2025-26 (43,265 rostered
+player-games), never looked at before this run. `scripts/train_eval.py
+--train-last 2024-25 --eval 2025-26`, then `gate.py` and `prob_gate.py` with
+`--tag holdout_2025-26` (`docs/gate_holdout_2025-26.csv`,
+`docs/prob_gate_holdout_2025-26.csv`).
+
+**Ship gate: all 22 targets pass**, no stratum significantly worse. Gains match
+or beat the earlier folds: minutes 17.5%, PRA 11.1%, Fantasy 8.9%, PTS 7.8%,
+REB 7.4%, AST 5.4%, STL 2.6%, BLK 2.1%. On MAE (reported, not the gate metric)
+BLK and STL are -0.3% and -0.1%: the mean-vs-median artifact from v0.
+
+**Probabilistic:** simulator calibration error 0.5-2.9 points (NB 1.1-4.7), RPS
+equal or better than NB on every stat. One reversal: TOV calibration, simulator
+1.8 vs NB 1.1 points (RPS tied).
+
+**What moved:** 3PM and Blks+Stls side-picking edges roughly halved (3.5 to 1.9,
+3.2 to 2.0 points). Now that the holdout is spent, the tiers in
+`data/stat_reliability.csv` take the WORST of all three seasons, which moves
+both from moderate to weak. That is a downgrade-only change; nothing was promoted
+on holdout evidence.

@@ -48,12 +48,19 @@ def errors(target, y, p):
 
 
 def main() -> int:
-    df = C.read_parquet(PREDS)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--preds", default=str(PREDS))
+    ap.add_argument("--folds", default=f"{VF.VALIDATE},{VF.TEST}")
+    ap.add_argument("--tag", default="v1")
+    args = ap.parse_args()
+    folds = args.folds.split(",")
+    df = C.read_parquet(Path(args.preds))
     pl = df[df["played"] == True]  # noqa: E712
     rows = []
     targets = ["min"] + VF.STATS + VF.COMPOSED
     for t in targets:
-        for fold in (VF.VALIDATE, VF.TEST):
+        for fold in folds:
             d = pl[pl["season"] == fold]
             y = d["min" if t == "min" else t].to_numpy(dtype=float)
             p = d["mu_min" if t == "min" else f"pred_{t}"].to_numpy(dtype=float)
@@ -68,7 +75,7 @@ def main() -> int:
                              "gain": 1 - em[m].sum() / eb[m].sum(), "lo": lo, "hi": hi,
                              "mae_gain": mae_gain if sname == "all" else np.nan})
     rep = pd.DataFrame(rows)
-    rep.to_csv(C.REPO_ROOT / "docs" / "gate_v1.csv", index=False)
+    rep.to_csv(C.REPO_ROOT / "docs" / f"gate_{args.tag}.csv", index=False)
     allr = rep[rep.stratum == "all"]
     pooled = allr.groupby("target")["lo"].apply(lambda s: bool((s > 0).all()))
     worst = rep[rep.stratum != "all"].groupby("target")["hi"].min()

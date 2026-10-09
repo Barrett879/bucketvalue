@@ -68,12 +68,15 @@ def rps(pmf: Pmf, y: float, stat: str) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=6000, help="player-games per fold")
+    ap.add_argument("--preds", default=str(PREDS))
+    ap.add_argument("--folds", default=f"{VF.VALIDATE},{VF.TEST}")
+    ap.add_argument("--tag", default="v1")
     args = ap.parse_args()
     params = D.SimParams.load(C.MODELS_DIR / "sim_params_v1.json")
-    df = C.read_parquet(PREDS)
+    df = C.read_parquet(Path(args.preds))
     df = df[(df["played"] == True) & (df["mu_min"] > 3)]  # noqa: E712
     recs = []
-    for fold in (VF.VALIDATE, VF.TEST):
+    for fold in args.folds.split(","):
         d = df[df["season"] == fold]
         d = d.iloc[np.linspace(0, len(d) - 1, min(args.n, len(d))).astype(int)]
         for i, (_, r) in enumerate(d.iterrows()):
@@ -103,7 +106,7 @@ def main() -> int:
     R = pd.DataFrame(recs)
     R["over"] = (R["y"] > R["line"]).astype(float)
     R["tie"] = R["y"] == R["line"]
-    R.to_parquet(C.CACHE_DIR / "prob_gate_rows_v1.parquet", index=False)
+    R.to_parquet(C.CACHE_DIR / f"prob_gate_rows_{args.tag}.parquet", index=False)
     dec = R[~R["tie"]]
     out = []
     for (fold, stat, kind, name), g in dec.groupby(["fold", "stat", "kind", "dist"]):
@@ -117,7 +120,7 @@ def main() -> int:
                     "ece": ece, "hit": hit, "base": base, "edge_pts": (hit - base) * 100,
                     "rps": float(R[(R.fold == fold) & (R.stat == stat) & (R.kind == "half") & (R.dist == name)]["rps"].mean())})
     T = pd.DataFrame(out)
-    T.to_csv(C.REPO_ROOT / "docs" / "prob_gate_v1.csv", index=False)
+    T.to_csv(C.REPO_ROOT / "docs" / f"prob_gate_{args.tag}.csv", index=False)
     show = T.pivot_table(index=["stat", "kind"], columns=["dist", "fold"], values=["ece", "edge_pts"]).round(3)
     print(show.to_string())
     print("\nRPS (half lines, lower is better):")

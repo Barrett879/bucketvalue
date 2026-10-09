@@ -35,10 +35,16 @@ KEEP = ["person_id", "game_id", "season", "game_date", "team", "opp", "horizon",
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--train-last", default="2022-23")
+    ap.add_argument("--eval", default=f"{VF.VALIDATE},{VF.TEST}")
+    ap.add_argument("--out", default=str(OUT))
+    args = ap.parse_args()
     df = C.read_parquet(VF.TABLE)
     rs = df[df["game_id"].str.startswith("002")]
-    train = rs[rs["season"].isin(T.seasons("2018-19", "2022-23"))]
-    ev = rs[rs["season"].isin([VF.VALIDATE, VF.TEST])].copy()
+    train = rs[rs["season"].isin(T.seasons("2018-19", args.train_last))]
+    ev = rs[rs["season"].isin(args.eval.split(","))].copy()
     feats = T.feature_columns(df)
     clf = HistGradientBoostingClassifier(max_iter=400, learning_rate=0.05, max_leaf_nodes=31,
                                          min_samples_leaf=200, l2_regularization=1.0,
@@ -65,8 +71,8 @@ def main() -> int:
     for c, parts in T.COMBOS.items():
         out[f"b2_{c}"] = sum(out[f"b2_{p}"] for p in parts)
     out["b2_fantasy"] = sum(wt * out[f"b2_{s}"] for s, wt in T.FANTASY_W.items())
-    C.write_parquet(out, OUT)
-    print(f"wrote {OUT.name} {out.shape}")
+    C.write_parquet(out, Path(args.out))
+    print(f"wrote {args.out} {out.shape}")
     return 0
 
 
