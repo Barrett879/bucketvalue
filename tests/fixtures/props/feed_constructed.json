@@ -1,0 +1,37 @@
+{
+  "meta": {"constructed": "BucketValue test fixture; shape of api.prizepicks.com/projections, values invented. See PROVENANCE.txt."},
+  "data": [
+    {"type": "projection", "id": "1001", "attributes": {"stat_type": "Points", "line_score": 26.5, "odds_type": "standard", "description": "PHI", "start_time": "2026-10-20T20:00:00-04:00", "status": "pre_game"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p1"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1002", "attributes": {"stat_type": "Points", "line_score": 22.5, "odds_type": "goblin", "description": "PHI", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p1"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1003", "attributes": {"stat_type": "Points", "line_score": 31.5, "odds_type": "demon", "allowed_wager_types": ["over"], "description": "PHI", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p1"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1004", "attributes": {"stat_type": "Rebounds", "line_score": 10.5, "odds_type": "standard", "allowed_wager_types": ["over"], "description": "NYK", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p2"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1005", "attributes": {"stat_type": "3-PT Made", "line_score": 3.5, "odds_type": "demon", "description": "NYK", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p3"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1006", "attributes": {"stat_type": "Pts+Rebs", "line_score": 35.5, "odds_type": "standard", "description": "PHI", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p4"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1007", "attributes": {"stat_type": "Blks+Stls", "line_score": 2.5, "odds_type": "standard", "description": "PHI", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p5"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1008", "attributes": {"stat_type": "Points", "line_score": 27.5, "odds_type": "standard", "description": "DET", "start_time": "2026-10-20T23:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p6"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1009", "attributes": {"stat_type": "1H Points", "line_score": 14.5, "odds_type": "standard", "description": "DET", "start_time": "2026-10-20T23:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p6"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1010", "attributes": {"stat_type": "Assists", "line_score": 9, "odds_type": "standard", "description": "BOS", "start_time": "2026-10-20T23:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p7"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1011", "attributes": {"stat_type": "Blocked Shots", "line_score": 3.5, "odds_type": "standard", "description": "OKC", "start_time": "2026-10-21T01:30:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p8"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1012", "attributes": {"stat_type": "Points", "line_score": 29.5, "odds_type": "standard", "description": "DAL", "start_time": "2026-10-22T00:30:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p9"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1013", "attributes": {"stat_type": "Points", "line_score": 52.5, "odds_type": "standard", "description": "GSW", "start_time": "2026-10-22T02:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p10"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1014", "attributes": {"stat_type": "Points", "line_score": 7.5, "odds_type": "standard", "description": "PHI", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p1"}}, "league": {"data": {"type": "league", "id": "84"}}}},
+    {"type": "projection", "id": "1015", "attributes": {"stat_type": "Assists", "line_score": "N/A", "odds_type": "standard", "description": "PHI", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p1"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1016", "attributes": {"stat_type": "Points", "line_score": 20.5, "odds_type": "standard", "description": "NYK", "start_time": "2026-10-21T00:00:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "missing"}}, "league": {"data": {"type": "league", "id": "7"}}}},
+    {"type": "projection", "id": "1017", "attributes": {"stat_type": "Fantasy Score", "line_score": 47.5, "odds_type": "standard", "description": "SAS", "start_time": "2026-10-21T01:30:00Z"}, "relationships": {"new_player": {"data": {"type": "new_player", "id": "p11"}}, "league": {"data": {"type": "league", "id": "7"}}}}
+  ],
+  "included": [
+    {"type": "new_player", "id": "p1", "attributes": {"name": "Jalen Brunson", "team": "NYK", "position": "G", "league": "NBA"}},
+    {"type": "new_player", "id": "p2", "attributes": {"name": "Joel Embiid", "team": "PHI", "position": "C", "league": "NBA"}},
+    {"type": "new_player", "id": "p3", "attributes": {"name": "Tyrese Maxey", "team": "PHI", "position": "G", "league": "NBA"}},
+    {"type": "new_player", "id": "p4", "attributes": {"name": "Karl-Anthony Towns", "team": "NYK", "position": "C-F", "league": "NBA"}},
+    {"type": "new_player", "id": "p5", "attributes": {"name": "OG Anunoby", "team": "NYK", "position": "F", "league": "NBA"}},
+    {"type": "new_player", "id": "p6", "attributes": {"name": "Jayson Tatum", "team": "BOS", "position": "F", "league": "NBA"}},
+    {"type": "new_player", "id": "p7", "attributes": {"name": "Cade Cunningham", "team": "DET", "position": "G", "league": "NBA"}},
+    {"type": "new_player", "id": "p8", "attributes": {"name": "Victor Wembanyama", "team": "SA", "position": "F-C", "league": "NBA"}},
+    {"type": "new_player", "id": "p9", "attributes": {"name": "Nikola Jokic", "team": "DEN", "position": "C", "league": "NBA"}},
+    {"type": "new_player", "id": "p10", "attributes": {"name": "LeBron James + Luka Doncic", "team": "LAL", "position": "F", "league": "NBA", "combo": true}},
+    {"type": "new_player", "id": "p11", "attributes": {"name": "Shai Gilgeous Alexander", "team": "OKC", "position": "G", "league": "NBA"}},
+    {"type": "league", "id": "7", "attributes": {"name": "NBA"}},
+    {"type": "league", "id": "84", "attributes": {"name": "NBA1Q"}}
+  ]
+}

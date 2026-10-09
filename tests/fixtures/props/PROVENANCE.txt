@@ -1,0 +1,32 @@
+CONSTRUCTED FIXTURES. No real NBA PrizePicks paste exists yet (spec section 6,
+phase 2: ask Barrett for one feed JSON and one board-text copy as soon as an
+NBA board posts, and replace these with it).
+
+board_constructed.txt
+  Adapted from the ONLY real board-text sample on any sibling: DiamondValue's
+  MLB paste (MLB Predict/tests/test_props.py, test_parse_prizepicks_board_text
+  and test_board_captures_direction_and_odds). Same structure: "Trending" and
+  its count, the name with the Demon/Goblin tag glued on, "TEAM - POS", the
+  clean name again, a matchup line ("vs DAL Wed 8:30pm") or, for a live square,
+  a score line ("OKC 88vs SAS 84") plus "Cur. 27", the line, the stat label,
+  and only the Less/More buttons the line offers. NBA content, positions
+  (incl. hyphenated G-F, F-C, C-F), stat labels from docs/data_notes.md.
+  It also carries cases the real sample did not: a square with no TEAM - POS
+  line, a team-total header, a two-player combo square, a period prop, Dunks,
+  an unknown label, a nickname (Moe Wagner), and an ambiguous name.
+  ORDER IS LOAD-BEARING: the DEN team-total square (with its own matchup
+  line) sits directly before Stephen Curry's square that has no TEAM - POS
+  line. A parser that lets one square's team, opponent or live flag leak
+  into the next files Curry under DEN@DAL (audit 2026-10-09, defect 1).
+
+feed_constructed.json
+  Shape of api.prizepicks.com/projections (JSON:API data[] + included[]) as
+  seen on GridironValue and DiamondValue pastes. Values invented. Start times
+  are real-format ISO strings; one uses an ET offset, the rest UTC "Z".
+
+roster_constructed.csv, schedule_constructed.csv, projections_constructed.csv
+  Real players and person ids where known, current-season teams as a test
+  needs them. "Chris Smith" (two players, BOS and TOR, ids 1699001/1699002) is
+  INVENTED to exercise ambiguity and team scoping. The schedule is invented
+  around the real 2026-10-20 opener; game ids follow the NBA format. The
+  0022600002 tip (00:00Z on Oct 21) is 8pm ET on Oct 20: the routing trap.
