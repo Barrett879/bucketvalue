@@ -24,9 +24,10 @@ gatherUsageStats = false
 
 [client]
 toolbarMode = "minimal"
-# OFF on the shared deployment. This is what put absolute server paths in front
-# of visitors when an unhandled exception replaced the page, which a 15-character
-# paste could trigger. The paste path is hardened now, but the next unhandled
-# exception should not disclose the filesystem either. Run locally with
-# `--client.showErrorDetails=true` when debugging.
-showErrorDetails = false
+# "type" on the shared deployment: the exception type and a generic message,
+# never a traceback. On Streamlit 1.59 the old boolean `false` maps to
+# "stacktrace", which STILL prints tracebacks with absolute server paths (seen
+# in this repo's own preview, 2026-10-08), so the sibling sites' `false` does
+# not do what their comment says. Run locally with
+# `--client.showErrorDetails=full` when debugging.
+showErrorDetails = "type"

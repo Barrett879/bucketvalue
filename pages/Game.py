@@ -65,9 +65,23 @@ state = live.game_state(row)
 st.markdown(f'<a class="bv-back" href="{esc(back)}" target="_self">Back to the slate</a>',
             unsafe_allow_html=True)
 st.markdown(store.render_matchup_header(row, state), unsafe_allow_html=True)
+odds = live.odds_on(date).value.get((away, home))
+if odds and pd.notna(odds.get("home_line")):
+    hl = float(odds["home_line"])
+    spread_txt = "PK" if hl == 0 else f"{home if hl < 0 else away} {-abs(hl):.1f}"
+    if pd.notna(odds.get("total")):
+        imp_h = float(odds["total"]) / 2 - hl / 2
+        imp_a = float(odds["total"]) / 2 + hl / 2
+        implied = f"{esc(away)} {imp_a:.1f}<span class='sep'> / </span>{esc(home)} {imp_h:.1f}"
+    else:
+        implied = "Not posted"
+    total_txt = f"{float(odds['total']):.1f}" if pd.notna(odds.get("total")) else "Not posted"
+else:
+    spread_txt, total_txt, implied = "Not posted", "Not posted", "Not posted"
 st.markdown(store.render_facts([
-    store.fact("Tip", esc(store.fmt_tip(row["tip_utc"]))),
-    store.fact("Arena", esc(row.get("arena") or "")),
+    store.fact("Spread", esc(spread_txt), (odds or {}).get("provider") or ""),
+    store.fact("Total", esc(total_txt)),
+    store.fact("Implied points", implied),
     store.fact("National TV", esc(row.get("national_tv") or "None")),
     store.fact("Game", esc({"RS": "Regular season", "PRE": "Preseason", "PI": "Play-in",
                             "PO": "Playoffs", "CUP_FINAL": "NBA Cup final"}.get(row["game_type"], row["game_type"]))),

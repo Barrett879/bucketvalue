@@ -25,8 +25,8 @@ import pandas as pd
 
 from . import cache as C
 from . import http as H
-from .sources import cdn
-from .util import now_et, to_et
+from .sources import cdn, espn
+from .util import now_et, now_utc, to_et
 
 TIMEOUT = 8.0
 
@@ -129,3 +129,32 @@ def game_state(row, now=None) -> str:
         return "live"
     t = now or now_et()
     return "live" if to_et(row["tip_utc"]) <= t else "upcoming"
+
+
+# ── Lines (ESPN scoreboard, DraftKings) ──────────────────────────────────────
+def odds_on(date) -> Live:
+    """{game key (away, home): odds dict} for one ET date. TTL 5 minutes.
+
+    Lines post gradually (a missing line is "not posted yet", not "no game")
+    and VANISH from the scoreboard at tip, so a started game shows whatever
+    this process last saw; the bot persists pre-tip snapshots separately.
+    """
+    def fetch():
+        payload = H.fetch(espn.SITE + "scoreboard",
+                          params={"dates": date.strftime("%Y%m%d"), "limit": "500"},
+                          timeout=TIMEOUT, retries=0)
+        df = espn.parse_scoreboard(payload, now_utc())
+        out = {}
+        for _, r in df.iterrows():
+            if pd.notna(r.get("home_line")) or pd.notna(r.get("total")):
+                out[(r["away"], r["home"])] = {
+                    "home_line": r.get("home_line"), "total": r.get("total"),
+                    "open_home_line": r.get("open_home_line"), "open_total": r.get("open_total"),
+                    "provider": r.get("provider_name"), "captured_at": r.get("captured_at"),
+                }
+        return out
+    key = f"odds:{date.isoformat()}"
+    try:
+        return _cached(key, 300, 90, fetch)
+    except RuntimeError as e:
+        return Live({}, None, stale=True, source="none", error=str(e))
