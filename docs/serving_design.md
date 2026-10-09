@@ -156,3 +156,32 @@ reason and no numbers; mark-out via `?out=` with the "your adjustments" banner;
 pasted lines per player. Slate: the board (`props_ui.render_board`) fed by
 `SimProvider`, card line-count pills, "Out: X, Y +2". About: the trust table
 generated from data/stat_reliability.csv.
+
+## 6. Amendments after build 1 (2026-10-09, verified and fixed)
+
+- **models**: the registry nests versions under `versions` (also mirrored at the
+  top level), records `trained_through` (props' training-window guard reads it)
+  and `null_reference` (training null fractions per games-into-season bucket and
+  team change). `models.check_nulls(models, rows)` raises `NullSkew` for a
+  serve slate whose missingness training never saw (no injury report at all,
+  missing lines). The pipeline calls it before `predict`.
+- **state**: uningestable games (cdn box parse failures; the backfill used V3)
+  are committed as overrides under `state/season/{season}/override/`
+  (`scripts/build_serving_seed.py --override GAME_ID`); `state.ingested_ids` is
+  the ONE definition of ingested and includes them. cdn box counts differ from
+  the stats logs only by later stat corrections (148 of 26,757 player lines,
+  at most 2 per count); the parity test proves the code path bit for bit and
+  bounds the effect on predictions (p_play 0.014, minutes 0.14, PTS 0.24 at
+  worst). Accepted: training keeps the corrected logs.
+- **context**: the committed report is written by
+  `context.write_committed(report, schedule)` (both files carry report_ts_et on
+  every row; a QA or non-NBA report is refused: stale beats empty).
+  `display_status` reads only inj_status, inj_reason, team_state. From tip minus
+  5 minutes the live report is titled after the cutoff, so the app serves the
+  COMMITTED projection for any game with now >= tip - 5 min.
+- **simprov**: only the 13 gated stats come from the simulator (source
+  "model"); the other ten come from `props.MeanDispersionProvider` (source
+  "baseline", tier unmeasured) until the gate covers them (FTA needs and-ones in
+  dist.py first). Build providers with `simprov.provider_for(...)` so the board
+  and the Game tables share one simulation. A frame missing a required column
+  raises `MissingColumns`.

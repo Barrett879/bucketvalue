@@ -32,24 +32,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bucketlib import cache as C  # noqa: E402
 from bucketlib import dist as D  # noqa: E402
 from bucketlib.pmf import Pmf  # noqa: E402
+# player_input lives in simprov (one implementation, shared with serving); an
+# eval row carries pred_<s> beside the actual <s>, and pred_ wins when present.
+from bucketlib.simprov import player_input  # noqa: E402
 import validate_full as VF  # noqa: E402
 
 PREDS = C.CACHE_DIR / "preds_eval_v1.parquet"
 BOARD = ["pts", "reb", "ast", "fg3m", "stl", "blk", "tov", "pra", "pr", "pa", "ra", "stocks", "fantasy"]
 NB_DISP = {"pts": 2.2, "reb": 1.1, "ast": 1.1, "fg3m": 1.1, "stl": 1.05, "blk": 1.1, "tov": 1.0,
            "pra": 1.9, "pr": 2.0, "pa": 2.0, "ra": 1.1, "stocks": 1.1}
-
-
-def player_input(r) -> D.PlayerInput:
-    rate = {s: max(float(r[f"rate_{s}"]), 1e-6) for s in ("fga", "fta", "ast", "oreb", "dreb", "stl", "blk", "tov", "pf")}
-    fga, fg3a, fgm, fg3m = (max(float(r[f"rate_{s}"]), 1e-9) for s in ("fga", "fg3a", "fgm", "fg3m"))
-    fta, ftm = max(float(r["rate_fta"]), 1e-9), max(float(r["rate_ftm"]), 0.0)
-    share3 = min(fg3a / fga, 1.0)
-    p3 = min(fg3m / fg3a, 1.0)
-    p2 = min(max(fgm - fg3m, 0.0) / max(fga - fg3a, 1e-9), 1.0)
-    shipped = {s: float(r[f"pred_{s}"]) for s in BOARD}
-    return D.PlayerInput(mu_min=float(r["mu_min"]), rate=rate, fg3a_share=share3, p3=p3, p2=p2,
-                         pft=min(ftm / fta, 1.0), shipped_mean=shipped)
 
 
 RPS_GRID = {s: np.arange(0, 121, 1.0) for s in BOARD}

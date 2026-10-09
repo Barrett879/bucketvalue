@@ -53,13 +53,29 @@ def season_complete(season: str) -> bool:
 
 def roster_games(season: str, require_complete: bool = True) -> pd.DataFrame:
     """Every listed player in every stored game of `season`, with his stat line
-    when he played (NaN otherwise)."""
+    when he played (NaN otherwise), from the backfilled season tables."""
     part = _read("participation", season)
     if require_complete and not season_complete(season):
         raise MissingTable(f"participation_{season}_v1 is not complete")
     games = _read("participation_games", season)
     pg = _read("player_games", season)
+    return join_roster_games(part, games, pg, season)
 
+
+def join_roster_games(part: pd.DataFrame, games: pd.DataFrame, pg: pd.DataFrame,
+                      season: str) -> pd.DataFrame:
+    """The join and reconciliation behind roster_games, as a pure function of
+    frames. ONE implementation: the backfilled season tables (roster_games) and
+    the bot's per-date partitions (state.history) both go through it, so a
+    served history row is built exactly like a training row.
+
+    part   participation rows: game_id, person_id, team, player_name, status,
+           starter, played_seconds, reason_code (sources.box COLUMNS)
+    games  per-game meta: game_id, season_type, tip_utc, et_date, home, away, ot
+    pg     stat lines of players who appeared: game_id, person_id, team, opp,
+           home, sec, the COUNT_COLS, plus_minus (stats logs schema, or the
+           bot's sources.cdnbox.player_lines; `neutral` optional)
+    """
     games = games.copy()
     # The NBA Cup final (id prefix 006) is in participation but in NO season
     # log; it counts only for rest/schedule features (taken from the schedule),
@@ -112,8 +128,11 @@ def roster_games(season: str, require_complete: bool = True) -> pd.DataFrame:
             f"{len(only_part)} played-only-in-participation, {len(only_logs)} in-logs-only, "
             f"e.g. {ex}")
 
-    stats = pg[["game_id", "person_id", "team", "opp", "home", "neutral"] +
-               [c for c in STAT_COLS if c in pg.columns]]
+    # `neutral` rides along when the source has it (the stats logs do; the
+    # bot's cdn lines, sources.cdnbox, do not). No feature reads it, so a
+    # frame without it joins the same way; it is never invented as False.
+    stats = pg[["game_id", "person_id", "team", "opp", "home"] +
+               [c for c in ["neutral"] + STAT_COLS if c in pg.columns]]
     out = part.merge(stats, on=["game_id", "person_id"], how="left", suffixes=("", "_pg"))
     if "team_pg" in out:
         bad = out["team_pg"].notna() & (out["team_pg"] != out["team"])

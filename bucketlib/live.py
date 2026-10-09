@@ -24,8 +24,11 @@ from typing import Any, Callable
 import pandas as pd
 
 from . import cache as C
+from . import context as CTX
+from . import horizons as HZ
 from . import http as H
 from .sources import cdn, espn
+from .sources import injury as INJ
 from .util import now_et, now_utc, to_et
 
 TIMEOUT = 8.0
@@ -158,3 +161,58 @@ def odds_on(date) -> Live:
         return _cached(key, 300, 90, fetch)
     except RuntimeError as e:
         return Live({}, None, stale=True, source="none", error=str(e))
+
+
+# ── Injury report (ak-static PDFs) ───────────────────────────────────────────
+INJURY_KEY = "injury"
+INJURY_TTL, INJURY_FAIL_TTL = 600, 120
+INJURY_SLOTS = 8          # floor(now ET, 15 min) and at most 8 slot times back (spec 4)
+INJURY_TIMEOUT = 3.0      # per PDF, no retries
+INJURY_BUDGET = 5.0       # seconds for the whole walk
+
+
+def injury_report(sched: pd.DataFrame | None = None) -> Live:
+    """The latest REAL injury report as the object context.report_states takes
+    (a ParsedReport live, a context.CommittedReport from the bot's files).
+
+    Real = horizons.real_report against `sched` (default: schedule()), the
+    same accept the training snapshots used: QA and Summer League files land
+    in the production bucket and one in the newest slot would otherwise
+    become the slate's report. TTL 10 minutes; a failure is remembered for 2
+    (circuit breaker). Finding no report in the walk is a failure too, never
+    "nobody is injured": the last good report is served stale, then the
+    committed one, and with neither (or a committed pair read_committed
+    cannot trust) it raises RuntimeError (the page falls back to the
+    committed projections, which carry the bot's context).
+    """
+    if sched is None:
+        sched = schedule().value
+    accept = HZ.real_report(sched)
+
+    def fetch():
+        store, end = INJ.live_store(timeout=INJURY_TIMEOUT), time.monotonic() + INJURY_BUDGET
+
+        def getter(slot):
+            # No new fetch once the budget is spent: a slow host costs one
+            # budget per TTL, not eight timeouts.
+            if time.monotonic() > end:
+                raise H.FetchError(slot.url, f"injury walk over its {INJURY_BUDGET:.0f}s budget")
+            return store.get(slot)
+        sel = INJ.latest_report(now_et(), getter=getter, max_slots=INJURY_SLOTS, accept=accept)
+        if sel is None:
+            raise ValueError(f"no real injury report in the last {INJURY_SLOTS} slots")
+        return sel.report
+
+    def committed():
+        # read_committed raises on a pair it cannot trust. Reported in
+        # _cached's own failure type (RuntimeError), so a page that falls back
+        # to the committed projections on RuntimeError still does; the
+        # message names both failures.
+        try:
+            return CTX.read_committed()
+        except (ValueError, KeyError, OSError) as e:
+            with _lock:
+                live_err = _fail.get(INJURY_KEY, (None, "unknown"))[1]
+            raise RuntimeError(f"{INJURY_KEY}: live fetch failed ({live_err}) and the committed "
+                               f"report is unusable ({type(e).__name__}: {str(e)[:160]})") from e
+    return _cached(INJURY_KEY, INJURY_TTL, INJURY_FAIL_TTL, fetch, committed)

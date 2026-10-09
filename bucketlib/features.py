@@ -386,8 +386,18 @@ def build(events: pd.DataFrame, targets: pd.DataFrame | None, tg: pd.DataFrame,
     out["home_f"] = out["home"].astype(float)
 
     if lines is not None:
-        out = out.merge(lines[["game_id", "home_line", "total"]], on="game_id", how="left")
-        out["team_line"] = np.where(out["home"].astype(bool), out["home_line"], -out["home_line"])
-        out["implied_total"] = out["total"] / 2 - out["team_line"] / 2
-        out["abs_line"] = out["team_line"].abs()
+        out = apply_lines(out, lines)
+    return out
+
+
+def apply_lines(out: pd.DataFrame, lines: pd.DataFrame) -> pd.DataFrame:
+    """Line features for feature rows. `lines` is (game_id, home_line, total).
+
+    Split out of build() so the bot and the app can add LIVE lines to committed
+    history-feature rows (built with lines=None) through the same code training
+    used; a game without a line keeps NaN line features."""
+    out = out.merge(lines[["game_id", "home_line", "total"]], on="game_id", how="left")
+    out["team_line"] = np.where(out["home"].astype(bool), out["home_line"], -out["home_line"])
+    out["implied_total"] = out["total"] / 2 - out["team_line"] / 2
+    out["abs_line"] = out["team_line"].abs()
     return out
