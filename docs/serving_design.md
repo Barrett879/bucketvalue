@@ -206,3 +206,52 @@ generated from data/stat_reliability.csv.
 - Board voids come from the served frame only (`props_ui.void_ids`), so a
   mark-out the pipeline did not apply (frozen game, stale fallback) never voids
   a line the page still shows.
+
+## 8. Amendments after the pre-opening audit (2026-10-09)
+
+Seven lenses (leakage, bot operations, app, props, sources, math, an opening-
+night rehearsal on the 2025-26 opener); 62 findings confirmed by a skeptic and
+fixed by area. What changed in the contract:
+
+- **Completeness is per game and counts every earlier game** of either team that
+  is not ingested, whatever its status (a late West Coast game still in progress
+  when the bot runs is a gap), postponed games excluded
+  (`serve.completeness_by_game`, `provisional_by_game`). A game before today not
+  final 6 hours after its tip turns the run RED.
+- **Postponed** only on positive evidence (cdn postponedStatus "Y" or a PPD
+  status text; "N", "A" and blank are not); a postponed game is no state game, no
+  rest day and no gap. The live code for a postponement is unverified until one
+  happens (docs/known_issues.md).
+- **Play-in is ingested, never projected**: `pipeline.PROJECTED_TYPES = {"RS"}`.
+- **The report title is a stamp, not an input.** A same-content re-issue (every
+  15 minutes) is not committed until the committed title is 3 hours behind
+  (`context.COMMITTED_RESTAMP`); a report out of reach for every game is
+  `NoReport`.
+- **Null check**: `tm_out_max_min` is empty exactly where the player is listed
+  Out (true on all 325,371 training rows); it is checked as that invariant
+  (`models.STRUCTURAL_NAN`), not as a share, so a slate with many players Out
+  is projected, not withheld.
+- **Makes never exceed attempts**: `models.RATE_CEILINGS` caps FG3A and FGM at
+  FGA, FG3M at FG3A and FGM, FTM at FTA; simprov refuses a degenerate draw.
+- **Bot**: one bad box score never stops the others; a box not final yet is a
+  WARN until 6 hours after tip; schedule, roster and odds fall back to the
+  committed copy on ANY fetch or parse failure (RED still fires); odds files
+  change only when a line does; a team with more than 18 roster rows on a game
+  day (camp roster) is RED today; every commit goes through
+  `scripts/commit_state.sh` (state/ only, rebase, abort on conflict, a keepalive
+  commit after 45 idle days); a dead-man's switch pings `BV_HEALTHCHECK_URL`
+  after every run.
+- **App**: any exception from a feed or its parser is a feed failure; an empty
+  schedule, a short roster or an ESPN body with no games never replaces good
+  data; the newer of the memory copy and the committed copy is served; a line
+  seen before tip stays after ESPN drops it, and a tipped game shows the line its
+  projection used ("Pre-tip line"); actuals after tip come from `live.box` (cdn
+  box score, 120 s); Share, `?player=` search, rest/B2B, the projected-starter dot
+  (a DISPLAY rule: the five players at least 50% to play with the highest start
+  share this season, minutes breaking ties), Upcoming / Postponed / Time TBD
+  states. The card's "Out:" line names players at 15+ season minutes per game.
+- **Props**: lines for games the site never projects are counted "not
+  projected", another league's lines "other board"; a period board is withheld,
+  and a re-paste can never replace a full-game line with a period line; adding
+  lines mints a NEW token, so a shared link is read-only for everyone else; the
+  record refuses mark-out-adjusted rows and rows without a model version.

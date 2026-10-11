@@ -12,7 +12,7 @@ dash permitted in a string literal; it renders in cells for missing values.
 """
 from __future__ import annotations
 
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from .util import esc, today_et
 
@@ -122,6 +122,13 @@ THEME_BASE_CSS = """
         background: transparent !important;
         color: var(--fg-1) !important;
     }
+    /* Placeholders follow the theme too (config.toml's light text colour
+       made the slate's "Find a player" invisible in dark mode). */
+    .react-aria-ComboBox input::placeholder,
+    [data-testid="stSelectbox"] input::placeholder,
+    [data-testid="stMultiSelect"] input::placeholder {
+        color: var(--fg-4) !important; opacity: 1 !important;
+    }
     .react-aria-ComboBox [role="group"]:focus-within {
         border-color: var(--accent-teal) !important;
     }
@@ -164,6 +171,16 @@ THEME_BASE_CSS = """
         background: var(--panel) !important;
         border-color: var(--panel-line) !important;
     }
+    /* Popovers (Update lines, Share) are portaled with config.toml's light
+       surface; in dark mode their text took the dark tokens' light colour and
+       nearly vanished. Give the body the theme's own surface. */
+    [data-testid="stPopoverBody"] {
+        background: var(--panel-solid) !important;
+        border-color: var(--panel-line) !important;
+        color: var(--fg-2) !important;
+    }
+    [data-testid="stPopoverBody"] pre { background: var(--panel-2) !important; }
+    [data-testid="stPopoverBody"] code { color: var(--fg-1) !important; }
     [data-testid="stButton"] button, .stButton button {
         background: var(--panel-solid) !important;
         border-color: var(--panel-line) !important;
@@ -241,6 +258,10 @@ COMMON_CSS = """
     /* Clear the fixed nav bar */
     .block-container { padding-top: 3.6rem; max-width: 1360px;
         padding-left: 2.5rem !important; padding-right: 2.5rem !important; }
+    /* Phones: a 1rem side gutter (2.5rem took 21% of a 375px screen). */
+    @media (max-width: 640px) {
+        .block-container { padding-left: 1rem !important; padding-right: 1rem !important; }
+    }
     /* Collapse the empty spacer rows Streamlit leaves around injected <style>
        blocks (the CSS still applies from a display:none subtree). */
     .stElementContainer:has([data-testid="stMarkdownContainer"] > style:only-child) {
@@ -388,6 +409,20 @@ COMMON_CSS = """
     .st-key-bv_day_today button {
         border-color: var(--accent-teal) !important; color: var(--accent-teal) !important; }
     .bv-bar-rule { height: 1px; background: var(--panel-line); margin: 0.5rem 0 0.2rem; }
+    /* Phones: Streamlit stacks every column full width (six rows, the slate
+       below the fold). Keep the bar a wrapping row instead: chevrons and the
+       date on one line, Yesterday / Today / Tomorrow on the next; the empty
+       spacer column goes. */
+    @media (max-width: 640px) {
+        .st-key-bv_datebar [data-testid="stHorizontalBlock"] {
+            flex-direction: row !important; flex-wrap: wrap !important;
+            gap: 0.4rem !important; align-items: flex-end !important; }
+        .st-key-bv_datebar [data-testid="stColumn"] {
+            flex: 0 0 auto !important; width: auto !important; min-width: 0 !important; }
+        .st-key-bv_datebar [data-testid="stColumn"]:has([data-testid="stDateInput"]) {
+            flex: 0 0 9.5rem !important; width: 9.5rem !important; }
+        .st-key-bv_datebar [data-testid="stColumn"]:last-child { display: none !important; }
+    }
 
     /* Tip-time group header: "7:00 PM ET - 5 games" */
     .bv-window {
@@ -412,7 +447,10 @@ COMMON_CSS = """
     @media (max-width: 1080px) { .bv-slate-grid { grid-template-columns: repeat(3, 1fr); } }
     @media (max-width: 760px)  { .bv-slate-grid { grid-template-columns: repeat(2, 1fr); } }
     @media (max-width: 460px)  { .bv-slate-grid { grid-template-columns: 1fr; } }
-    a.bv-slate-card {
+    /* The card panel and its stripe are on every card, the linked ones and the
+       unlinked (a Cup knockout placeholder with no teams yet); hover and focus
+       only on the linked ones. */
+    .bv-slate-card {
         position: relative; overflow: hidden;
         display: flex; flex-direction: column; align-items: center;
         justify-content: center; min-height: 9.5rem;
@@ -423,7 +461,7 @@ COMMON_CSS = """
         transition: border-color .14s ease, transform .14s ease, box-shadow .14s ease;
     }
     /* Top split stripe: away | 1px seam | home. Plain fallback, lifted when color-mix. */
-    a.bv-slate-card::before {
+    .bv-slate-card::before {
         content: ""; position: absolute; inset: 0 0 auto 0; height: 4px;
         transition: height .14s ease;
         background: linear-gradient(90deg,
@@ -432,18 +470,21 @@ COMMON_CSS = """
             var(--home, var(--fg-5)) calc(50% + .5px) 100%);
     }
     @supports (color: color-mix(in srgb, red, white)) {
-        a.bv-slate-card::before {
+        .bv-slate-card::before {
             background: linear-gradient(90deg,
                 color-mix(in srgb, var(--away, var(--fg-5)), #fff var(--rail-lift)) 0 calc(50% - .5px),
                 var(--panel-line) calc(50% - .5px) calc(50% + .5px),
                 color-mix(in srgb, var(--home, var(--fg-5)), #fff var(--rail-lift)) calc(50% + .5px) 100%);
         }
-        a.bv-slate-card {
+        .bv-slate-card {
             background: linear-gradient(150deg,
                 color-mix(in srgb, var(--away, transparent) 6%, var(--panel)),
                 color-mix(in srgb, var(--home, transparent) 6%, var(--panel)));
         }
     }
+    /* The linked card beats Streamlit's markdown link underline (an `a` rule
+       outranks the bare class). */
+    a.bv-slate-card, a.bv-slate-card:hover { text-decoration: none; }
     a.bv-slate-card:hover {
         border-color: var(--accent-teal); transform: translateY(-2px);
         box-shadow: var(--shadow-hover);
@@ -489,6 +530,10 @@ COMMON_CSS = """
         color: var(--fg-5); line-height: 1.35; white-space: nowrap;
     }
     .bv-slate-tag.live { color: var(--value-bad); border-color: var(--value-bad); }
+    .bv-slate-tag.ppd { color: var(--amber); border-color: var(--amber); }
+    .bv-slate-label { margin-top: 0.3rem; font-size: 0.64rem; color: var(--fg-5);
+        line-height: 1.3; }
+    .bv-slate-chips { margin-top: 0.35rem; }
     /* A card with both the line-count pill and a status tag: the pill keeps
        the top-left, the tag moves to the top-right (they used to overlap). */
     .bv-slate-lines ~ .bv-slate-tag { left: auto; right: 7px; }
@@ -619,9 +664,10 @@ COMMON_CSS = """
     }
     @media (prefers-reduced-motion: reduce) { .bv-slate-lines { transition: none; } }
 
-    /* The model-vs-market ledger */
+    /* The model-vs-market ledger. overflow-x:auto, never hidden: whatever the
+       width, no number is ever unreachable (the radius still clips). */
     .bv-ledger { background: var(--panel); border: 1px solid var(--panel-line);
-        border-radius: 12px; overflow: hidden; margin: 0.2rem 0 0.6rem;
+        border-radius: 12px; overflow-x: auto; overflow-y: hidden; margin: 0.2rem 0 0.6rem;
         font-variant-numeric: tabular-nums; }
     .bv-ledger-head, .bv-ledger-row {
         display: grid;
@@ -651,6 +697,16 @@ COMMON_CSS = """
         font-size: 0.72rem; font-weight: 700; }
     .bv-ledger .diff.over, .bv-ledger .lean.over { color: var(--value-good); }
     .bv-ledger .diff.under, .bv-ledger .lean.under { color: var(--value-bad); }
+    /* Phones: two rows per line. Player and stat on the first, Model, Line,
+       Gap and Lean in four equal columns on the second (the six-column grid
+       needed 570px and cut all four numbers off at 375px). */
+    @media (max-width: 760px) {
+        .bv-ledger-head, .bv-ledger-row {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            row-gap: 0.2rem; padding: 0.5rem 0.75rem; }
+        .bv-ledger .nm { grid-column: 1 / 3; }
+        .bv-ledger .st { grid-column: 3 / 5; }
+    }
 
     /* Provenance badge: which numbers came from a model that passed its gate */
     .bv-src { display: inline-block; margin-left: 0.35rem;
@@ -714,6 +770,22 @@ COMMON_CSS = """
     .bv-pl .lean { text-align: right; font-weight: 700; font-size: 0.68rem; }
     .bv-pl .diff.over, .bv-pl .lean.over { color: var(--value-good); }
     .bv-pl .diff.under, .bv-pl .lean.under { color: var(--value-bad); }
+    /* After tip: the actual beside the line, and a full-width note row for
+       "Did not play, pick voided" / "landed on the line". */
+    .bv-pl.has-actual .bv-pl-head, .bv-pl.has-actual .bv-pl-row {
+        grid-template-columns: minmax(6rem,1fr) 3.6rem 3.6rem 3.8rem 3rem 3.6rem; }
+    .bv-pl .num.act { color: var(--fg-1); font-weight: 700; }
+    .bv-pl-note { font-size: 0.7rem; color: var(--fg-4);
+        font-style: italic; margin: -0.05rem 0 0.15rem; }
+    /* Phones: the stat on its own row, the numbers in equal columns under it
+       (Gap and Lean were cut off past the expander's edge at 375px). */
+    @media (max-width: 760px) {
+        .bv-pl { margin-left: 0; padding-left: 0.5rem; }
+        .bv-pl-head, .bv-pl-row { grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: 0.1rem; }
+        .bv-pl.has-actual .bv-pl-head, .bv-pl.has-actual .bv-pl-row {
+            grid-template-columns: repeat(5, minmax(0, 1fr)); }
+        .bv-pl .st { grid-column: 1 / -1; }
+    }
     /* Depth rows that carry lines get a quiet marker so a reader can see which
        players are worth opening without expanding every one. */
     .bv-depth-row.has-lines .nm::after {
@@ -810,9 +882,45 @@ COMMON_CSS = """
         letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-4); }
     details.bv-deep > summary:hover { color: var(--accent-teal); }
     details.bv-deep[open] > summary { border-bottom: 1px solid var(--hairline); }
+    /* Column widths are classes (store.COLGROUP), never inline styles, so the
+       phone layout below can change them. */
+    .bv-pt col.c-badge { width: 3.4rem; }
+    .bv-pt col.c-player { width: 15rem; }
+    .bv-pt col.c-pp { width: 4.2rem; }
+    /* The projected-starter dot, after the name. */
+    .bv-pt .bv-sd { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+        background: var(--accent-teal); margin-left: 0.35rem; vertical-align: middle; }
+    /* After tip: each player's actual line under his projected one. */
+    .bv-pt tr.act td { font-size: 0.72rem; color: var(--fg-4); padding-top: 0.05rem; }
+    .bv-pt tr.act td.lab { color: var(--fg-5); font-style: italic; }
+    .bv-pt tr.act td.dnp { color: var(--fg-5); font-style: italic; text-align: left; }
+    /* Phones: the table scrolls sideways, but the badge and the name stay put
+       (sticky, on a solid panel) and are narrower, so the first view already
+       holds P(play), MIN and PTS rather than names and badges only. */
     @media (max-width: 760px) {
         .bv-pt { overflow-x: auto; }
-        .bv-pt table { min-width: 46rem; }
+        /* separate, not collapse: collapsed borders are painted apart from
+           their cells, so a scrolled column's border and digits showed
+           through the sticky name cells. */
+        .bv-pt table { min-width: 40rem; border-collapse: separate; border-spacing: 0; }
+        .bv-pt col.c-badge { width: 3.1rem; }
+        .bv-pt col.c-player { width: 8rem; }
+        .bv-pt col.c-pp { width: 3.5rem; }
+        .bv-pt td, .bv-pt th { padding-left: 0.3rem; padding-right: 0.3rem; }
+        .bv-pt td { font-size: 0.78rem; }
+        .bv-pt img.bv-hs, .bv-pt td.pl .pos { display: none; }
+        .bv-pt-cap { position: sticky; left: 0; }
+        .bv-pt table tr > :nth-child(1), .bv-pt table tr > :nth-child(2) {
+            position: sticky; z-index: 1;
+            background: var(--panel-solid) !important; }
+        .bv-pt table tr > :nth-child(1) { left: 0; }
+        /* One pixel of overlap closes the sub-pixel seam between the two
+           sticky cells (a scrolled digit showed through it); the shadow
+           marks the scroll edge. */
+        .bv-pt table tr > :nth-child(2) { left: calc(3.1rem - 1px);
+            box-shadow: 1px 0 0 var(--panel-line); }
+        .bv-pt table tr.grp > :nth-child(1), .bv-pt table tr.hgrp > :nth-child(1) {
+            position: static; background: transparent !important; }
     }
 
     /* Mark-outs: the visitor's own numbers, never the published ones. */
@@ -840,9 +948,19 @@ COMMON_CSS = """
     .bv-trust tr.grp td { font-family: 'Space Grotesk', sans-serif; font-size: 0.58rem;
         letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-5);
         background: transparent !important; padding-top: 0.7rem; }
-    @media (max-width: 760px) {
+    .bv-trust col.c-stat { width: 11rem; }
+    .bv-trust col.c-tier { width: 8rem; }
+    .bv-trust col.c-edge { width: 5rem; }
+    /* Phones: narrower fixed columns and a wrapping Basis, so Edge and Basis
+       are on screen (the 34rem minimum put both off a 375px screen). */
+    @media (max-width: 640px) {
         .bv-trust { overflow-x: auto; }
-        .bv-trust table { min-width: 34rem; }
+        .bv-trust col.c-stat { width: 6.6rem; }
+        .bv-trust col.c-tier { width: 5.4rem; }
+        .bv-trust col.c-edge { width: 3.2rem; }
+        .bv-trust th, .bv-trust td { padding-left: 0.4rem; padding-right: 0.4rem; }
+        .bv-trust td { font-size: 0.76rem; }
+        .bv-trust td.basis { font-size: 0.7rem; }
     }
 
     /* Notices: a quiet panel for "no games" / "data not published yet" states.
@@ -919,6 +1037,19 @@ def render_page_chrome() -> None:
     st.markdown(COMMON_CSS, unsafe_allow_html=True)
 
 
+def keep_qs(keep: dict | None = None) -> str:
+    """The query string every site-wide link carries ('?date=..&board=..&out=..
+    &theme=..'), already HTML-escaped for an href. One definition for the nav,
+    the footer and the Share link, so none of them drops the board, the
+    mark-outs, the date or the theme (spec 5: carried by every minted URL).
+    Encoded and escaped here, so a caller that forgets to validate a value
+    cannot break out of the href (commas stay readable for ?out=). Empty
+    values are dropped; the theme comes from the session."""
+    params = {k: v for k, v in (keep or {}).items() if v not in (None, "") and k != "theme"}
+    params["theme"] = "dark" if st.session_state.get("theme_dark") else "light"
+    return esc("?" + urlencode(params, safe=",-:"))
+
+
 def render_nav(current: str, keep: dict[str, str] | None = None) -> None:
     """Fixed top nav bar plus the pinned theme toggle. `current` matches a label
     in _NAV_PAGES (or "Home").
@@ -928,15 +1059,11 @@ def render_nav(current: str, keep: dict[str, str] | None = None) -> None:
     origin) instead of the app frame, so the links appear dead. "_self"
     navigates the app's own frame, which works iframed or served directly.
 
-    `keep` carries view state (season, week) into every destination, because
-    each Streamlit page navigation is a fresh session and a bare href would
-    reset it.
+    `keep` carries view state (date, board, mark-outs) into every
+    destination, because each Streamlit page navigation is a fresh session
+    and a bare href would reset it.
     """
-    # Encoded and escaped here, so a caller that forgets to validate a value
-    # cannot break out of the href (commas stay readable for ?out=).
-    params = {k: v for k, v in (keep or {}).items() if v not in (None, "")}
-    params["theme"] = "dark" if st.session_state.get("theme_dark") else "light"
-    qs = esc("?" + urlencode(params, safe=",-:"))
+    qs = keep_qs(keep)
 
     home_cls = "active" if current == "Home" else ""
     links = (f'<a class="home-link {home_cls}" href="/{qs}" '
@@ -951,8 +1078,36 @@ def render_nav(current: str, keep: dict[str, str] | None = None) -> None:
         render_theme_toggle()
 
 
-def render_footer() -> None:
-    """Site-wide footer: sources and the informational-only disclaimer."""
+def share_url(path_and_query: str) -> str:
+    """An absolute link to `path_and_query` (a minted internal URL) on the
+    host the visitor is on (st.context.url), for the Share control. Relative
+    when the host is unknown (tests, a bare script run)."""
+    try:
+        base = str(st.context.url or "")
+    except Exception:  # noqa: BLE001 - no runtime context: a relative link still works
+        base = ""
+    parts = urlsplit(base)
+    if parts.scheme in ("http", "https") and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}{path_and_query}"
+    return path_and_query
+
+
+def render_share(path_and_query: str) -> None:
+    """The nav cluster's Share control: a popover with this view's link (the
+    date, the pasted board, the mark-outs and the theme) in a code box,
+    whose copy button copies it. Call inside the keyed bv_nav_actions
+    container."""
+    with st.popover("Share"):
+        st.markdown("**Share this view**")
+        st.code(share_url(path_and_query), language=None, wrap_lines=True)
+        st.caption("The link carries the date, your pasted lines and your mark-outs, so "
+                   "whoever opens it sees this page as you see it. Pasted lines are kept "
+                   "for about 18 hours.")
+
+
+def render_footer(keep: dict | None = None) -> None:
+    """Site-wide footer: sources and the informational-only disclaimer. Its
+    About link carries `keep` like the nav's (keep_qs)."""
     year = today_et().year
     html = (
         '<div class="bv-footer">'
@@ -968,7 +1123,7 @@ def render_footer() -> None:
         '<div class="bv-foot-rule"></div>'
         '<div class="bv-foot-bottom">'
         f"<div>&copy; {year} {SITE_NAME}. Every number is a modelled outcome, not a forecast.</div>"
-        '<div><a href="/About" target="_self">About</a></div>'
+        f'<div><a href="/About{keep_qs(keep)}" target="_self">About</a></div>'
         "</div></div>"
     )
     st.markdown(html, unsafe_allow_html=True)

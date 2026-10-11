@@ -30,10 +30,27 @@ TARGET_COLS = ["person_id", "game_id", "season", "game_date", "tip_utc", "team",
 FINAL = cdn.STATUS[3]
 
 
+def without_postponed(schedule: pd.DataFrame) -> pd.DataFrame:
+    """The schedule without its postponed rows (cdn.parse_schedule's
+    `postponed`, set only on positive evidence). A postponed game stays on
+    its ORIGINAL date in the live schedule until it is rescheduled, while
+    training's schedules list it only on the date it was played: left in, it
+    would give both teams rest, back-to-back and games-in-7 values training
+    never saw, and a game that will not be played would be projected and
+    frozen. A schedule without the column (training's stats schedules,
+    schedules committed before it existed) is returned as is."""
+    if "postponed" not in schedule.columns:
+        return schedule
+    return schedule[~schedule["postponed"].fillna(False).astype(bool)]
+
+
 def _state_games(games: pd.DataFrame) -> pd.DataFrame:
-    """Regular season and play-in games with both teams known. Preseason,
-    All-Star, playoffs and Cup knockout placeholders (TBD) get no projections."""
-    g = games[games["game_type"].isin(tables.STATE_TYPES)].dropna(subset=["home", "away"])
+    """Regular season and play-in games with both teams known, postponed
+    games excluded (without_postponed). Preseason, All-Star, playoffs and Cup
+    knockout placeholders (TBD) get no projections. The one definition of a
+    state game: targets_for, completeness and pipeline.state_games read it."""
+    g = without_postponed(games)
+    g = g[g["game_type"].isin(tables.STATE_TYPES)].dropna(subset=["home", "away"])
     return g.assign(game_date=pd.to_datetime(g["game_date"]))
 
 
@@ -69,10 +86,10 @@ def history_features(date, games: pd.DataFrame, roster: pd.DataFrame, hist: Hist
     player_name and two_way), from `hist` = state.history(season, before=date).
 
     `schedule` is the season schedule (state/current/schedule_v1): its dates,
-    the Cup final included, feed rest and back-to-back exactly as training's
-    schedule did. Raises when a game is not on `date`, when the history reaches
-    `date` (a leak), or when the schedule lacks a target game (rest would be
-    silently NaN)."""
+    the Cup final included and postponed games excluded (without_postponed),
+    feed rest and back-to-back exactly as training's schedule did. Raises when
+    a game is not on `date`, when the history reaches `date` (a leak), or when
+    the schedule lacks a target game (rest would be silently NaN)."""
     d = pd.Timestamp(as_date(date))
     off = games.loc[pd.to_datetime(games["game_date"]) != d, "game_id"]
     if len(off):
@@ -84,7 +101,7 @@ def history_features(date, games: pd.DataFrame, roster: pd.DataFrame, hist: Hist
     targets = targets_for(games, roster, season_for_date(d.date()))
     if targets.empty:
         return targets
-    sd = pd.concat([hist.schedule_dates, T.schedule_dates(schedule)],
+    sd = pd.concat([hist.schedule_dates, T.schedule_dates(without_postponed(schedule))],
                    ignore_index=True).drop_duplicates()
     have = targets[["team", "game_date"]].drop_duplicates().merge(sd, how="left", indicator=True)
     if (have["_merge"] != "both").any():
@@ -97,16 +114,51 @@ def history_features(date, games: pd.DataFrame, roster: pd.DataFrame, hist: Hist
                            kind="mergesort").reset_index(drop=True)
 
 
-def completeness(date, schedule: pd.DataFrame, season: str) -> list[str]:
-    """Game ids of FINAL state games of `season` before `date` involving a team
-    that plays on `date`, which the bot has not ingested. Each team's game
-    sequence comes from the ingested partitions, never from the schedule (an
-    un-ingested game would read as an absence), so non-empty means the state
-    is stale for that date: projections are provisional and never freezable."""
+def completeness_by_game(date, schedule: pd.DataFrame, season: str) -> dict[str, list[str]]:
+    """{game_id: gaps} for every state game of `season` on `date`, where gaps
+    are the game ids of the state games before `date` involving THAT game's
+    home or away team which the bot has not ingested (state.ingested_ids,
+    overrides included), sorted.
+
+    Every status counts, not only final: a previous game still live (a 10:30
+    PM ET tip when a run lands after midnight) or not yet flipped to Final is
+    missing from the history just the same, and serving on it would publish
+    freezable rows built without it. Postponed games are not state games
+    (_state_games), so they never stand as a gap.
+
+    Each team's game sequence comes from the ingested partitions, never from
+    the schedule (an un-ingested game would read as an absence), so a
+    non-empty list means that game's state is stale: its projections are
+    provisional and never freezable. The rule is per game (spec 4: "every
+    Final game of BOTH TEAMS before D"): one game that cannot be ingested
+    holds back only the games of its own two teams."""
     d = pd.Timestamp(as_date(date))
     s = _state_games(schedule[schedule["season"] == season])
     today = s[s["game_date"] == d]
-    playing = set(today["home"]) | set(today["away"])
-    prior = s[(s["game_date"] < d) & (s["status"] == FINAL)
-              & (s["home"].isin(playing) | s["away"].isin(playing))]
-    return sorted(set(prior["game_id"]) - ingested_ids(season))
+    prior = s[s["game_date"] < d]
+    missing = prior[~prior["game_id"].isin(ingested_ids(season))]
+    out = {}
+    for gid, home, away in zip(today["game_id"], today["home"], today["away"]):
+        mine = missing["home"].isin([home, away]) | missing["away"].isin([home, away])
+        out[str(gid)] = sorted(map(str, missing.loc[mine, "game_id"]))
+    return out
+
+
+def provisional_by_game(date, today, schedule: pd.DataFrame, season: str
+                        ) -> tuple[dict[str, bool], dict[str, list[str]]]:
+    """({game_id: provisional}, {game_id: gaps}) for the state games on
+    `date`. A game is provisional (never freezable) when the date is after
+    `today` (ET: tomorrow's slate), or when its own gaps
+    (completeness_by_game) are non-empty."""
+    gaps = completeness_by_game(date, schedule, season)
+    later = as_date(date) > as_date(today)
+    return {g: later or bool(v) for g, v in gaps.items()}, gaps
+
+
+def completeness(date, schedule: pd.DataFrame, season: str) -> list[str]:
+    """The union of completeness_by_game over the date's games: game ids of
+    state games of `season` before `date`, whatever their status, involving a
+    team that plays on `date`, which the bot has not ingested. Non-empty means
+    some of the date's games are built on stale state (completeness_by_game
+    says which)."""
+    return sorted({g for gaps in completeness_by_game(date, schedule, season).values() for g in gaps})

@@ -32,11 +32,12 @@ def _date_param() -> str:
         return ""
 
 
-# The nav carries the board and the mark-outs like every other page's (a link
-# that drops them loses the visitor's paste on the way back to the slate).
-render_nav("About", keep={"date": _date_param(),
-                          **store.view_params(props_ui.board_token(),
-                                              store.parse_out(st.query_params.get("out")))})
+# The nav and the footer carry the board and the mark-outs like every other
+# page's (a link that drops them loses the visitor's paste on the way back to
+# the slate).
+KEEP = {"date": _date_param(),
+        **store.view_params(props_ui.board_token(), store.parse_out(st.query_params.get("out")))}
+render_nav("About", keep=KEEP)
 
 st.markdown(f"""
 <div class="bv-masthead"><div class="bv-kicker"><span class="bv-pip"></span>About</div>
@@ -91,4 +92,4 @@ already prices most of what a model knows, so the comparison on this site shows 
 disagrees with the line, not an edge over it. Read a large gap as a question to look into.</div>
 """, unsafe_allow_html=True)
 
-render_footer()
+render_footer(KEEP)

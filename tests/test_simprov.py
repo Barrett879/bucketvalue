@@ -507,6 +507,50 @@ def test_ftm_at_or_above_fta_refuses_the_even_only_ftm_draw(params):
     assert _close(ok["ftm"].mean(), synth()["ftm"])          # not refused when unclipped
 
 
+def test_fg3m_at_its_fg3a_cap_refuses_the_perfect_night_draw(params):
+    """models.predict caps rate_fg3m at rate_fg3a (and at rate_fgm). At the
+    cap p3 is 1, so every simulated FG3M equals FG3A: a 3PM pmf that is the
+    3PA pmf re-centred, with every three going in on every draw. The
+    simulator refuses it; the rest of the row still prices, and an uncapped
+    row keeps its 3PM."""
+    row = synth(fg3m=0.19, fg3a=0.19)
+    inp = S.player_input(row, prefix="")
+    assert inp.p3 == 1.0
+    assert "fg3m" in S._degenerate(inp)
+    priced = S.price(inp, params, S.seed_of(203999, GID), n=1500, stats=S.GATED)
+    assert "fg3m" not in priced
+    for s in ("pts", "reb", "pra", "fantasy"):
+        assert _close(priced[s].mean(), P.shipped_mean(row, s)), s
+    frame = pd.DataFrame([row, synth(pid=2)])
+    prov = S.SimProvider(frame, params)
+    assert prov.pmf(203999, GID, "fg3m") is None and prov.pmf(2, GID, "fg3m") is not None
+    table, meta = P.compare(_lines([(203999, "3-PT Made", 0.5), (2, "3-PT Made", 1.5)]), prov, frame)
+    assert meta["matched"] == 1 and meta["unprojected"] == 1 and list(table["person_id"]) == [2]
+
+
+def test_fg3m_at_its_fgm_cap_never_serves_fg2m_as_a_certain_less(params):
+    """The other fg3m cap: rate_fg3m at rate_fgm makes every make a three, so
+    FG2M's composed mean (FGM - FG3M) is exactly 0 and the baseline would
+    price the point mass at zero, a certain Less on every 2-PT Made line.
+    The raw models put fg3m above fgm on 8 rows of the training table, where
+    that mean was negative and refused; the cap turns it into exactly 0, so
+    it is refused by the p2 <= 0 rule now, on the baseline path too."""
+    row = synth(fg3m=0.22, fgm=0.22, fg3a=0.25)
+    assert P.shipped_mean(row, "fg2m") == 0.0
+    inp = S.player_input(row, prefix="")
+    assert inp.p2 == 0.0 and inp.p3 < 1.0
+    assert "fg2m" in S._degenerate(inp) and "fg2m" in S._baseline_degenerate(inp)
+    frame = pd.DataFrame([row, synth(pid=2)])
+    prov = S.SimProvider(frame, params)
+    base = P.MeanDispersionProvider(frame)
+    assert base.pmf(203999, GID, "fg2m") is not None           # the baseline alone would price it
+    assert prov.pmf(203999, GID, "fg2m") is None
+    for s in ("fgm", "fga", "fg2a", "fg3a"):
+        assert _same(prov.pmf(203999, GID, s), base.pmf(203999, GID, s)), s
+    assert _same(prov.pmf(2, GID, "fg2m"), base.pmf(2, GID, "fg2m"))
+    assert prov.pmf(203999, GID, "fg3m") is not None            # p3 < 1: still priced
+
+
 def test_a_fantasy_mean_at_or_below_zero_is_priced(params):
     """Fantasy can be negative (a turnover is -1), so the count floor of 0
     must never apply to it."""
@@ -522,7 +566,9 @@ def test_a_fantasy_mean_at_or_below_zero_is_priced(params):
 
 
 def test_fg3m_above_fgm_refuses_fg2m(params):
-    prov = S.SimProvider(pd.DataFrame([synth(fg3m=0.25, fgm=0.20)]), params)
+    # fg3a 0.30 keeps p3 below 1: a 3PM above FG3A is its own refusal
+    # (test_fg3m_at_its_fg3a_cap_refuses_the_perfect_night_draw).
+    prov = S.SimProvider(pd.DataFrame([synth(fg3m=0.25, fgm=0.20, fg3a=0.30)]), params)
     assert prov.pmf(203999, GID, "fg2m") is None
     assert prov.pmf(203999, GID, "fg3m") is not None
 

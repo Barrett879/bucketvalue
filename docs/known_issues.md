@@ -114,3 +114,40 @@ Found by the build 1 verifiers and the cross-module fix pass that followed.
   code on 2026-10-09). The per-season "phantoms / zero-second" diagnostic it
   printed is gone (pd.concat drops the per-season attrs inside seed_inputs);
   it now prints roster rows per season.
+
+## Open after the pre-opening audit (2026-10-09)
+
+- **Minutes draw (math-2).** Minutes are mu plus an additive residual from
+  8-minute buckets, clipped at 0: the distribution jumps at bucket edges and
+  piles mass at 0 for low-minute players (zero-mass calibration -9.5 points just
+  below 8 projected minutes, +5.0 just above). A ratio draw blended between
+  neighbouring buckets measured better on 2023-24/2024-25 (ECE 1.595 to 1.515,
+  pick edge 3.70 to 3.78, RPS 2.0126 to 2.0115); proposal in the session
+  scratchpad (auditfix_model/math2_proposal). Shipping it needs
+  sim_params_v2, a fit_dist change, a fresh probabilistic gate and new tiers.
+- **Overtime and the underdog tail (math-5).** Spec 3.5 asks for an explicit OT
+  component and a spread-dependent low tail; the empirical residual carries OT
+  implicitly, and spread-split minutes tables did NOT fix the starters-on-big-
+  underdogs tail (PTS bottom-decile share 0.154 to 0.151), so that tail is on the
+  rate side. Spec wording or a model change: Barrett's call.
+- **FTM near the cap.** Capping FTM at FTA prices elite shooters as 100%; on the
+  test seasons rows the model implied at 92-97% shot 85-87%, so FTM runs 4.5-10%
+  high there (baseline-served stat, tier unmeasured).
+- **Team minutes in 2024-25** sum 6.0 short of actual on the full roster
+  (docs/model_report.md, audit measurements); other seasons are +2.3 / +2.5.
+- **Postponement codes unverified live.** cdn marks a postponement with
+  postponedStatus "Y" or a PPD status text as far as the archives show; if a
+  2026-27 postponement uses another code, that game keeps both teams
+  provisional and the run goes RED 6 hours after its tip. Fix: add the code to
+  `cdn._postponed`.
+- **playerIndex from Actions** was not in the 2026-10-09 probe; `probe_hosts.py`
+  now includes it. Run the probe workflow and read docs/probes before Oct 19.
+- **Dead-man's switch needs a secret.** daily.yml pings `BV_HEALTHCHECK_URL`
+  after every run and only warns until the secret exists (a healthchecks.io
+  check with the cron schedule and a 3-hour grace).
+- **Props thresholds are unmeasured guesses** until a real NBA paste exists:
+  the period-board heuristics (0.6 ratio with a 2.0 floor, 0.55 median, 3
+  players) and the 20-minute "bench role" void-risk note.
+- **Committed-first rendering** (spec section 4, render committed projections
+  first and upgrade): the page computes the live frame before drawing; the
+  live layer's timeouts were cut to 4 s and fetches run in parallel instead.

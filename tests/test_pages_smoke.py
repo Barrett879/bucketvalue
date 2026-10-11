@@ -11,12 +11,14 @@ The projection tests serve tests/fixtures/serve (two real games of
 make_fixture.py) through serve_harness.install, and compare what the pages
 draw with what PRODUCTION code computes for the same inputs
 (pipeline.live_projections, simprov.medians, props_ui.date_board)."""
+import datetime as dt
 import json
 import re
 import sys
 from html import unescape
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -31,7 +33,7 @@ from bucketlib import props, props_ui, simprov, store
 from bucketlib import state as S
 from bucketlib.cache import MODELS_DIR
 from bucketlib.sources import cdn
-from bucketlib.util import SENTINEL, fmt_num
+from bucketlib.util import ET, SENTINEL, fmt_num
 
 REPO = Path(__file__).resolve().parent.parent
 FIX = Path(__file__).parent / "fixtures" / "cdn"
@@ -49,6 +51,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(live, "schedule", lambda: live.Live(sched, 0.0))
     monkeypatch.setattr(live, "roster", lambda: live.Live(roster, 0.0))
     monkeypatch.setattr(live, "odds_on", lambda d: live.Live({("BOS", "DET"): {"home_line": -1.5, "total": 220.5, "provider": "DraftKings"}}, 0.0))
+    monkeypatch.setattr(live, "box", H.no_box)          # never the network
     # Never the repo's own state/: what the bot has committed must not change
     # what these tests see.
     monkeypatch.setattr(S, "STATE_DIR", tmp_path / "empty_state")
@@ -192,6 +195,7 @@ def test_the_committed_state_renders(monkeypatch):
     monkeypatch.setattr(live, "schedule", lambda: live.Live(sched, 0.0))
     monkeypatch.setattr(live, "roster", lambda: live.Live(roster, 0.0))
     monkeypatch.setattr(live, "injury_report", down)
+    monkeypatch.setattr(live, "box", down)
     monkeypatch.setattr(live, "odds_on", lambda d: live.Live({}, None, stale=True, source="none",
                                                              error="offline"))
     for d in dates[-2:]:
@@ -573,3 +577,330 @@ def test_no_em_dash_outside_the_sentinel_and_no_emoji(monkeypatch, tmp_path, mdl
         for t in texts(at):
             assert _dash_ok(t), [n for n in re.split(r"<[^>]*>", t) if SENTINEL in n][:3]
             assert not EMOJI.search(t), EMOJI.findall(t)[:3]
+
+
+# ── Audit fixes, 2026-10-09 ──────────────────────────────────────────────────
+HREF = re.compile(r'href="(/[^"]*)"')
+
+
+def test_every_internal_link_carries_the_board_the_marks_the_date_and_the_theme(monkeypatch, tmp_path, mdl):
+    """Spec 5: carried by EVERY minted URL, the footer's About link included
+    (it was a bare /About on every page)."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    token = H.paste(w)
+    q = dict(board=token, out="2544", date=DATE, theme="dark")       # a mark naming nobody here
+    pages = [run("app.py", **q), game(away="PHI", home="DET", **{k: v for k, v in q.items() if k != "date"}),
+             run("pages/About.py", **q)]
+    for at in pages:
+        hrefs = [unescape(h) for h in HREF.findall(html(at))]
+        assert any(h.startswith("/About") for h in hrefs)
+        assert len(hrefs) >= 3, hrefs
+        for h in hrefs:
+            for want in (f"board={token}", "out=2544", f"date={DATE}", "theme=dark"):
+                assert want in h, (h, want)
+    foot = re.search(r'<div class="bv-foot-bottom">(.*?)</div></div>', html(pages[0]), re.S).group(1)
+    assert f"board={token}" in foot
+
+
+def test_the_share_control_holds_this_views_link(monkeypatch, tmp_path, mdl):
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    token = H.paste(w)
+    cade = str(pid_of("Cade Cunningham"))
+    for at, path in ((run("app.py", date=DATE, board=token, out=cade), "/?"),
+                     (game(away="PHI", home="DET", board=token, out=cade), "/Game?")):
+        urls = [c.value for c in at.code]
+        assert len(urls) == 1 and urls[0].startswith(path), urls
+        for want in (f"board={token}", f"out={cade}", f"date={DATE}", "theme=light"):
+            assert want in urls[0], (urls[0], want)
+        assert any("Share this view" in str(m.value) for m in at.markdown)
+
+
+def test_a_schedule_feed_that_goes_empty_keeps_the_slate(monkeypatch):
+    """Through the REAL live.schedule: a good fetch, then an empty payload
+    after the TTL. The page serves the saved schedule with its notice, never
+    Streamlit's error page."""
+    payload = json.loads((FIX / "schedule_2026-27_trim.json").read_text())
+    monkeypatch.undo()                                   # the real live.schedule
+    monkeypatch.setattr(live, "box", H.no_box)
+    monkeypatch.setattr(live, "_good", {})
+    monkeypatch.setattr(live, "_fail", {})
+    monkeypatch.setattr(S, "STATE_DIR", Path(str(REPO / "tests" / "fixtures" / "nowhere")))
+    monkeypatch.setattr(live, "roster", lambda: live.Live(
+        cdn.parse_player_index(json.loads((FIX / "playerIndex_trim.json").read_text())), 0.0))
+    monkeypatch.setattr(live, "odds_on", lambda d: live.Live({}, 0.0))
+    answer = [payload]
+    monkeypatch.setattr(live.H, "fetch", lambda url, **k: answer[0])
+    at = run("app.py", date="2026-10-20")
+    assert "BOS" in html(at) and "saved schedule" not in html(at)
+    t, v = live._good["schedule"]
+    live._good["schedule"] = (t - 601, v)
+    answer[0] = {"leagueSchedule": {"seasonYear": "2026-27", "gameDates": []}}
+    for path, q in (("app.py", {"date": "2026-10-20"}),
+                    ("pages/Game.py", {"date": "2026-10-20", "away": "BOS", "home": "DET"})):
+        at = run(path, **q)                             # run() asserts no exception
+        assert "BOS" in html(at)
+    assert "Showing a saved schedule" in html(run("app.py", date="2026-10-20"))
+
+
+def test_an_injury_parser_crash_serves_the_published_projections(monkeypatch, tmp_path, mdl):
+    """A report that breaks the parser in a novel way (IndexError) costs the
+    live upgrade, never the page."""
+    H.install(monkeypatch, tmp_path, H.MORNING)
+
+    def crash(*a, **k):
+        raise IndexError("list index out of range (pypdf)")
+    monkeypatch.setattr(live, "injury_report", crash)
+    store._live_frame.clear()
+    at = game(away="PHI", home="DET")
+    page = html(at)
+    assert "Showing the published projections" in page and 'data-pid="' in page
+    slate = run("app.py", date=DATE)
+    assert "Showing the published projections" in html(slate)
+
+
+def test_features_without_projections_and_a_dead_report_say_why_once(monkeypatch, tmp_path, mdl):
+    """Opening-night morning: the bot wrote features, no projections (no
+    report yet), and the live layer cannot read the report either. Both
+    pages give ONE notice with the reason."""
+    H.install(monkeypatch, tmp_path, H.MORNING)
+    P.projections_path(H.DATE).unlink()
+
+    def down(*a, **k):
+        raise RuntimeError("injury: live fetch failed (Blocked) and nothing is cached")
+    monkeypatch.setattr(live, "injury_report", down)
+    store._live_frame.clear()
+    for at in (game(away="PHI", home="DET"), run("app.py", date=DATE)):
+        page = visible(html(at))
+        assert page.count("Projections are not up yet, and the live update could not run") == 1
+        assert "the injury report could not be fetched" in page
+        assert "Showing the published projections" not in page
+        assert "Projections not published yet" not in page
+
+
+def test_a_tipped_unpublished_game_makes_no_promise(monkeypatch, tmp_path, mdl):
+    H.install(monkeypatch, tmp_path, dt.datetime(2026, 3, 12, 23, 0, tzinfo=ET))
+    P.projections_path(H.DATE).unlink()
+    store._live_frame.clear()
+    g = visible(html(game(away="PHI", home="DET")))
+    assert "No projection was published before tip" in g and "publishes them once" not in g
+    s = visible(html(run("app.py", date=DATE)))
+    assert "No projections were published for this date before tip" in s
+    assert "publishes them once" not in s
+
+
+def test_a_tipped_game_keeps_its_line_after_espn_drops_it(monkeypatch, tmp_path, mdl):
+    w = H.install(monkeypatch, tmp_path, H.EVENING)
+    dropped = {k: v for k, v in w.odds.items() if k != ("PHI", "DET")}
+    monkeypatch.setattr(live, "odds_on", lambda d: live.Live(dropped if d == H.DATE else {}, 0.0))
+    store._live_frame.clear()
+    at = game(away="PHI", home="DET")
+    f = facts(at)
+    assert f["Spread"] == "DET -6.5"
+    assert re.search(rf'<div class="bv-fact-lab">Spread</div>.*?<div class="bv-fact-hint">{store.PRE_TIP}</div>',
+                     html(at))
+    assert f["Total"] == "219.5" and f["Implied points"] == "PHI 106.5 / DET 113.0"
+    slate = run("app.py", date=DATE)
+    assert "DET -6.5" in cards(slate)["PHI at DET"]
+    assert re.search(r'<div class="bv-sum-num">2/2</div><div class="bv-sum-lab">Lines posted', html(slate))
+
+
+def test_a_board_without_simulator_parameters_says_so(monkeypatch, tmp_path, mdl):
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    token = H.paste(w)
+
+    def missing():
+        raise FileNotFoundError("models/sim_params_v1.json")
+    monkeypatch.setattr(store, "sim_params", missing)
+    page = visible(html(run("app.py", date=DATE, board=token)))
+    assert "The comparison could not be built for this date" in page
+    assert "none matched" not in page and "no projection" not in page.lower()
+    gp = visible(html(game(away="PHI", home="DET", board=token)))
+    assert "could not be built" in gp
+
+
+def test_a_preseason_date_counts_its_preseason_games(monkeypatch):
+    page = visible(html(run("app.py", date="2026-10-03")))
+    assert "0 Games" not in page and "1 Preseason games" in page and "Lines posted" not in page
+
+
+def test_a_withheld_game_badges_its_roster_from_the_report(monkeypatch, tmp_path, mdl):
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    C.write_parquet(w.proj[w.proj["game_id"] != H.LATE], P.projections_path(H.DATE))
+    lines = {k: v for k, v in w.odds.items() if k != ("DEN", "SAS")}
+    monkeypatch.setattr(live, "odds_on", lambda d: live.Live(lines if d == H.DATE else {}, 0.0))
+    store._live_frame.clear()
+    page = html(game(away="DEN", home="SAS"))
+    assert P.NO_LINE in page and 'data-pid="' not in page
+    wemby = re.search(r'<td class="l">(<span class="bv-st[^>]*>[^<]*</span>)?</td><td class="l pl">'
+                      r'<img[^>]*>Victor Wembanyama', page)
+    assert wemby and ">Q</span>" in wemby.group(0), wemby
+    caps = dict(re.findall(r'<div class="bv-pt-cap"><span class="ab">([A-Z]{3})</span>(.*?)</div>', page, re.S))
+    assert "Injury status not shown" not in visible(caps["SAS"])
+    assert CTX.NOT_FILED in visible(caps["DEN"])
+
+
+def test_rest_starters_and_upcoming_on_the_pages(monkeypatch, tmp_path, mdl):
+    H.install(monkeypatch, tmp_path, H.MORNING)
+    c = cards(run("app.py", date=DATE))
+    assert ">DEN B2B</span>" in c["DEN at SAS"] and "B2B" not in c["PHI at DET"]
+    assert all('class="bv-slate-tag upcoming">Upcoming<' in x for x in c.values())
+    at = game(away="DEN", home="SAS")
+    assert facts(at)["Rest"] == "DEN Back-to-back / SAS 1 day off"
+    for m in at.markdown:                         # one markdown block per team table
+        cap = re.match(r'<div class="bv-pt" style="--team:[^"]*"><div class="bv-pt-cap"><span class="ab">'
+                       r'([A-Z]{3})</span>', str(m.value))
+        if cap:
+            assert str(m.value).count('class="bv-sd"') == 5, cap.group(1)
+
+
+def test_the_player_search_follows_the_url(monkeypatch, tmp_path, mdl):
+    H.install(monkeypatch, tmp_path, H.MORNING)
+    jokic = pid_of("Nikola Jokić")
+    at = run("app.py", date=DATE, player=str(jokic))
+    assert at.selectbox(key="bv_player").value == jokic
+    assert "Open DEN at SAS" in html(at)
+    cade = pid_of("Cade Cunningham")
+    at.selectbox(key="bv_player").select(cade).run()
+    assert not at.exception and at.query_params["player"] in (str(cade), [str(cade)])
+    assert "Open PHI at DET" in html(at)
+    # A date step drops the player with the date.
+    at.button(key="bv_day_next").click().run()
+    assert not at.exception and "player" not in at.query_params
+
+
+def test_after_tip_the_game_page_shows_the_box_score(monkeypatch, tmp_path, mdl):
+    w = H.install(monkeypatch, tmp_path, H.EVENING)
+    H.serve_box(monkeypatch)
+    token = H.paste(w)
+    at = game(away="PHI", home="DET", board=token)
+    page = html(at)
+    assert page.count('<tr class="act">') > 20 and "Did not play" in page
+    lines = {e.label.split(":")[0]: visible(" ".join(m.value for m in e.markdown))
+             for e in at.expander if ": " in e.label}
+    assert "Final" in lines["Cade Cunningham"] and lines["Cade Cunningham"].endswith("13")
+    assert "push" not in page.lower()
+    # The box score is down: the page says so and keeps the projections.
+    monkeypatch.setattr(live, "box", H.no_box)
+    page = html(game(away="PHI", home="DET"))
+    assert "The box score is unavailable right now" in page and 'data-pid="' in page
+
+
+def test_the_frozen_caption_says_how_old_the_numbers_are(monkeypatch, tmp_path, mdl):
+    H.install(monkeypatch, tmp_path, H.EVENING)
+    page = visible(html(game(away="PHI", home="DET")))
+    assert "Frozen at tip: projected 12:20 PM ET with the 12:00 PM ET report" in page
+
+
+def test_a_postponed_game_is_not_shown_as_played(monkeypatch, tmp_path, mdl):
+    w = H.install(monkeypatch, tmp_path, H.EVENING)
+    sched = w.sched.assign(postponed=w.sched["game_id"] == H.LATE)
+    monkeypatch.setattr(live, "schedule", lambda: live.Live(sched, 0.0))
+    H.pin(monkeypatch, dt.datetime(2026, 3, 12, 22, 0, tzinfo=ET))
+    store._live_frame.clear()
+    slate = run("app.py", date=DATE)
+    assert ">Postponed</span>" in cards(slate)["DEN at SAS"]
+    assert re.search(r'<div class="bv-sum-num">1</div><div class="bv-sum-lab">Games', html(slate))
+    g = html(game(away="DEN", home="SAS"))
+    assert "Postponed. This game will not be played on this date" in visible(g) and 'data-pid="' not in g
+
+
+# ── Phone layout (375px; verified in a browser, pinned here) ─────────────────
+def test_phone_layout_rules_are_in_the_stylesheet(monkeypatch, tmp_path, mdl):
+    from bucketlib import theme
+    css = theme.COMMON_CSS
+    phone = " ".join(re.findall(r"@media \(max-width: (?:640|760)px\) \{(.*?)\n    \}", css, re.S))
+    # The ledger and a player's lines: two rows, every number reachable.
+    assert ".bv-ledger .nm { grid-column: 1 / 3; }" in phone
+    assert ".bv-ledger .st { grid-column: 3 / 5; }" in phone
+    assert ".bv-pl .st { grid-column: 1 / -1; }" in phone
+    assert re.search(r"\.bv-ledger \{[^}]*overflow-x: auto", css) and "overflow: hidden; margin: 0.2rem 0 0.6rem" not in css
+    # A 1rem gutter, a wrapping date bar, and sticky names in the Game tables.
+    assert "padding-left: 1rem !important" in phone
+    assert "flex-wrap: wrap !important" in phone
+    assert "position: sticky" in phone and ".bv-pt col.c-player { width: 8rem; }" in phone
+    # Widths are classes, so those rules can apply: no inline <col> width.
+    H.install(monkeypatch, tmp_path, H.MORNING)
+    for at in (game(away="PHI", home="DET"), run("pages/About.py")):
+        assert "<col style=" not in html(at)
+
+
+def test_the_cards_out_line_reads_season_minutes(monkeypatch, tmp_path, mdl):
+    """Spec 5: 15+ MPG. Johni Broome projects under 15 minutes if he plays;
+    give him 20 minutes a game this season in the committed features and the
+    card names one more absence."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    assert "<b>Out:</b> Maxey, Oubre Jr. +5" in cards(run("app.py", date=DATE))["PHI at DET"]
+    broome = pid_of("Johni Broome")
+    feats = w.feats.assign(min_std_s=np.where(w.feats["person_id"] == broome, 20.0, w.feats["min_std_s"]))
+    P.write_features(feats, H.DATE, P.history_stamp(H.SEASON, H.DATE))
+    store._live_frame.clear()
+    assert "<b>Out:</b> Maxey, Oubre Jr. +6" in cards(run("app.py", date=DATE))["PHI at DET"]
+
+
+def test_the_paste_reads_the_pipelines_projected_games(monkeypatch, tmp_path, mdl):
+    """The page hands the paste its schedule marked by the pipeline's own
+    rule (store.mark_projected): lines for a game the site does not project
+    (here a play-in game) are saved but never announced as loaded."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    sched = w.sched.assign(game_type=np.where(w.sched["game_id"] == H.LATE, "PI", w.sched["game_type"]))
+    assert H.LATE not in store.projected_ids(sched, H.DATE)        # the pipeline's rule today
+    monkeypatch.setattr(live, "schedule", lambda: live.Live(sched, 0.0))
+    monkeypatch.setattr(props, "now_utc", lambda: H.MORNING.astimezone(dt.timezone.utc))
+    at = run("app.py", date=DATE)
+    at.text_area(key=props_ui.PASTE_KEY).input(w.board_text)
+    at.button(key="bv_pp_add").click().run()
+    assert not at.exception
+    said = " ".join(str(m.value) for kind in ("success", "info", "warning") for m in getattr(at, kind))
+    late = sum(1 for n in ("Nikola Joki", "Victor Wembanyama", "Stephon Castle", "De'Aaron Fox",
+                           "Jamal Murray", "Aaron Gordon") if n in w.board_text)
+    assert "for a game the site does not project" in said and f"{11 - late} lines loaded" in said, said
+
+
+# ── Cross-area fixes after the 2026-10-09 audit ──────────────────────────────
+PLAY_IN = ("Play-in: no projections. The models were trained on regular-season games only, and "
+           "play-in rotations run tighter: on past play-in games starters played about 5 minutes "
+           "more than projected.")
+
+
+def test_a_play_in_game_says_why_it_has_no_projections(monkeypatch, tmp_path, mdl):
+    """Play-in is ingested, never projected (pipeline.PROJECTED_TYPES): its
+    page says why in its own words; another unprojected type keeps the
+    version-1 line."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    for kind in ("PI", "PO"):
+        sched = w.sched.assign(game_type=np.where(w.sched["game_id"] == H.LATE, kind,
+                                                  w.sched["game_type"]))
+        monkeypatch.setattr(live, "schedule", lambda s=sched: live.Live(s, 0.0))
+        store._live_frame.clear()
+        at = game(away="DEN", home="SAS")
+        page = visible(html(at))
+        assert 'data-pid="' not in html(at)                     # no projection table
+        if kind == "PI":
+            assert PLAY_IN in page and "Version 1" not in page
+        else:
+            assert "Version 1 projects regular-season games only." in page and PLAY_IN not in page
+
+
+def test_a_tipped_game_without_projection_rows_shows_its_committed_pre_tip_line(
+        monkeypatch, tmp_path, mdl):
+    """ESPN drops the line at tip. A tipped game the bot never published
+    (here PHI at DET) still shows the line of the bot's last pre-tip capture
+    (state.odds_path), labelled, on its page and its card."""
+    w = H.install(monkeypatch, tmp_path, H.EVENING)
+    C.write_parquet(w.proj[w.proj["game_id"] != H.EARLY], P.projections_path(H.DATE))
+    dropped = {k: v for k, v in w.odds.items() if k != ("PHI", "DET")}
+    monkeypatch.setattr(live, "odds_on", lambda d: live.Live(dropped if d == H.DATE else {}, 0.0))
+    store._live_frame.clear()
+    assert facts(game(away="PHI", home="DET"))["Spread"] == "Not posted"
+    C.write_parquet(pd.DataFrame({"away": ["PHI"], "home": ["DET"], "home_line": [-5.5],
+                                  "total": [221.0],
+                                  "captured_at": [pd.Timestamp("2026-03-12 22:00", tz="UTC")]}),
+                    S.odds_path(H.DATE))
+    at = game(away="PHI", home="DET")
+    f = facts(at)
+    assert f["Spread"] == "DET -5.5" and f["Total"] == "221.0"
+    assert re.search(rf'<div class="bv-fact-lab">Spread</div>.*?<div class="bv-fact-hint">{store.PRE_TIP}</div>',
+                     html(at))
+    assert "No projection was published before tip" in visible(html(at))
+    slate = run("app.py", date=DATE)
+    assert "DET -5.5" in cards(slate)["PHI at DET"]

@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bucketlib import http as H  # noqa: E402
+from bucketlib.sources import cdn  # noqa: E402
 from bucketlib.util import now_utc  # noqa: E402
 
 TARGETS = [
@@ -36,9 +37,12 @@ TARGETS = [
      {"Historical": 0, "LeagueID": "00", "Season": "2026-27", "TeamID": 0}, "json"),
     ("stats_commonteamroster_DEN_2026-27", H.STATS_BASE + "commonteamroster",
      {"LeagueID": "00", "Season": "2026-27", "TeamID": 1610612743}, "json"),
-    ("cdn_schedule", "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json", None, "json"),
+    ("cdn_schedule", cdn.SCHEDULE_URL, None, "json"),
+    # The bot's roster source (step_roster). Not in the 2026-10-09 probe: the
+    # "identical to stats playerindex" check was made from the Mac.
+    ("cdn_player_index", cdn.PLAYER_INDEX_URL, None, "json"),
     ("cdn_todays_scoreboard", "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json", None, "json"),
-    ("cdn_boxscore_0022500600", "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_0022500600.json", None, "json"),
+    ("cdn_boxscore_0022500600", cdn.BOX_URL.format(gid="0022500600"), None, "json"),
     ("cdn_headshot", "https://cdn.nba.com/headshots/nba/latest/260x190/203999.png", None, "bytes"),
     ("injury_pdf_2026-01-15", "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf", None, "pdf"),
     ("espn_scoreboard_20261020", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",

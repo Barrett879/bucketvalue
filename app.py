@@ -18,8 +18,9 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bucketlib import live, pipeline, props, props_ui, store  # noqa: E402
-from bucketlib.theme import SITE_NAME, render_footer, render_nav, render_page_chrome  # noqa: E402
+from bucketlib import live, props, props_ui, store  # noqa: E402
+from bucketlib.theme import (SITE_NAME, render_footer, render_nav, render_page_chrome,  # noqa: E402
+                             render_share)
 from bucketlib.util import esc, today_et  # noqa: E402
 
 st.set_page_config(page_title=SITE_NAME, page_icon="static/favicon.svg", layout="wide")
@@ -69,10 +70,12 @@ def _jump(d: dt.date):
 
 view = st.session_state["view_date"]
 if st.query_params.get("date") != view.isoformat():
-    if st.query_params.get("date") is not None and "out" in st.query_params:
-        # Mark-outs belong to the date they were made on: stepping the date
-        # drops them rather than marking the same players out tomorrow.
-        del st.query_params["out"]
+    if st.query_params.get("date") is not None:
+        # Mark-outs and a searched player belong to the date they were made
+        # on: stepping the date drops them rather than carrying them over.
+        for k in ("out", "player"):
+            if k in st.query_params:
+                del st.query_params[k]
     st.query_params["date"] = view.isoformat()
     st.session_state["_url_date_seen"] = view.isoformat()
 MARKS = store.parse_out(st.query_params.get("out"))
@@ -87,13 +90,19 @@ TOKEN = props_ui.board_token()
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
         **store.view_params(TOKEN, MARKS)}
 render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS)})
-if ROSTER is not None:
-    # Board text carries no dates: lines route to each player's game today or
-    # tomorrow (all PrizePicks posts), plus the date on screen. Tipped games are
-    # never a destination, so a past date on screen adds nothing.
-    _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), view})
-    TOKEN = props_ui.render_update_lines_popover(view, SCHED, ROSTER, dates=_route_dates) or TOKEN
-    keep.update(store.view_params(TOKEN, MARKS))
+with st.container(key="bv_nav_actions"):
+    if ROSTER is not None:
+        # Board text carries no dates: lines route to each player's game
+        # today or tomorrow (all PrizePicks posts), plus the date on screen.
+        # Tipped games are never a destination, so a past date adds nothing.
+        _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), view})
+        TOKEN = props_ui.render_update_lines_popover(view, store.mark_projected(SCHED, _route_dates),
+                                                     ROSTER, dates=_route_dates,
+                                                     in_nav_container=False) or TOKEN
+        keep.update(store.view_params(TOKEN, MARKS))
+    render_share(store.page_url("/", keep, date=view.isoformat(),
+                                player=st.query_params.get("player")))
+FOOT_KEEP = {"date": view.isoformat(), **store.view_params(TOKEN, MARKS)}
 
 # ── Date bar ─────────────────────────────────────────────────────────────────
 today = today_et()
@@ -126,38 +135,81 @@ pre = games[games["game_type"] == "PRE"] if len(games) else games
 
 # One cached frame per (date, report, lines, mark-outs): the Game page reads
 # the same one, so the cards, the board and the tables cannot disagree.
-served = store.load_projections(view, MARKS) if store.projected_ids(SCHED, view) else None
+IDS = store.projected_ids(SCHED, view)
+served = store.load_projections(view, MARKS) if IDS else None
 FRAME = served.frame if served is not None else None
+FEATS = store.display_features(view) if IDS else None
 BOARD = None
 if TOKEN and FRAME is not None and len(FRAME):
     try:
         _params = store.sim_params()
-    except (OSError, ValueError, KeyError):
+    except Exception:  # noqa: BLE001 - date_board explains a board it cannot build
         _params = None
     BOARD = props_ui.date_board(TOKEN, view, FRAME, _params, ROSTER)
 
-_odds_for_mast = live.odds_on(view).value if len(nba) else {}
+states = {r["game_id"]: live.game_state(r) for _, r in nba.iterrows()} if len(nba) else {}
+odds = live.odds_on(view) if len(nba) else None
+# ESPN drops a game's line at tip: a started game shows the line its frozen
+# projection was made with, or without projection rows the bot's last
+# pre-tip capture (store.committed_odds) (display only).
+started = {g for g, s in states.items() if s in ("live", "final")} | set(served.past if served else ())
+posted = store.posted_lines(odds.value if odds is not None else {}, nba, FRAME, started,
+                            snapshots=store.committed_odds(view) if started else None)
+active = store.active_games(nba)
+
 _inj_note = ""
 _inj = store.injury_fact(FRAME, served.info) if FRAME is not None and len(FRAME) else None
 if _inj:
     _inj_note = f"Injury report: {_inj[0]}{f' ({esc(_inj[1])})' if _inj[1] else ''}."
-st.markdown(store.render_masthead(view, nba, len(_odds_for_mast), injury_note=_inj_note,
-                                  reports=store.reports_filed(FRAME)), unsafe_allow_html=True)
+if len(nba):
+    st.markdown(store.render_masthead(view, active, store.lines_posted(posted, active),
+                                      injury_note=_inj_note, reports=store.reports_filed(FRAME)),
+                unsafe_allow_html=True)
+elif len(pre):
+    # Preseason: the games and their first tip; no lines are read.
+    st.markdown(store.render_masthead(view, pre, None, games_label="Preseason games"),
+                unsafe_allow_html=True)
+else:
+    st.markdown(store.render_masthead(view, nba, None), unsafe_allow_html=True)
+
+
+# ── Player search (?player=, seeded only when the URL changes) ───────────────
+def _player_search(frame, date: dt.date, keep: dict, feats) -> None:
+    opts = store.player_options(frame)
+    labels = dict(opts)
+    url_player = st.query_params.get("player")
+    if url_player != st.session_state.get("_url_player_seen") \
+            or st.session_state.get("_player_date") != date:
+        try:
+            pid = int(str(url_player))
+        except (TypeError, ValueError):
+            pid = None
+        st.session_state["bv_player"] = pid if pid in labels else None
+        st.session_state["_url_player_seen"] = url_player
+        st.session_state["_player_date"] = date
+
+    def _on_pick() -> None:
+        pid = st.session_state.get("bv_player")
+        if pid is None:
+            if "player" in st.query_params:
+                del st.query_params["player"]
+        else:
+            st.query_params["player"] = str(pid)
+        st.session_state["_url_player_seen"] = st.query_params.get("player")
+    st.selectbox("Find a player", [p for p, _ in opts], key="bv_player",
+                 format_func=lambda p: labels.get(p, str(p)), on_change=_on_pick,
+                 placeholder="Find a player on this slate", label_visibility="collapsed")
+    pid = st.session_state.get("bv_player")
+    if pid in labels:
+        st.markdown(store.player_panel(frame, pid, date, keep, feats), unsafe_allow_html=True)
+
+
+if FRAME is not None and len(FRAME):
+    _player_search(FRAME, view, keep, FEATS)
 
 if len(nba):
-    states = {r["game_id"]: live.game_state(r) for _, r in nba.iterrows()}
-    odds = live.odds_on(view)
-    by_game = {r["game_id"]: odds.value.get((r["away"], r["home"])) for _, r in nba.iterrows()}
     if served is not None and FRAME.empty:
-        if served.info.withheld and served.info.reason is None:
-            st.markdown(store.render_notice(
-                f"<b>{esc(pipeline.NO_LINE)}.</b> The models were trained with the spread and "
-                "total, so a game is projected once both are posted."), unsafe_allow_html=True)
-        else:
-            st.markdown(store.render_notice(
-                "<b>Projections not published yet for this date.</b> The bot publishes them "
-                "once the history features, the injury report and the lines are in."),
-                unsafe_allow_html=True)
+        st.markdown(store.empty_notice(served, game_ids=IDS), unsafe_allow_html=True)
     elif served is not None:
         if served.applied:
             # Counted from the rows the live layer marked out: a mark on a
@@ -168,10 +220,13 @@ if len(nba):
         for block in store.projection_notes(served, today=today):
             st.markdown(block, unsafe_allow_html=True)
     st.markdown(store.render_slate(
-        nba, view, keep, odds_by_game=by_game, states=states,
+        nba, view, keep, odds_by_game={r["game_id"]: posted.get((r["away"], r["home"]))
+                                       for _, r in nba.iterrows()},
+        states=states,
         line_counts=props_ui.line_counts_by_game(BOARD.shown) if BOARD is not None else None,
-        subs=store.card_subs(served)), unsafe_allow_html=True)
-    if odds.stale and odds.source == "none":
+        subs=store.card_subs(served, mpg=store.season_mpg(FEATS)),
+        b2b=store.b2b_by_game(store.rest_by_game(FEATS))), unsafe_allow_html=True)
+    if odds is not None and odds.stale and odds.source == "none":
         st.markdown(store.render_notice(
             "<b>Game lines are unavailable right now.</b> The ESPN feed did not answer, "
             "so cards show no spread or total. This is a feed outage, not missing games."),
@@ -182,8 +237,8 @@ elif len(pre):
         "Preseason minutes are not regular-season minutes (2025-26 starters averaged "
         "half their usual minutes in this preseason), so the site does not project them. "
         "The regular season opens October 20."), unsafe_allow_html=True)
-    states = {r["game_id"]: live.game_state(r) for _, r in pre.iterrows()}
-    st.markdown(store.render_slate(pre, view, keep, states=states), unsafe_allow_html=True)
+    pre_states = {r["game_id"]: live.game_state(r) for _, r in pre.iterrows()}
+    st.markdown(store.render_slate(pre, view, keep, states=pre_states), unsafe_allow_html=True)
 else:
     upcoming = [d for d in SEASON_DATES if d > view]
     nxt = (f" The next slate is <b>{upcoming[0].strftime('%A, %B %-d')}</b>."
@@ -207,4 +262,4 @@ elif TOKEN:
             "comparison appears here once projections are published for this date; your "
             "board stays attached to this link until then."), unsafe_allow_html=True)
 
-render_footer()
+render_footer(FOOT_KEEP)

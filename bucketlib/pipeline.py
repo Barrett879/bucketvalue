@@ -17,7 +17,8 @@ never computed again by anyone: the bot carries the committed rows over byte
 for byte (merge_published) and never writes a game for the first time after
 that point; the app serves the committed rows untouched (live_projections),
 mark-outs included, which never reach a frozen game. A PROVISIONAL row
-(tomorrow's, or built on state missing a final) is never the frozen
+(tomorrow's, or one whose game's own teams have an earlier game the state
+does not hold yet: provisional_for, per game) is never the frozen
 projection (spec 4: "no freeze" on stale state): past the freeze point it is
 still served and carried untouched, but with frozen False, and the local
 record must skip it.
@@ -48,11 +49,15 @@ empty).
 
 NO REPORT. report=None (nothing fetched and no committed fallback) makes every
 team no_report: statuses unknown and report_age_h null on every row, a slate
-training never had. project() refuses it itself (NoReport, a NullSkew) rather
-than leaving it to models.check_nulls, which skips strata under
-models.NULL_MIN_ROWS rows and so let a small slate (opening night, one game)
-through. The app then serves the committed projections; the bot writes nothing
-new for that date and says so.
+training never had. So does a report that is held but out of reach for every
+game (context: titled more than 30 hours before the cutoff, as the committed
+or in-memory report becomes after a day-long ak-static outage). project()
+refuses both itself (NoReport, a NullSkew) rather than leaving them to
+models.check_nulls, which skips strata under models.NULL_MIN_ROWS rows and so
+let a small slate (opening night, one game) through. The out-of-reach check
+is per slate and exact: every untipped game's cutoff is `now`, so a report is
+in reach for all of them or for none. The app then serves the committed
+projections; the bot writes nothing new for that date and says so.
 
 COMMIT CHURN (the bot's file, merge_published). Two model features move with
 the clock alone (hours_to_tip, report_age_h), so recomputing an untipped game
@@ -60,19 +65,34 @@ every bot run changes its numbers every run (measured on the 2026-03-12 slate:
 every game, at +15 minutes and later, up to 0.5 minutes of mu_min) and the bot
 would commit both files on every cron. So a game's committed rows are
 recomputed only when an INPUT changed: a column in INPUT_COLS (the row set,
-statuses, report time, lines, provisional, model version) or its history
-feature rows (their content hash, kept per game in the file's metadata under
-BASIS), or when the clock crossed one of the game's training horizons
-(horizons.HORIZONS: d1_1730, d0_1100, t_120, t_15, each floored at tip minus
-5 minutes) since the rows were computed, so the published numbers are at most
-one horizon behind the clock and are refreshed at the horizons training
-measured. The app recomputes untipped games live in any case.
+statuses, reasons, team states, lines, provisional, model version) or its
+history feature rows (their content hash, kept per game in the file's
+metadata under BASIS), or when the clock crossed one of the game's training
+horizons (horizons.HORIZONS: d1_1730, d0_1100, t_120, t_15, each floored at
+tip minus 5 minutes) since the rows were computed, so the published numbers
+are at most one horizon behind the clock and are refreshed at the horizons
+training measured. The report's title time is NOT an input: since 2025-12-22
+the NBA re-issues the report every 15 minutes around the clock with a new
+title even when nothing changed (2026-03-12: 96 of 96 slots present, the
+row count changed about 11 times; the 12:00 and 12:15 reports are row for
+row identical), so a title-only re-issue moves report_age_h, which is the clock,
+and is refreshed at the next horizon like the rest of the clock. The rows
+kept carry the title of the report they were computed from (report_ts_et is
+a stamp, STAMPS). The committed injury files follow the same rule
+(context.write_committed). The app recomputes untipped games live in any
+case.
+
+PLAY-IN. Projected games are regular-season games only (PROJECTED_TYPES,
+read through state_games): the models never saw a play-in row and project
+those games with a measured starter-minutes bias. Play-in games stay state
+games, so their box scores still feed history and completeness.
 
 STATE STAMP. The committed features file carries, in its metadata under
 HISTORY, which ingested games its history held (history_stamp). The app
 compares it with the state now: a final ingested since (the bot rebuilt the
-finals but not this date's features) makes the live frame provisional, with a
-note, instead of silently serving features that miss a game.
+finals but not this date's features) makes every game of the live frame
+provisional, with a note, instead of silently serving features that miss a
+game.
 
 THE FRAME (section 3, plus `adjusted`): identity, availability (p_play,
 inj_status, inj_reason, team_state: what context.display_status reads), the
@@ -89,6 +109,7 @@ touches nothing else.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -103,7 +124,7 @@ from . import live as LV
 from . import models as M
 from . import serve as V
 from . import state as S
-from .util import ET, UTC, season_for_date, to_et
+from .util import ET, UTC, now_utc, season_for_date, to_et
 
 FEATURES_FILE = "features_v1.parquet"
 PROJECTIONS_FILE = "projections_v1.parquet"
@@ -112,12 +133,26 @@ LINE_COLS = ("home_line", "total", "team_line", "implied_total", "abs_line")
 NO_LINE = "Projections post when the line does"
 NOT_PUBLISHED = "not published yet"
 MARKS_NOT_APPLIED = "Mark-outs need the live layer and are not applied."
+# Info.stale's prefix when an UNEXPECTED exception (a bug, not a feed) stopped
+# the live frame: "<prefix>: <type>: <message>" (live_projections).
+LIVE_FRAME_FAILED = "the live frame failed"
 STALE_FEATURES = ("The history features were built before the latest finals were ingested: "
                   "provisional until the bot rebuilds them.")
 # Metadata keys: the features file's state stamp, the projections file's
 # per-game feature hashes.
 HISTORY = "history"
 BASIS = "basis"
+# The game types the site PROJECTS: the regular season only. Every production
+# model trains on regular-season rows (models.training_rows: game_id 002;
+# play-in rows stayed out of the gate too). Play-in games are state games
+# (tables.STATE_TYPES: they feed history and completeness) but get no
+# projection: scored on the 37 play-in games of the training table, which they
+# never saw, the production models projected players at 28+ minutes 4.9
+# minutes short (positive in every season, +3.1 to +8.2; +0.45 on late
+# regular-season games) and players under 15 minutes 5.7 too long, with
+# availability log loss 0.375 against 0.258 (2026-10-09 audit). Play-in
+# rotations tighten, and nothing in the frame would flag those numbers.
+PROJECTED_TYPES = frozenset({"RS"})
 # The fewest rows any team had in a training team-game (19,112 of them,
 # 2018-19..2025-26). A side with fewer is a broken roster pull for that team,
 # never a slate to publish quietly.
@@ -144,19 +179,29 @@ ORDER = ["tip_utc", "game_id", "team", "person_id"]
 STAMPS = ("computed_at", "report_ts_et")
 # The inputs of a published row that the frame itself shows (the rest is the
 # feature rows, BASIS). Equal inputs and equal features: only the clock moved.
+# The report's TITLE is not an input: the NBA re-issues the report every 15
+# minutes around the clock with a new title even when no row changed, and what
+# the report says about a row is inj_status, inj_reason and team_state (module
+# docstring: COMMIT CHURN).
 INPUT_COLS = [*IDENTITY, "inj_status", "inj_reason", "team_state", "provisional",
-              "model_version", "report_ts_et", "home_line", "total", "adjusted"]
+              "model_version", "home_line", "total", "adjusted"]
 
-# What the app's live layer falls back on: every way a fetch, a committed file,
+# The live layer's EXPECTED failures, each served from the committed
+# projections with its own stale reason: every way a fetch, a committed file,
 # the models or the null check can fail (NullSkew is a ValueError,
-# MissingFeatures a KeyError, ModelMismatch a RuntimeError). A TypeError or
-# AttributeError is a bug and propagates.
+# MissingFeatures a KeyError, ModelMismatch a RuntimeError). Anything else (a
+# TypeError, an AttributeError: a bug) is logged with its traceback and
+# served the same way, with the exception named (live_projections).
 LIVE_FAILURES = (RuntimeError, ValueError, KeyError, OSError, H.FetchError)
 
 
 class NoReport(M.NullSkew):
-    """No injury report at all: every status unknown and report_age_h null on
-    every row, which training never had. Refused whatever the slate size."""
+    """No injury report in reach: every status unknown and report_age_h null
+    on every row, which training never had. Either no report is held at all,
+    or the one held is out of reach for every game (titled 30+ hours before
+    the cutoff, horizons.MAX_BACK: the committed or in-memory report after a
+    day of ak-static outage or parse failures). Refused whatever the slate
+    size."""
 
 
 # ── Paths and slate helpers ──────────────────────────────────────────────────
@@ -174,14 +219,17 @@ def _utc(now) -> dt.datetime:
 
 
 def state_games(schedule: pd.DataFrame, date) -> pd.DataFrame:
-    """The date's regular-season and play-in games with both teams known, as
-    schedule rows (game_date stays a python date, which the report validation
-    compares against), in tip order. Which games are state games is
-    serve._state_games, the one definition."""
+    """The date's PROJECTED games: state games (serve._state_games, the one
+    definition: both teams known, not postponed) of a PROJECTED_TYPES type,
+    as schedule rows (game_date stays a python date, which the report
+    validation compares against), in tip order. The bot, the app's live
+    frame and store.projected_ids all read this, so a play-in game is
+    projected nowhere while it still feeds history and completeness."""
     d = pd.Timestamp(S.as_date(date))
     if schedule is None or schedule.empty:
         return pd.DataFrame(columns=["game_id", "game_date", "tip_utc", "away", "home"])
-    ids = set(V._state_games(schedule)["game_id"])
+    st = V._state_games(schedule)
+    ids = set(st.loc[st["game_type"].isin(PROJECTED_TYPES), "game_id"])
     g = schedule[schedule["game_id"].isin(ids) & (pd.to_datetime(schedule["game_date"]) == d)]
     return g.sort_values(["tip_utc", "game_id"], kind="mergesort").reset_index(drop=True)
 
@@ -189,20 +237,38 @@ def state_games(schedule: pd.DataFrame, date) -> pd.DataFrame:
 def frozen_ids(games: pd.DataFrame, now) -> set[str]:
     """Games past their freeze point (tip minus FREEZE_LEAD) at `now`. Any
     frame with game_id and tip_utc will do (schedule rows, or committed
-    projection rows, which carry their own tip)."""
+    projection rows, which carry their own tip). A game whose tip TIME is not
+    set (live.time_tbd: cdn's `time_tbd`, the schedule's tip a made-up 00:00
+    ET) has no real tip, so it has no freeze point and is never frozen."""
     if games is None or games.empty:
         return set()
+    at = pd.Timestamp(_utc(now))
     tips = pd.to_datetime(games["tip_utc"], utc=True)
-    return set(games.loc[(tips - FREEZE_LEAD) <= pd.Timestamp(_utc(now)), "game_id"])
+    tbd = games.apply(LV.time_tbd, axis=1).astype(bool)
+    return set(games.loc[((tips - FREEZE_LEAD) <= at) & ~tbd, "game_id"])
 
 
 def provisional_for(date, today: dt.date, schedule: pd.DataFrame, season: str
-                    ) -> tuple[bool, list[str]]:
-    """(provisional, completeness gaps). Provisional: a date after `today`
-    (ET), or one whose state misses a final game of a team playing that day
-    (serve.completeness), so it is never freezable."""
-    gaps = V.completeness(date, schedule, season)
-    return S.as_date(date) > today or bool(gaps), gaps
+                    ) -> tuple[dict[str, bool], dict[str, list[str]]]:
+    """({game_id: provisional}, {game_id: completeness gaps}) for the state
+    games on `date` (serve.provisional_by_game, the one rule). Per game (spec
+    4: "every Final game of both teams before D"): a game is provisional,
+    never freezable, when the date is after `today` (ET) or when an earlier
+    game of ITS two teams is not ingested, whatever that game's status (one
+    still in progress is a gap too). project() takes the map as is."""
+    return V.provisional_by_game(date, today, schedule, season)
+
+
+def _provisional_rows(game_ids: pd.Series, provisional) -> pd.Series:
+    """project()'s provisional column: one flag for every row (a bool), or
+    per game from a {game_id: bool} map, where a game missing from the map
+    is provisional (fail closed: a game no rule vouched for is never
+    freezable by accident)."""
+    if isinstance(provisional, Mapping):
+        flags = {str(g): bool(v) for g, v in provisional.items()}
+        return pd.Series([flags.get(str(g), True) for g in game_ids], index=game_ids.index,
+                         dtype=bool)
+    return pd.Series(bool(provisional), index=game_ids.index, dtype=bool)
 
 
 def short_games(games: pd.DataFrame, rows: pd.DataFrame, min_rows: int = MIN_TEAM_ROWS
@@ -347,18 +413,22 @@ def _sorted(df: pd.DataFrame) -> pd.DataFrame:
 
 def project(feature_rows: pd.DataFrame, games: pd.DataFrame, schedule: pd.DataFrame, report,
             lines: pd.DataFrame | None, models: M.Models, now, marked_out=None,
-            provisional: bool = False, *, names: pd.DataFrame | None = None) -> pd.DataFrame:
+            provisional: bool | Mapping[str, bool] = False, *,
+            names: pd.DataFrame | None = None) -> pd.DataFrame:
     """The projection frame for `feature_rows` (committed history features:
     serve.history_features rows, no lines, no context).
 
     games       schedule rows of every game the rows are on (game_id,
                 game_date, tip_utc, away, home)
     schedule    the season schedule (validates the report's rows)
-    report      a ParsedReport / CommittedReport; None raises NoReport
+    report      a ParsedReport / CommittedReport; None raises NoReport, and so
+                does a report out of reach for every game of the rows
     lines       (game_id, home_line, total); a game with no row, or without
                 both values, is WITHHELD (module docstring)
     now         aware clock; the context cutoff is min(now, tip - 5 min)
     marked_out  person ids a visitor marked out (status Out at age 0)
+    provisional one flag for every row, or {game_id: bool} per game
+                (provisional_for); a game missing from the map is provisional
     names       every spelling per person id (History.names, known_names)
 
     Raises NoReport and NullSkew (models.check_nulls) and MissingFeatures
@@ -387,6 +457,17 @@ def project(feature_rows: pd.DataFrame, games: pd.DataFrame, schedule: pd.DataFr
     games = games[games["game_id"].isin(set(rows["game_id"]))]
     marks = {int(p) for p in marked_out} if marked_out else set()
     ctx = CTX.context_for(rows, games, schedule, report, now_u, names, marked_out=marks or None)
+    if (ctx["team_state"] == "no_report").all():
+        # A report is held but in reach for no game: the same slate as no
+        # report at all. Untipped games share the cutoff `now`, so the report
+        # is in reach for every game or for none, and this slate-level check
+        # is exact (a game past tip - 5 min is never projected here).
+        ts = to_et(report.meta["report_ts_et"])
+        raise NoReport(f"the injury report titled {ts:%Y-%m-%d %H:%M} ET is out of reach for every "
+                       f"game at {to_et(now_u):%Y-%m-%d %H:%M} ET (the training selection rule: "
+                       f"titled before the cutoff and at most {HZ.MAX_BACK.total_seconds() / 3600:.0f} "
+                       f"hours before it), so this is no injury report: every status would be "
+                       f"unknown and report_age_h null on every row, which training never had")
     M.check_nulls(models, ctx)
     pred = M.predict(models, ctx)
 
@@ -398,7 +479,7 @@ def project(feature_rows: pd.DataFrame, games: pd.DataFrame, schedule: pd.DataFr
     for c in [*M.STATS, *M.COMPOSED, "mu_min", *(f"rate_{s}" for s in M.STATS)]:
         out[c] = pred[c]
     out["games_prior"] = ctx["career_games"]
-    out["provisional"] = bool(provisional)
+    out["provisional"] = _provisional_rows(out["game_id"], provisional)
     out["model_version"] = models.version
     # One report per call: a row carries its time wherever the report was in
     # reach for that game (report_states leaves exactly those teams off
@@ -528,11 +609,21 @@ class Info:
     report_ts_et: dt.datetime | None = None
     report_source: str | None = None  # live.Live source of the report ("live", "memory", "committed")
     lines_source: str | None = None
-    # Any served row provisional (tomorrow, state missing a final, features
-    # built before the latest finals): the stale-state badge.
+    # Any served row provisional (tomorrow, an earlier game of its teams not
+    # ingested, features built before the latest finals): the stale-state
+    # badge. Which rows: their own `provisional` column (per game).
     provisional: bool = False
     data_through: dt.date | None = None
+    # The earlier games not ingested (serve.completeness_by_game): the union
+    # over the date's projected games, and per game (a game's own gaps are
+    # what make IT provisional; the Game page names those).
     completeness: list[str] = field(default_factory=list)
+    completeness_by_game: dict[str, list[str]] = field(default_factory=dict)
+    # Each game recomputed now (not past its freeze point): its own flag
+    # (provisional_for, or every game when the features miss an ingested
+    # final). A game served from rows reads its rows' own column; one with
+    # no rows (withheld, unbuilt) reads this, never the date's `provisional`.
+    provisional_by_game: dict[str, bool] = field(default_factory=dict)
     model_version: str | None = None
     withheld: list[str] = field(default_factory=list)       # no line yet: NO_LINE
     # past tip - 5 min and served from committed, non-provisional rows
@@ -577,7 +668,9 @@ def _committed_only(committed: pd.DataFrame | None, games: pd.DataFrame | None, 
     """The committed projections for the date's games as the bot wrote them
     (frozen flagged), with `why` as the stale notice. Without `games` (the
     schedule could not be read) every committed row is served, and its own
-    tip_utc decides whether its game is past the freeze point."""
+    tip_utc decides whether its game is past the freeze point. The one
+    implementation behind committed_projections and every fallback of
+    live_projections (which hands it the Info it has filled so far)."""
     info.stale = why
     if marks:
         info.notes.append(MARKS_NOT_APPLIED)
@@ -596,6 +689,24 @@ def _committed_only(committed: pd.DataFrame | None, games: pd.DataFrame | None, 
     return _finish(rows, past, info)
 
 
+def committed_projections(date, now=None, *, games: pd.DataFrame | None = None,
+                          why: str | None = None, marked_out=None) -> tuple[pd.DataFrame, Info]:
+    """The committed projections of one ET date as the bot wrote them, and
+    the Info a page shows with them: frozen flagged at `now` (default: the
+    clock, util.now_utc), source "committed" with `why` as Info.stale, or an
+    empty frame with Info.reason NOT_PUBLISHED when nothing is committed.
+    `games` (state_games of the date) limits the rows to the date's
+    projected games and decides the freeze from the schedule's tips; without
+    it every committed row is served and its own tip_utc decides. Mark-outs
+    are never applied here (Info.notes says so). This is what live_projections
+    serves whenever the live frame cannot be built."""
+    d = S.as_date(date)
+    now_u = _utc(now if now is not None else now_utc())
+    committed, _ = read_published(d)
+    marks = {int(p) for p in marked_out} if marked_out else set()
+    return _committed_only(committed, games, now_u, Info(date=d), marks, why)
+
+
 def live_projections(date, now, marked_out=None, *, report=None, odds=None,
                      models: M.Models | None = None, schedule: pd.DataFrame | None = None
                      ) -> tuple[pd.DataFrame, Info]:
@@ -607,17 +718,36 @@ def live_projections(date, now, marked_out=None, *, report=None, odds=None,
     from the committed projections UNTOUCHED (frozen=True unless provisional;
     mark-outs never reach them). Any live failure, a NullSkew or no report
     at all serves the committed projections with Info.stale saying why.
-    Features built before the latest ingested finals make the frame
-    provisional. With neither file committed for the date: an empty frame
-    and Info.reason NOT_PUBLISHED.
+    Provisional is per game (provisional_for: tomorrow, or an earlier game of
+    that game's own teams not ingested); features built before the latest
+    ingested finals make every game provisional. With neither file committed
+    for the date: an empty frame and Info.reason NOT_PUBLISHED.
+
+    ANY other exception while the live frame is built (a bug: a TypeError, an
+    AttributeError) is logged with its traceback (logging.exception) and the
+    committed projections are served (committed_projections) with Info.stale
+    naming the exception's type and message: a page never goes down for the
+    live upgrade.
 
     report, odds, models, schedule: pass them to skip the live fetch / load
     (a live.Live or a plain value); the app passes its cached models.
     """
     d = S.as_date(date)
     now_u = _utc(now)
-    info = Info(date=d)
     marks = {int(p) for p in marked_out} if marked_out else set()
+    try:
+        return _build_live(d, now_u, marks, report, odds, models, schedule)
+    except Exception as e:  # noqa: BLE001 - logged with its traceback, never hidden
+        C.logger.exception("live projections for %s failed; serving the committed projections", d)
+        return committed_projections(d, now_u, why=f"{LIVE_FRAME_FAILED}: {type(e).__name__}: {e}",
+                                     marked_out=marks)
+
+
+def _build_live(d: dt.date, now_u: dt.datetime, marks: set[int], report, odds,
+                models: M.Models | None, schedule: pd.DataFrame | None) -> tuple[pd.DataFrame, Info]:
+    """live_projections' frame; the expected failures (LIVE_FAILURES) are
+    handled here, each with its own stale reason."""
+    info = Info(date=d)
     feats = C.read_parquet(features_path(d))
     committed = C.read_parquet(projections_path(d))
     committed = conform(committed) if committed is not None else None
@@ -629,7 +759,9 @@ def live_projections(date, now, marked_out=None, *, report=None, odds=None,
         sched = schedule if schedule is not None else LV.schedule().value
         games = state_games(sched, d)
         frozen = frozen_ids(games, now_u)
-        info.provisional, info.completeness = provisional_for(d, to_et(now_u).date(), sched, season)
+        prov, gaps = provisional_for(d, to_et(now_u).date(), sched, season)
+        info.completeness_by_game = {g: list(gaps.get(g, [])) for g in games["game_id"]}
+        info.completeness = sorted({x for v in info.completeness_by_game.values() for x in v})
         ingested = ingested_games(season)
         info.data_through = data_through(season, ingested)
     except LIVE_FAILURES as e:
@@ -639,6 +771,10 @@ def live_projections(date, now, marked_out=None, *, report=None, odds=None,
     info.unpublished = sorted(frozen - have)
     tipped = committed[committed["game_id"].isin(frozen)] if committed is not None else empty_frame()
     todo = [g for g in games["game_id"] if g not in frozen]
+    # The games recomputed below; a tipped game's flag is its committed rows'
+    # own (_finish reads the served rows).
+    info.provisional_by_game = {g: bool(prov.get(g, True)) for g in todo}
+    info.provisional = any(info.provisional_by_game.values())
     if not todo:
         info.source = "committed" if len(tipped) else "none"
         info.reason = None if len(tipped) else NOT_PUBLISHED
@@ -650,6 +786,9 @@ def live_projections(date, now, marked_out=None, *, report=None, odds=None,
         return _committed_only(committed, games, now_u, info, marks,
                                "the history features for this date are not committed")
     if C.read_parquet_meta(features_path(d)).get(HISTORY) != history_stamp(season, d, ingested):
+        # Features that miss an ingested final: every game is provisional.
+        prov = {g: True for g in games["game_id"]}
+        info.provisional_by_game = {g: True for g in todo}
         info.provisional = True
         info.notes.append(STALE_FEATURES)
     # A game the bot has not built features for (added to the schedule since)
@@ -665,7 +804,7 @@ def live_projections(date, now, marked_out=None, *, report=None, odds=None,
         mdl = models if models is not None else M.load()
         rows = feats[feats["game_id"].isin(todo)]
         fresh = project(rows, games, sched, rep, lines_from_odds(od, games), mdl, now_u,
-                        marked_out=marks, provisional=info.provisional,
+                        marked_out=marks, provisional=prov,
                         names=known_names(season, d))
     except LIVE_FAILURES as e:
         return _committed_only(committed, games, now_u, info, marks, f"{type(e).__name__}: {e}")

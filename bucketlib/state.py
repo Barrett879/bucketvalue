@@ -49,7 +49,7 @@ from . import cache as C
 from . import features as F
 from . import tables
 from . import train as T
-from .util import iso_date, now_utc, season_end_year, season_str
+from .util import iso_date, now_utc, season_end_year, season_for_date, season_str
 
 STATE_DIR = C.REPO_ROOT / "state"
 SEED_DIR = STATE_DIR / "seed"
@@ -108,6 +108,16 @@ def current_path(name: str) -> Path:
 
 def serve_dir(date) -> Path:
     return STATE_DIR / "serve" / as_date(date).isoformat()
+
+
+def odds_path(date) -> Path:
+    """The bot's pregame odds snapshots for one ET date (ESPN scoreboard
+    rows: away, home, home_line, total, captured_at, ...), in the season
+    directory of that date: state/season/{season}/odds_{YYYY-MM-DD}.parquet.
+    The one place the path is built: the bot writes it (step_odds), the app
+    reads it (store.committed_odds)."""
+    d = as_date(date)
+    return season_dir(season_for_date(d)) / f"odds_{d.isoformat()}.parquet"
 
 
 def override_dir(season: str) -> Path:

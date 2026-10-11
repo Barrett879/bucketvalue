@@ -104,7 +104,7 @@ stamp), never raw JSON or PDFs: ESPN core keeps pregame closes and ak-static kee
 old PDFs, so next season can rebuild from source.
 
 **GAME_UNIVERSE** (one whitelist shared by backfill, bot and app): id prefix `002`
-regular season (training + state), `005` play-in (state, flagged), `004` playoffs
+regular season (training + state), `005` play-in (state; NOT projected in v1, the models trained on regular-season rows only; decided 2026-10-09), `004` playoffs
 (stored, excluded from v1 training), `001` preseason and `003` All-Star never enter
 state, `006` Cup final used ONLY for rest/schedule features (it is in no season log).
 Training window 2014-15..2025-26; LeagueGameLog 2011-12..2013-14 is pulled for
@@ -228,8 +228,10 @@ percentiles. Targets that fail ship a labelled baseline.
   Actions and is local-only (backfill, bio). Daily box scores come
   from the cdn liveData box score (one call per game: every counting stat, status,
   starter, seconds, Final flag); stats.nba.com is used for the backfill and slow data
-  (playerindex, bio). Fallbacks in order: cdn from Actions; a launchd job on Barrett's
-  Mac as the single writer; ESPN summary box scores; a visible "data through" stamp.
+  (playerindex, bio). Fallbacks in order: cdn from Actions; Barrett's Mac as the single
+  writer (docs/runbook_opening_night.md section 5, `scripts/commit_state.sh --local`);
+  a visible "data through" stamp. (ESPN summary box scores were dropped from this list
+  on 2026-10-09: no parser exists, and the Mac fallback covers the same outage.)
 - **State**: player state keyed by PLAYER (season and team boundary rules written once,
   shared); one context function f(state, target game, team schedule, horizon inputs)
   called by training AND serving. A committed end-of-2025-26 state seed plus a
@@ -257,7 +259,12 @@ percentiles. Targets that fail ship a labelled baseline.
   the last Final game by more than a game-day, or on a date with Finals yielding 0 rows;
   a dead-man's switch for runs that never start; an offseason keepalive (scheduled
   workflows in a public repo disable after 60 days idle). Opening-night runbook:
-  manual runs Oct 19 evening and Oct 20 morning (roster cut-down).
+  manual runs Oct 19 evening and Oct 20 morning (roster cut-down). BOS@DET tips at
+  3pm ET, so the first freeze point is 2:55pm ET Oct 20 (tip minus
+  `pipeline.FREEZE_LEAD`). The Oct 20 run must finish well before then: a game past
+  its freeze point is never written for the first time, and the Oct 19 run's rows for
+  Oct 20 are provisional, which never freeze, so a late run leaves BOS@DET with no
+  frozen projection.
 - **Memory**: models are 6-13 MB; simulation capped per game.
 
 ## 5. Site

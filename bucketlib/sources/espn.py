@@ -281,10 +281,18 @@ def _check_dates_param(dates: str) -> None:
                          "(the range form A-B is an HTTP 400 on this API)")
 
 
-def fetch_scoreboard(dates: str, limit: int = MONTH_LIMIT) -> dict:
-    """One raw scoreboard request. `dates` is YYYYMM or YYYYMMDD (US-local)."""
+def fetch_scoreboard(dates: str, limit: int = MONTH_LIMIT, *, timeout: float | None = None,
+                     retries: int | None = None) -> dict:
+    """One raw scoreboard request. `dates` is YYYYMM or YYYYMMDD (US-local).
+
+    timeout, retries: http.fetch's, which stay its own defaults when not
+    given (the bot and the backfill); the app's live layer passes its short
+    budget and no retries (live.odds_on). A payload without an events list
+    raises BadPayload."""
     _check_dates_param(dates)
-    payload = http.fetch(SITE + "scoreboard", params={"dates": str(dates), "limit": str(limit)})
+    budget = {k: v for k, v in (("timeout", timeout), ("retries", retries)) if v is not None}
+    payload = http.fetch(SITE + "scoreboard", params={"dates": str(dates), "limit": str(limit)},
+                         **budget)
     if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
         raise http.BadPayload(SITE + "scoreboard", f"dates={dates}: no events list in payload")
     return payload

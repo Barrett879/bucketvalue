@@ -252,6 +252,25 @@ def test_not_final_box_is_refused():
         B.parse_cdn(p, "0022300500")
 
 
+def test_is_final_is_the_parsers_own_final_rule():
+    """box.is_final answers what parse_cdn refuses on (the app shows a box in
+    progress rather than refusing it): gameStatus 3, or cdn's 'finalbox'
+    (the integer or the 2019-20 string), and nothing else; 'finalbox' is a
+    cdn word only."""
+    for gid in ("0022300500", "0021900718"):
+        g = cdn(gid)["game"]
+        assert B.is_final(g, gid) and B.is_final(g, gid, "cdn")
+        B.parse_cdn(cdn(gid), gid)                         # the parser agrees
+    g = cdn("0021900718")["game"]
+    assert g["gameStatus"] == "finalbox" and not B.is_final(g, "0021900718", "BoxScoreSummaryV3")
+    for status in (1, 2, "live", None):
+        p = cdn("0022300500")
+        p["game"]["gameStatus"] = status
+        assert not B.is_final(p["game"], "0022300500")
+        with pytest.raises(B.NotFinal):
+            B.parse_cdn(p, "0022300500")
+
+
 # ── V3 ───────────────────────────────────────────────────────────────────────
 def test_v3_first_five_are_starters_even_when_bench_has_positions():
     box, summ = v3("0021400500")

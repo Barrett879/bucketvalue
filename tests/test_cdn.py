@@ -60,3 +60,40 @@ def test_player_index_two_way_and_names():
     assert df.two_way.sum() >= 1
     jokic = df[df.person_id == 203999].iloc[0]
     assert jokic["name"] == "Nikola Jokić" and jokic.team == "DEN"
+
+
+def _payload():
+    return json.loads((FIX / "schedule_2026-27_trim.json").read_text())
+
+
+def _games(payload):
+    return {g["gameId"]: g for day in payload["leagueSchedule"]["gameDates"] for g in day["games"]}
+
+
+def test_postponed_only_on_positive_evidence():
+    """'Y' or a PPD/Postponed status text postpones; 'N', blank and 'A' (every
+    game of the 2014-18, 2021-22 and 2023-24 stats schedules) do not; any
+    other value is listed in attrs and never excludes a game."""
+    payload = _payload()
+    g = _games(payload)
+    g["0022600001"]["postponedStatus"] = "Y"
+    g["0022600002"]["gameStatusText"] = "PPD"
+    g["0022600003"]["postponedStatus"] = "A"
+    g["0012600009"]["postponedStatus"] = "Q"
+    g["0012600042"]["postponedStatus"] = ""
+    df = cdn.parse_schedule(payload).set_index("game_id")
+    assert df.loc["0022600001", "postponed"] and df.loc["0022600002", "postponed"]
+    assert not df.loc[["0022600003", "0012600009", "0022601201", "0062600001"], "postponed"].any()
+    assert df.attrs["postponed_status_unknown"] == [("0012600009", "Q")]
+    assert cdn.parse_schedule(_payload()).attrs["postponed_status_unknown"] == []
+    assert not cdn.parse_schedule(_payload())["postponed"].any()
+
+
+def test_unknown_tip_time_is_flagged():
+    """Cup knockout placeholders: 'TBD', gameTimeEst 0001-01-01, and a made-up
+    05:00Z tip (midnight ET). The date stands; the time is flagged."""
+    df = sched().set_index("game_id")
+    assert df.loc["0022601201", "time_tbd"] and df.loc["0062600001", "time_tbd"]
+    assert df.loc["0022601201", "tip_utc"].isoformat() == "2026-12-04T05:00:00+00:00"
+    ordinary = df.drop(index=["0022601201", "0062600001"])
+    assert len(ordinary) >= 4 and not ordinary["time_tbd"].any()

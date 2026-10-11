@@ -1,0 +1,7 @@
+fold,season,models,horizon,measure,team_games,full_roster_mean,played_only_mean,actual_mean,240_plus_25_EOT,full_minus_actual_mean,played_only_minus_actual_mean,played_only_minus_actual_rmse,star_expected_min_mean,star_p_play_after_mean,team_sum_before_mean,team_sum_after_mean,team_minutes_lost_mean,team_minutes_lost_p90,absorbed_share_mean,absorbed_share_p10,absorbed_share_median,opponent_change_max_abs
+validate,2023-24,walk-forward 2018-19..2022-23,d0_1100,coherence,600,243.3532,243.1826,241.0833,241.0833,2.2698,2.0993,21.8358,,,,,,,,,,
+validate,2023-24,walk-forward 2018-19..2022-23,d0_1100,markout,600,,,,,,,,33.4678,0.0060,243.3532,241.4974,1.8558,10.5208,0.9459,0.6841,0.9181,0.0000
+test,2024-25,walk-forward 2018-19..2023-24,d0_1100,coherence,600,235.1228,240.3877,241.1667,241.1667,-6.0439,-0.7790,21.7401,,,,,,,,,,
+test,2024-25,walk-forward 2018-19..2023-24,d0_1100,markout,600,,,,,,,,32.9531,0.0056,235.1228,233.4392,1.6835,10.0788,0.9496,0.6915,0.9321,0.0000
+holdout,2025-26,walk-forward 2018-19..2024-25,d0_1100,coherence,600,243.4530,242.8161,240.9998,241.0000,2.4532,1.8164,22.2087,,,,,,,,,,
+holdout,2025-26,walk-forward 2018-19..2024-25,d0_1100,markout,600,,,,,,,,32.6474,0.0054,243.4530,240.8392,2.6138,9.8965,0.9209,0.6980,0.9032,0.0000

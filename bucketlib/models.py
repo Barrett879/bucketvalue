@@ -25,7 +25,9 @@ WHY NULL FRACTIONS IN THE REGISTRY. A column that is present but NaN where
 training had values (or filled where training had NaN) passes MissingFeatures.
 Spec lesson 5 checks it STRATIFIED, and the training table is local only, so
 the training null fractions per stratum ship inside the registry and
-check_nulls() compares serve rows against them.
+check_nulls() compares serve rows against them. A feature that is NaN by
+construction where another feature says so (STRUCTURAL_NAN) is checked by
+that invariant instead of by fraction.
 
 Nothing is cached at module level: the app wraps load() in its own resource
 cache, and every test gets a fresh load it can throw away.
@@ -74,6 +76,11 @@ HGB = dict(max_iter=400, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf
 MAX_MIN = 53.0          # mu_min is clipped to [0, MAX_MIN], as the gate scored it
 RATE_CAP = 5.0          # per-minute target cap: a 2-second cameo with a rebound is not a rate
 MIN_EXPOSURE = 1 / 60   # one second: the floor on minutes in the rate target and its weight
+# A made count is part of its attempts, a three is part of the field goals:
+# (rate, the rates it may not exceed), applied in order so each ceiling is
+# itself already capped (predict).
+RATE_CEILINGS = (("fg3a", ("fga",)), ("fgm", ("fga",)), ("fg3m", ("fg3a", "fgm")),
+                 ("ftm", ("fta",)))
 
 # Null-fraction strata (spec lesson 5): the player's games into the season
 # (events_s: every roster event, played or not) bucketed 0 / 1-2 / 3-9 / 10+,
@@ -95,6 +102,22 @@ NULL_LABELS = ("0", "1-2", "3-9", "10+")
 NULL_TOL = 0.20
 NULL_Z = 4.0
 NULL_MIN_ROWS = 20
+# Features that are NaN BY CONSTRUCTION exactly where another feature says so,
+# mapped to that feature (its rows are NaN iff it is 1). livectx.build_context:
+# a player listed Out is not redistributed to, so his tm_out_max_min is NaN
+# (exact on all 325,371 training rows). Its null fraction is therefore the
+# slate's Out share, a property of the slate, not of the serving path, and the
+# registry's reference for it pools the four horizons while serving checks the
+# games still to tip, where the Out share runs higher (2025-26 rebuilt at t_15:
+# 0.37 on the 15-game final day, 0.40 on its 8-game remainder, against 0.16
+# pooled). The fraction test fired on such slates and withheld every untipped
+# game of the date. null_skew checks these features by their invariant
+# instead, exactly and on every row whatever the slate size: NaN on a row the
+# key does not flag, or a value on a row it does, is the skew. Their
+# null_reference entries stay (the registry must cover every feature) and are
+# not read. The NULL_TOL calibration above pooled mixed horizons per date, so
+# it never saw a remaining-slate subset; this is why it did not fire there.
+STRUCTURAL_NAN = {"tm_out_max_min": "inj_out"}
 
 
 class ModelMismatch(RuntimeError):
@@ -400,13 +423,23 @@ def null_skew(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
     """Every (stratum, feature) cell whose serve null fraction differs from
     the registry's training fraction by more than its tolerance, with
     stratum, feature, n, train, serve, tol. Empty means no skew. Rows with no
-    stratum come back as one cell with feature "(stratum keys)"."""
+    stratum come back as one cell with feature "(stratum keys)". A
+    STRUCTURAL_NAN feature is not compared by fraction: one cell (stratum
+    "(all: NaN iff <key>)", n = rows checked, serve = the share of rows
+    breaking the invariant, train 0) when any row breaks it."""
     cols = ["stratum", "feature", "n", "train", "serve", "tol"]
     X = feature_matrix(models, rows)
     st = null_strata(X)
     cells = []
     if st.isna().any():
         cells.append(("(none)", "(stratum keys)", int(st.isna().sum()), 0.0, 1.0, 0.0))
+    for f, key in STRUCTURAL_NAN.items():
+        if f not in X.columns or not len(X):
+            continue
+        flag = X[key] if key in X.columns else rows[key].astype("float64")
+        off = X[f].isna() != flag.eq(1.0)
+        if off.any():
+            cells.append((f"(all: NaN iff {key})", f, len(X), 0.0, float(off.mean()), 0.0))
     ref = models.registry["null_reference"]
     serve = X.isna().groupby(st).mean()
     n_serve = st.value_counts()
@@ -418,6 +451,8 @@ def null_skew(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
         q = serve.loc[s, models.features]
         tol = np.maximum(NULL_TOL, NULL_Z * np.sqrt(p * (1 - p) * (1 / n + 1 / n_ref)))
         for f in q.index[(q - p).abs() > tol]:
+            if f in STRUCTURAL_NAN:
+                continue
             cells.append((s, f, n, float(p[f]), float(q[f]), float(tol[f])))
     return pd.DataFrame(cells, columns=cols)
 
@@ -429,9 +464,16 @@ def check_nulls(models: Models, rows: pd.DataFrame) -> None:
     bad = null_skew(models, rows)
     if len(bad):
         raise NullSkew(f"{len(bad)} (stratum, feature) null fraction(s) differ from training: "
-                       + "; ".join(f"{r.stratum} {r.feature} serve {r.serve:.2f} vs train "
-                                   f"{r.train:.2f} (n {r.n}, tol {r.tol:.2f})"
-                                   for r in bad.itertuples()))
+                       + "; ".join(_skew_text(r) for r in bad.itertuples()))
+
+
+def _skew_text(r) -> str:
+    """One null_skew cell, as check_nulls names it."""
+    if r.feature in STRUCTURAL_NAN and str(r.stratum).startswith("(all"):
+        return (f"{r.feature} is NaN exactly where {STRUCTURAL_NAN[r.feature]} == 1 in training, "
+                f"broken on {round(r.serve * r.n)} of {r.n} serve rows")
+    return (f"{r.stratum} {r.feature} serve {r.serve:.2f} vs train {r.train:.2f} "
+            f"(n {r.n}, tol {r.tol:.2f})")
 
 
 def predict(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
@@ -440,17 +482,23 @@ def predict(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
     combos and Fantasy as sums of those means. Indexed like `rows`. It does
     not check null fractions; serving calls check_nulls() on the same rows.
 
-    rate_fg3a is capped at rate_fga (a three is a field-goal attempt), and the
-    fg3a mean is built from the capped rate. The two rate models are fit
-    separately and the raw fg3a rate came out above the fga rate on 21 rows of
-    the training table (14 played, measured 2026-10-09 with the v1 models),
-    where the means said FG2A < 0 and the FG3A distribution was re-centred
-    above the FGA one. The FG3A mean is now never above the FGA mean, but at
-    the cap the FG3A share is exactly 1 and the composed FG2A mean (FGA -
-    FG3A) is exactly 0. That zero is the cap, not a forecast of no twos, and
-    the simulator draws no twos for such a row: a consumer must not price
-    FG2A from it, nor FG2M or FGM from the simulator (docs/known_issues.md
-    says which consumers do so today)."""
+    Every rate is capped at the rates it is a part of (RATE_CEILINGS, in that
+    order): fg3a and fgm at fga, fg3m at fg3a and at fgm, ftm at fta. The
+    means are built from the capped rates. The rate models are fit
+    separately, and their raw rates broke these orders on real rows (v1
+    models, 2025-26 at four horizons: ftm above fta on 590 rows of 73
+    players, fg3m above fg3a on 86, fg3m above fgm on 14; fg3a above fga on
+    21 rows of the training table), where a mean said a player makes more
+    than he attempts. A capped row is AT the cap, not a forecast of it: at
+    the fg3a cap the FG3A share is exactly 1 and the composed FG2A mean (FGA
+    - FG3A) is exactly 0; at the ftm cap the FTM mean equals the FTA mean
+    (a perfect line); at the fg3m caps every three goes in, or every make is
+    a three (FG2M mean exactly 0). The simulator draws those rows
+    degenerately and simprov refuses those draws (simprov._degenerate) and
+    the baseline stats a cap pins at zero (simprov._baseline_degenerate).
+    The baseline still prices FTM at the ftm cap, as a perfect line: the cap
+    removes the impossible, not the rate model's optimism at the top of the
+    FT% range (docs/known_issues.md)."""
     X = feature_matrix(models, rows)
     stats = models.stats
     if len(X) == 0:
@@ -460,7 +508,8 @@ def predict(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
            "mu_min": np.clip(models.minutes.predict(X), 0.0, MAX_MIN)}
     for s in stats:
         out[f"rate_{s}"] = models.rates[s].predict(X)
-    out["rate_fg3a"] = np.minimum(out["rate_fg3a"], out["rate_fga"])
+    for s, parts in RATE_CEILINGS:
+        out[f"rate_{s}"] = np.minimum.reduce([out[f"rate_{s}"], *(out[f"rate_{p}"] for p in parts)])
     for s in stats:
         out[s] = out["mu_min"] * out[f"rate_{s}"]
     for c, parts in T.COMBOS.items():

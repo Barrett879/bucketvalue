@@ -108,6 +108,25 @@ def test_range_form_is_refused_before_any_request(monkeypatch):
         espn.scoreboard_month("2026-10")
 
 
+def test_fetch_scoreboard_passes_a_budget_only_when_given(monkeypatch):
+    """timeout and retries are keyword arguments: left out, http.fetch keeps
+    its own defaults (the bot, the backfill); given, they reach it as is
+    (the app's live layer: a short budget, no retries)."""
+    seen = []
+
+    def fake(url, params=None, **kw):
+        seen.append((url, params, kw))
+        return {"events": []}
+    monkeypatch.setattr(espn.http, "fetch", fake)
+    assert espn.fetch_scoreboard("20261020") == {"events": []}
+    assert seen[-1] == (espn.SITE + "scoreboard", {"dates": "20261020", "limit": str(espn.MONTH_LIMIT)}, {})
+    espn.fetch_scoreboard("20261020", timeout=4.0, retries=0)
+    assert seen[-1][2] == {"timeout": 4.0, "retries": 0}
+    monkeypatch.setattr(espn.http, "fetch", lambda *a, **k: {"code": 2500})
+    with pytest.raises(http.BadPayload, match="no events list"):
+        espn.fetch_scoreboard("20261020", timeout=4.0, retries=0)
+
+
 def test_month_at_limit_is_split_into_day_queries(monkeypatch, tmp_cache):
     calls = []
 

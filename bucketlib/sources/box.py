@@ -202,6 +202,20 @@ def _final_status(payload_game: dict, game_id: str, where: str) -> None:
                        f"({payload_game.get('gameStatusText')!r}), not final")
 
 
+def is_final(payload_game: dict, game_id: str, where: str = "cdn") -> bool:
+    """Is this box-score game object final, by the ONE rule the parsers
+    refuse a partial box under (_final_status: gameStatus 3, or the cdn
+    payload's "finalbox")? `payload_game` is the payload's game object (the
+    cdn liveData `game`, or the BoxScoreSummaryV3 summary with
+    where="BoxScoreSummaryV3"). For readers that show a box in progress
+    (live.box on the Game page after tip) instead of refusing it."""
+    try:
+        _final_status(payload_game, game_id, where)
+    except NotFinal:
+        return False
+    return True
+
+
 def fetch_cdn(game_id: str, refresh: bool = False) -> dict:
     """Raw cdn box score, cached gz under cache/raw/box/{season}/.
 

@@ -104,3 +104,28 @@ equal or better than NB on every stat. One reversal: TOV calibration, simulator
 `data/stat_reliability.csv` take the WORST of all three seasons, which moves
 both from moderate to weak. That is a downgrade-only change; nothing was promoted
 on holdout evidence.
+
+## Audit measurements (2026-10-09)
+
+**Opening vs closing lines, part 2** (`scripts/exp_open_vs_close.py --part 2`,
+`docs/open_vs_close_v1.csv`). Training uses CLOSING lines at every horizon; the
+site has opening or current lines. Scoring the same models with opening lines
+costs P(play) log loss +0.55% / +0.87% at 5:30pm the day before, +0.69% / +1.14%
+at 11am, +0.55% / +0.82% two hours out, about 0 at 15 minutes (2023-24 / 2024-25).
+Where the spread moved 3+ points the early-horizon cost is +0.85% to +4.3%. PTS
+and Fantasy move 0 to 0.3% overall. Decision: no retrain on opening lines.
+
+**Mark-out conservation** (spec 3.4(b), `scripts/gate_markout.py`,
+`docs/gate_markout_v1.csv`, walk-forward models, 600 team-games per fold, 11am
+horizon). Marking out a team's top player (about 33 expected minutes) loses 1.7 to
+2.6 team minutes; teammates absorb 92-95% on average (68-70% at the 10th
+percentile); the opponent does not move. Coherence: the p_play-weighted full-
+roster minutes sum misses actual team minutes by +2.3 (2023-24), -6.0 (2024-25)
+and +2.5 (2025-26, measured only); the played-only sum by -0.8 to +2.1. No
+rescaling shipped; the 2024-25 shortfall is open (docs/known_issues.md).
+
+**Caveat on the availability numbers above** (section "v1, full features"): they
+come from `scripts/validate_full.py`, which fed the context columns twice and
+scored with closing lines. The ship gate (`scripts/train_eval.py`, `gate.py`)
+and production used the correct 193 columns. Treat those log losses as
+unconfirmed until `validate_full.py` is rerun.

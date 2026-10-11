@@ -28,7 +28,9 @@ So the proof has three parts:
   CODE PATH: with the logs' counts put into the bot-written pg_/tg_ files
     (the corrections removed, every other byte as the bot wrote it), every
     feature column of the training table that build() produces equals training
-    bit for bit (np.array_equal, equal_nan) on five real dates. Partitions ON and
+    bit for bit (np.array_equal, equal_nan) on six real dates, and on the next
+    games of two teams whose game was postponed while the schedule still lists
+    it on its original date (cdn's `postponed` flag). Partitions ON and
     AFTER each date sit in the state dir throughout, and scrambling every
     outcome on or after D through the same files leaves D's features unchanged.
   SOURCE: the cdn counts equal the logs' counts outside those corrections
@@ -84,10 +86,15 @@ DATES = {
     "ordinary date (B2B second legs, a return from a 10+ game absence)": "2026-01-14",
     "right after the trade deadline": "2026-02-07",
     "first game day after the All-Star break": "2026-02-19",
+    "postponed-game makeup": "2026-01-29",
 }
 IN_SEASON = [label for label in DATES if label != "season opener"]
 MUTATION_DATE = "2026-01-14"
 UNINGESTABLE = "0022500093"            # DET at HOU, 2025-10-24: cdn box short 521 HOU seconds
+# MIA at CHI, postponed on 2026-01-08 (ESPN STATUS_POSTPONED) and made up on
+# 2026-01-29. Training's schedule lists it on the make-up date only; both
+# teams next played on 2026-01-10.
+PPD_GAME, PPD_DATE, PPD_NEXT = "0022500529", "2026-01-08", "2026-01-10"
 HOU_DATE = "2025-10-26"               # HOU's first game after it
 LINE_COLS = ["home_line", "total", "team_line", "implied_total", "abs_line"]
 NOT_SERVED_HERE = set(L.CTX_COLS) | set(LINE_COLS)
@@ -335,6 +342,9 @@ def test_serve_path_equals_training_bit_for_bit(label, season_tables, seed_dir, 
     elif label.startswith("first game day after the All-Star"):
         prev = hist.events.loc[hist.events["season"] == SEASON, "game_date"].max()
         assert (D - prev).days >= 5
+    elif label == "postponed-game makeup":
+        # MIA at CHI, postponed on 2026-01-08 and played here.
+        assert set(s.loc[PPD_GAME, "team"]) == {"CHI", "MIA"}
 
 
 def test_future_mutation_through_the_serve_path(season_tables, seed_dir, bot_corrected,
@@ -359,6 +369,38 @@ def test_future_mutation_through_the_serve_path(season_tables, seed_dir, bot_cor
     for c in ("pts", "min"):
         assert not np.array_equal(a[c].to_numpy(dtype=float), b[c].to_numpy(dtype=float),
                                   equal_nan=True), f"the scramble left {c} unchanged: the test is vacuous"
+
+
+# ── A postponed game still on its original date ──────────────────────────────
+def test_a_postponed_game_on_its_original_date_leaves_the_next_games_alone(
+        season_tables, seed_dir, bot_corrected):
+    """Until it is rescheduled the live schedule keeps a postponed game on
+    its ORIGINAL date (cdn.parse_schedule flags it `postponed`). Served with
+    that schedule, both teams' next games equal training bit for bit: rest,
+    back-to-back and games in the last 7 days never count the date of a game
+    that was not played. Without the flag they would (checked, so the
+    comparison is not vacuous)."""
+    sched = season_tables["schedule"]
+    ppd = sched.copy()
+    moved = ppd["game_id"] == PPD_GAME
+    assert moved.sum() == 1
+    ppd.loc[moved, "game_date"] = pd.Timestamp(PPD_DATE)
+    ppd.loc[moved, "tip_utc"] = pd.Timestamp(f"{PPD_DATE} 20:00", tz="America/New_York").tz_convert("UTC")
+    ppd.loc[moved, "status"] = "scheduled"
+    ppd["postponed"] = moved
+    trained = pd.read_parquet(TRAIN, filters=[("game_date", "==", pd.Timestamp(PPD_NEXT))])
+    assert {"CHI", "MIA"} <= set(trained["team"])
+
+    served, _ = _serve(bot_corrected, seed_dir, PPD_NEXT, dict(season_tables, schedule=ppd))
+    _assert_bit_identical(trained, served, f"next games after the postponement {PPD_NEXT}")
+    assert set(V._state_games(ppd)["game_id"]) == set(V._state_games(sched)["game_id"]) - {PPD_GAME}
+
+    unflagged = ppd.drop(columns="postponed")
+    leak, _ = _serve(bot_corrected, seed_dir, PPD_NEXT, dict(season_tables, schedule=unflagged))
+    assert {"rest_days", "games_l7"} <= set(_differing(trained, leak, "unflagged"))
+    moved_rows = leak[leak["team"].isin(["CHI", "MIA"])].set_index(["game_id", "person_id"])
+    want = trained.set_index(["game_id", "person_id"]).loc[moved_rows.index]
+    assert (moved_rows["rest_days"] < want["rest_days"]).all()
 
 
 # ── The one game the bot cannot ingest ───────────────────────────────────────

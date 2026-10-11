@@ -25,6 +25,7 @@ from bucketlib import live as LV
 from bucketlib import livectx as L
 from bucketlib import models as M
 from bucketlib import pipeline as P
+from bucketlib import serve as V
 from bucketlib import state as S
 from bucketlib.sources import box, cdnbox
 from bucketlib.sources import injury as INJ
@@ -64,6 +65,19 @@ def games(sched) -> pd.DataFrame:
 @pytest.fixture(scope="module")
 def report() -> INJ.ParsedReport:
     return INJ.parse_report((FIX / "injury" / "Injury-Report_2026-03-12_12_00PM.pdf").read_bytes())
+
+
+@pytest.fixture(scope="module")
+def reissue() -> INJ.ParsedReport:
+    """The 12:15 PM report of the same day: row for row the 12:00 PM report
+    under a new title (the NBA re-titles an unchanged report every 15
+    minutes). Fetched from ak-static by the 2026-10-09 audit."""
+    return INJ.parse_report((FIX / "injury" / "Injury-Report_2026-03-12_12_15PM.pdf").read_bytes())
+
+
+def retitled(report: INJ.ParsedReport, ts: dt.datetime) -> INJ.ParsedReport:
+    return INJ.ParsedReport({**report.meta, "report_ts_et": ts}, report.rows.assign(report_ts_et=ts),
+                            report.team_rows.assign(report_ts_et=ts))
 
 
 @pytest.fixture(scope="module")
@@ -159,6 +173,22 @@ def test_provisional_is_never_missing_and_is_what_the_caller_says(feats, games, 
         P.conform(out.assign(provisional=np.where(out.index == 0, np.nan, True)))
 
 
+def test_provisional_is_set_per_game_from_a_map_and_a_missing_game_is_provisional(
+        base, feats, games, sched, report, mdl, names):
+    """project() takes provisional_for's {game_id: bool} map as is: each row
+    carries its own game's flag, and a game the map does not name is
+    provisional (fail closed). Nothing else in the frame moves."""
+    g = list(games["game_id"])
+    prov = {g[0]: True, **{x: False for x in g[2:]}}           # g[1] is not in the map
+    out = P.project(feats, games, sched, report, made_up_lines(games), mdl, MORNING,
+                    provisional=prov, names=names)
+    assert out["provisional"].dtype == bool
+    assert out.groupby("game_id")["provisional"].agg(["all", "any"]).to_dict("index") == {
+        x: {"all": x in g[:2], "any": x in g[:2]} for x in g}
+    pd.testing.assert_frame_equal(out.drop(columns="provisional"), base.drop(columns="provisional"),
+                                  check_exact=True)
+
+
 # ── project(): the missing-line policy and the null check ─────────────────────
 def test_a_game_without_a_line_is_withheld_and_moves_nothing_else(base, feats, games, sched, report,
                                                                   mdl, names):
@@ -193,6 +223,54 @@ def test_no_report_is_refused_even_where_the_null_check_cannot_see_it(feats, gam
     M.check_nulls(mdl, ctx)                     # the null check alone lets it through
     with pytest.raises(P.NoReport, match="no injury report"):
         P.project(one, games, sched, None, made_up_lines(games), mdl, MORNING, names=names)
+
+
+def test_a_report_out_of_reach_for_every_game_is_no_report(feats, games, sched, report, mdl, names):
+    """A report held but titled 30+ hours before the cutoff (the committed or
+    in-memory report after a day of ak-static outage) is out of reach for
+    every game: every team no_report, every status unknown, report_age_h
+    null, the same slate as no report at all. project() refuses it as
+    NoReport, naming the title, whatever the slate size: a one-game slate,
+    and a slate small enough that check_nulls skips every stratum."""
+    stale = retitled(report, MORNING - dt.timedelta(hours=31))
+    gid = games["game_id"].iloc[-1]
+    one = feats[feats["game_id"] == gid]
+    with pytest.raises(P.NoReport, match=r"titled 2026-03-11 05:20 ET is out of reach for every "
+                                         r"game.*30 hours"):
+        P.project(one, games, sched, stale, made_up_lines(games), mdl, MORNING, names=names)
+    small = one.head(M.NULL_MIN_ROWS - 1)
+    ctx = X.context_for(F.apply_lines(small, made_up_lines(games)), games, sched, stale, MORNING, names)
+    assert (ctx["team_state"] == "no_report").all() and ctx["report_age_h"].isna().all()
+    M.check_nulls(mdl, ctx)                     # the null check alone lets it through
+    with pytest.raises(P.NoReport, match="out of reach"):
+        P.project(small, games, sched, stale, made_up_lines(games), mdl, MORNING, names=names)
+    # 29 hours old is in reach (the training rule's 30): the same slate projects.
+    ok = P.project(one, games, sched, retitled(report, MORNING - dt.timedelta(hours=29)),
+                   made_up_lines(games), mdl, MORNING, names=names)
+    assert len(ok) == len(one) and (ok["team_state"] != "no_report").all()
+
+
+def test_a_slate_with_many_players_out_is_projected_not_withheld(feats, games, sched, report, mdl,
+                                                                 names):
+    """tm_out_max_min is NaN exactly on rows listed Out, so a late slate
+    with a high Out share (2025-26 at t_15: 0.37-0.40 of 10+|0 rows) read as
+    a null skew and the whole date was withheld. Marked out the way a
+    report lists them (status Out), 45% of this slate's 10+|0 players still
+    project, and the Out rows are exactly the NaN ones."""
+    ten = feats[(M.null_strata(feats) == "10+|0").to_numpy()]
+    # Spread over every team, as a report lists them (a whole team Out is
+    # another slate: own_exp_min_share has no team minutes to share).
+    k = ten.groupby(["game_id", "team"]).cumcount()
+    out_ids = set(ten.loc[(k % 20 < 9).to_numpy(), "person_id"].astype(int))
+    frame = P.project(feats, games, sched, report, made_up_lines(games), mdl, MORNING,
+                      marked_out=out_ids, names=names)
+    assert len(frame) == len(feats)
+    assert (frame.loc[frame["person_id"].isin(out_ids), "inj_status"] == "Out").all()
+    ctx = X.context_for(F.apply_lines(feats, made_up_lines(games)), games, sched, report, MORNING,
+                        names, marked_out=out_ids)
+    ten_ctx = (M.null_strata(ctx) == "10+|0").to_numpy()
+    assert ctx.loc[ten_ctx, "tm_out_max_min"].isna().mean() > 0.45
+    assert (ctx["tm_out_max_min"].isna() == ctx["inj_out"].eq(1.0)).all()
 
 
 def test_feature_rows_that_already_carry_lines_are_refused(feats, games, sched, report, mdl, names):
@@ -241,6 +319,22 @@ def test_frozen_from_tip_minus_five_minutes(games):
         P.frozen_ids(games, dt.datetime(2026, 3, 12, 23, 0))
 
 
+def test_a_game_whose_time_is_not_set_is_never_frozen(games):
+    """cdn's time_tbd: the schedule's tip is a made-up 00:00 ET (05:00Z), so a
+    TBD game has no real tip and no freeze point, whatever the clock. The
+    same tip with a real time freezes; a frame parsed before the column
+    existed falls back to the feed's own 'TBD' text (live.time_tbd)."""
+    tip = pd.Timestamp("2026-03-12 05:00", tz="UTC")             # 00:00 ET placeholder
+    rows = pd.DataFrame({"game_id": ["tbd", "timed"], "tip_utc": [tip, tip],
+                         "time_tbd": [True, False], "status_text": ["TBD", "7:00 pm ET"]})
+    assert P.frozen_ids(rows, MORNING) == {"timed"}
+    old = rows.drop(columns="time_tbd")
+    assert P.frozen_ids(old, MORNING) == {"timed"}
+    # The slate fixture's real games (no time_tbd column) freeze as before.
+    assert P.frozen_ids(games.assign(time_tbd=False), EVENING) == EARLY
+    assert P.frozen_ids(games.assign(time_tbd=True), EVENING) == set()
+
+
 def test_state_games_keep_python_dates_and_drop_other_games(sched):
     extra = pd.DataFrame([
         {"game_id": "0012500001", "season": SEASON, "game_type": "PRE", "game_date": DATE,
@@ -256,6 +350,29 @@ def test_state_games_keep_python_dates_and_drop_other_games(sched):
     assert set(g["game_id"]) == set(sched["game_id"])
     assert all(type(d) is dt.date for d in g["game_date"])
     assert g["tip_utc"].is_monotonic_increasing
+
+
+def test_a_play_in_game_is_a_state_game_that_is_never_projected(sched, tmp_path, monkeypatch):
+    """Every production model trains on regular-season rows only, and the
+    play-in measured biased (starters 4.9 minutes short), so a play-in game
+    gets no projection anywhere (state_games feeds the bot, the app's live
+    frame and store.projected_ids) while it stays a state game: its box score
+    is ingested and a missing one is a completeness gap for the next date."""
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path)
+    assert P.PROJECTED_TYPES == {"RS"}
+    pi = pd.DataFrame([
+        {"game_id": "0052500101", "season": SEASON, "game_type": "PI", "game_date": DATE,
+         "tip_utc": pd.Timestamp("2026-03-12 23:00", tz="UTC"), "status": "final",
+         "home": "MIA", "away": "CHI"},
+        {"game_id": "0022501230", "season": SEASON, "game_type": "RS",
+         "game_date": DATE + dt.timedelta(days=1),
+         "tip_utc": pd.Timestamp("2026-03-13 23:00", tz="UTC"), "status": "scheduled",
+         "home": "MIA", "away": "NYK"}])
+    full = pd.concat([sched, pi], ignore_index=True)
+    assert set(P.state_games(full, DATE)["game_id"]) == set(sched["game_id"])
+    assert "0052500101" in set(V._state_games(full)["game_id"])
+    assert "0052500101" in V.completeness(DATE + dt.timedelta(days=1), full, SEASON)
+    assert set(P.state_games(full, DATE + dt.timedelta(days=1))["game_id"]) == {"0022501230"}
 
 
 def test_lines_from_both_odds_shapes(games):
@@ -355,6 +472,47 @@ def test_merge_keeps_a_game_whose_only_change_is_the_clock(base, feats, games, s
     assert basis == changed
 
 
+def test_a_same_content_reissue_of_the_report_leaves_the_file_byte_identical(
+        tmp_path, monkeypatch, feats, games, sched, report, reissue, mdl, names):
+    """The NBA re-titles an unchanged report every 15 minutes, and a new title
+    moves report_age_h, which is the clock. A bot run at 12:05 with the 12:00
+    PM report and one at 12:20 with the 12:15 PM report (row for row the
+    same) leave the projections file byte-identical; a status that did
+    change in the re-issue rewrites that game only (its rows then carry the
+    new title)."""
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path)
+    t1, t2 = (dt.datetime(2026, 3, 12, 12, 5, tzinfo=ET), dt.datetime(2026, 3, 12, 12, 20, tzinfo=ET))
+    cols = [c for c in report.rows.columns if c != "report_ts_et"]
+    assert reissue.meta["report_ts_et"] > report.meta["report_ts_et"]
+    assert reissue.rows[cols].reset_index(drop=True).equals(report.rows[cols].reset_index(drop=True))
+    assert "report_ts_et" not in P.INPUT_COLS and "report_ts_et" in P.STAMPS
+    digests = P.feature_digests(feats)
+    first = P.project(feats, games, sched, report, made_up_lines(games), mdl, t1, names=names)
+    out, basis = P.merge_published(None, first, games, t1, new_basis=digests)
+    assert P.write_published(out, basis, DATE)
+    before = P.projections_path(DATE).read_bytes()
+    second = P.project(feats, games, sched, reissue, made_up_lines(games), mdl, t2, names=names)
+    assert (second["report_ts_et"] == pd.Timestamp(reissue.meta["report_ts_et"])).all()
+    assert not np.array_equal(second["mu_min"].to_numpy(), first["mu_min"].to_numpy())
+    old, old_basis = P.read_published(DATE)
+    out, basis = P.merge_published(old, second, games, t2, old_basis=old_basis, new_basis=digests)
+    assert not P.write_published(out, basis, DATE, old_basis)
+    assert P.projections_path(DATE).read_bytes() == before
+    # The re-issue changes one listed player's status: that game is rewritten.
+    rows = reissue.rows.copy()
+    i = rows.index[(rows["team"] == "DET") & (rows["status"] != "Available")][0]
+    rows.loc[i, "status"] = "Available"
+    moved = INJ.ParsedReport(reissue.meta, rows, reissue.team_rows)
+    third = P.project(feats, games, sched, moved, made_up_lines(games), mdl, t2, names=names)
+    out, basis = P.merge_published(old, third, games, t2, old_basis=old_basis, new_basis=digests)
+    det = games.loc[games["home"] == "DET", "game_id"].iloc[0]
+    assert set(out.loc[out["computed_at"] == pd.Timestamp(t2).tz_convert(UTC), "game_id"]) == {det}
+    assert (out.loc[out["game_id"] == det, "report_ts_et"] == pd.Timestamp(reissue.meta["report_ts_et"])).all()
+    pd.testing.assert_frame_equal(out[out["game_id"] != det].reset_index(drop=True),
+                                  old[old["game_id"] != det].reset_index(drop=True), check_exact=True)
+    assert P.write_published(out, basis, DATE, old_basis)
+
+
 def test_checkpoints_are_the_training_horizons_floored_at_tip(games):
     tip = pd.Timestamp(games["tip_utc"].iloc[0])           # 7:00 PM ET
     want = [dt.datetime(2026, 3, 11, 17, 30, tzinfo=ET), dt.datetime(2026, 3, 12, 11, 0, tzinfo=ET),
@@ -435,6 +593,21 @@ def test_live_frame_falls_back_to_the_committed_projections(failure, committed, 
     pd.testing.assert_frame_equal(frame.drop(columns="frozen"), committed.drop(columns="frozen"),
                                   check_exact=True)
     assert frame["frozen"].tolist() == frame["game_id"].isin(EARLY).tolist()
+
+
+def test_a_report_out_of_reach_serves_the_committed_rows_as_stale(committed, games, report, mdl,
+                                                                   sched):
+    """10:00 PM: one game (CHI at LAL, 10:30 PM) is still to tip, and the
+    report the app holds was titled 31 hours ago. That is no report, so the
+    page serves the bot's committed rows for every game and says why."""
+    night = dt.datetime(2026, 3, 12, 22, 0, tzinfo=ET)
+    kw = live_args(games, retitled(report, night - dt.timedelta(hours=31)), mdl, sched)
+    frame, info = P.live_projections(DATE, night, **kw)
+    assert info.source == "committed" and info.stale.startswith("NoReport: ")
+    assert "out of reach for every game" in info.stale
+    pd.testing.assert_frame_equal(frame.drop(columns="frozen"), committed.drop(columns="frozen"),
+                                  check_exact=True)
+    assert set(frame.loc[~frame["frozen"], "game_id"]) == {"0022500960"}
 
 
 def test_mark_outs_reach_untipped_games_only(committed, games, report, mdl, sched, base):
@@ -520,6 +693,75 @@ def test_a_provisional_row_past_its_freeze_point_is_served_untouched_but_never_f
                                   check_exact=True)
 
 
+def test_a_live_prior_game_makes_only_its_teams_game_provisional(committed, games, report, mdl,
+                                                                 sched):
+    """Spec 4, per game: CHI at LAL on the 11th still in progress when the
+    page asks (a 10:30 PM tip, not ingested) is a gap for the 12th's CHI at
+    LAL only. That game's rows are provisional and the Info names the gap,
+    per game and in the union; every other game on the date is not
+    provisional (they stay freezable)."""
+    gap = "0022500941"
+    prior = pd.DataFrame([{"game_id": gap, "season": SEASON, "game_type": "RS",
+                           "game_date": DATE - dt.timedelta(days=1),
+                           "tip_utc": pd.Timestamp("2026-03-12 02:30", tz="UTC"), "status": "live",
+                           "home": "LAL", "away": "CHI"}])
+    full = pd.concat([prior, sched], ignore_index=True)
+    frame, info = P.live_projections(DATE, MORNING, **live_args(games, report, mdl, full))
+    assert info.source == "live" and info.stale is None
+    lal = "0022500960"
+    assert frame.groupby("game_id")["provisional"].all().to_dict() == {
+        g: g == lal for g in games["game_id"]}
+    assert not frame.loc[frame["game_id"] != lal, "provisional"].any()
+    assert info.provisional and info.completeness == [gap]
+    assert info.completeness_by_game == {g: ([gap] if g == lal else []) for g in games["game_id"]}
+    assert info.provisional_by_game == {g: g == lal for g in games["game_id"]}
+    assert P.STALE_FEATURES not in info.notes
+    # A game with no rows to read a flag from (withheld: no line, nothing
+    # committed for it) keeps its OWN flag, never the date's.
+    held = games[games["game_id"] != lal].iloc[0]
+    kw = live_args(games, report, mdl, full)
+    del kw["odds"][(held["away"], held["home"])]
+    C.write_parquet(committed[committed["game_id"] != held["game_id"]], P.projections_path(DATE))
+    frame, info = P.live_projections(DATE, MORNING, **kw)
+    assert info.withheld == [held["game_id"]] and info.provisional
+    assert info.provisional_by_game == {g: g == lal for g in games["game_id"]}
+
+
+def test_any_exception_building_the_live_frame_serves_the_committed_rows(
+        committed, games, report, mdl, sched, monkeypatch, caplog):
+    """A bug in the live path (here project() raising a TypeError, which is
+    no expected feed failure) costs the live upgrade, never the page: the
+    committed projections are served, Info.stale names the exception's type
+    and message, and the traceback is logged (logging.exception), never
+    swallowed."""
+    def broken(*a, **k):
+        raise TypeError("unsupported operand type(s) for -: 'NoneType' and 'float'")
+    monkeypatch.setattr(P, "project", broken)
+    with caplog.at_level("ERROR", logger="bucketvalue"):
+        frame, info = P.live_projections(DATE, EVENING, marked_out={1},
+                                         **live_args(games, report, mdl, sched))
+    assert info.source == "committed"
+    assert info.stale == (f"{P.LIVE_FRAME_FAILED}: TypeError: unsupported operand type(s) for -: "
+                          "'NoneType' and 'float'")
+    assert P.MARKS_NOT_APPLIED in info.notes
+    pd.testing.assert_frame_equal(frame.drop(columns="frozen"), committed.drop(columns="frozen"),
+                                  check_exact=True)
+    assert frame["frozen"].tolist() == frame["game_id"].isin(EARLY).tolist()
+    rec = [r for r in caplog.records if r.levelname == "ERROR" and "live projections" in r.getMessage()]
+    assert rec and rec[0].exc_info and rec[0].exc_info[0] is TypeError
+    # The public stand-in is the same frame.
+    same, why = P.committed_projections(DATE, EVENING, why="x")
+    pd.testing.assert_frame_equal(same, frame, check_exact=True)
+    assert why.source == "committed" and why.stale == "x" and why.frozen == sorted(EARLY)
+
+
+def test_committed_projections_with_nothing_committed_is_not_published(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path)
+    frame, info = P.committed_projections(DATE, EVENING)
+    assert frame.empty and list(frame.columns) == P.COLUMNS
+    assert info.source == "none" and info.reason == P.NOT_PUBLISHED
+
+
 def test_an_unreadable_schedule_serves_the_committed_rows_frozen_by_their_own_tips(
         committed, monkeypatch):
     def down():
@@ -603,6 +845,7 @@ def test_features_built_before_the_latest_finals_make_the_frame_provisional(
     _write_partitions(SEASON, DATE - dt.timedelta(days=1), _frames())
     frame, info = P.live_projections(DATE, MORNING, **live_args(games, report, mdl, sched))
     assert info.source == "live" and info.provisional and frame["provisional"].all()
+    assert info.provisional_by_game == {g: True for g in games["game_id"]}
     assert P.STALE_FEATURES in info.notes
     assert info.data_through == DATE - dt.timedelta(days=1)
     # Rebuilt (re-stamped) by the bot: current again.

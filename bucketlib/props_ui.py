@@ -154,20 +154,34 @@ def void_ids(projections: pd.DataFrame | None) -> set[int]:
     return props.void_id_set(projections.loc[projections["inj_status"] == "Out", "person_id"].tolist())
 
 
+def _failed_view(token, date) -> BoardView:
+    """The explained empty board (render_board: "The comparison could not be
+    built for this date. Your lines are still saved"), never a ledger that
+    blames the visitor's lines for a server-side failure."""
+    try:
+        posted = len(props.lines_for_date(props.get_board(token) if token else None, date))
+    except Exception:  # noqa: BLE001
+        posted = 0
+    return BoardView(_empty(), _empty(), _empty(), _empty(), {"posted": posted, "error": True})
+
+
 def date_board(token, date, projections: pd.DataFrame | None, params, roster=None) -> BoardView:
     """board_view for one ET date with the simulator provider. The provider is
     simprov.provider_for(projections, params), the one the Game tables' medians
     read, so a line's model value and the table's median come from one
-    simulation; the void set is void_ids(projections). Never raises."""
+    simulation; the void set is void_ids(projections). Never raises.
+
+    `params` None (the simulator parameters did not load) is the failed view
+    at once: a provider built on it prices nothing, and every line would read
+    as "no projection: internal error"."""
+    if params is None:
+        logger.warning("date_board: no simulator parameters")
+        return _failed_view(token, date)
     try:
         provider = simprov.provider_for(projections, params)
     except Exception as e:  # noqa: BLE001 - a broken frame is an explained empty board
         logger.warning("date_board: no provider (%s: %s)", type(e).__name__, e)
-        try:
-            posted = len(props.lines_for_date(props.get_board(token) if token else None, date))
-        except Exception:  # noqa: BLE001
-            posted = 0
-        return BoardView(_empty(), _empty(), _empty(), _empty(), {"posted": posted, "error": True})
+        return _failed_view(token, date)
     return board_view(token, date, provider, projections, roster, void_ids(projections))
 
 
@@ -204,6 +218,12 @@ def ingest(text, token, roster, schedule, now=None, dates=None) -> tuple[str | N
             info = props.board_info(token) or {}
             report["on_board"] = int(info.get("rows", 0))
             report["dropped_by_cap"] = int(info.get("dropped", 0))
+            # Lines this paste's merge held back as suspected quarter or half
+            # lines sitting far below a full-game line already on the board
+            # (props.collapse_alt_lines): counted, never loaded.
+            if "period_held" in info:
+                report["period_held"] = int(info.get("period_held") or 0)
+                report["period_held_by_date"] = dict(info.get("period_held_by_date") or {})
     except Exception as e:  # noqa: BLE001 - never a traceback on the page
         logger.warning("paste ingest failed (%s: %s)", type(e).__name__, e)
         report["error"] = True
@@ -227,9 +247,10 @@ def _on_add(view_date, schedule, roster, now, dates) -> None:
 
 
 def _on_clear() -> None:
-    """Visitor-only: forgets THIS visitor's board token. Nobody else's board,
-    and nothing on disk, is touched."""
-    props.clear_board(st.query_params.get("board"))
+    """Visitor-only: drops the board token from THIS visitor's link. The
+    board itself is not deleted: anyone else holding the link (it rides in
+    every URL, Share included) keeps it, and it ages out of the in-process
+    store. Nothing on disk is touched."""
     st.session_state[PASTE_KEY] = ""
     st.session_state.pop(REPORT_KEY, None)
     st.session_state.pop(TOAST_KEY, None)
@@ -252,6 +273,9 @@ def _empty_reason(report: dict) -> str:
                 "are not priced. Paste the pre-game board.")
     if p.get("skipped_badline"):
         return "None of the lines in that paste had a readable number."
+    if p.get("json_shape") == props.EMPTY_FEED:
+        return ("That is the PrizePicks feed, but it has no lines on it right now. "
+                "Lines post through the day; try again later.")
     if p.get("json_shape"):
         return ("That is JSON, but not the PrizePicks projections feed. Open the "
                 "feed link above and copy the whole page.")
@@ -264,16 +288,22 @@ def toast_count(report: dict | None) -> int:
     counts refused, unrecognised and unmatched lines too (audit 2026-10-09)."""
     if not report or report.get("error"):
         return 0
-    return int(report.get("comparable", 0) or 0)
+    held = int(report.get("period_held", 0) or 0)
+    return max(0, int(report.get("comparable", 0) or 0) - held)
 
 
 _WHY_WORDS = {"not priced": "not priced (period props, Dunks, two-player squares and the like)",
+              "other board": "from another board",
               "unrecognised stat": "a stat we do not recognise",
-              "not matched": "not matched to a current roster"}
+              "not matched": "not matched to a current roster",
+              "not projected": "for a game the site does not project"}
 
 
 def _why_not(nc: dict) -> str:
-    bits = [f"{int(nc[k])} {_WHY_WORDS[k]}" for k in props.NOT_COMPARABLE if nc.get(k)]
+    """'2 not priced (...); 1 from another board' for the report's
+    not-comparable counts. A reason props adds before it has words here is
+    still said (by its key), never a KeyError inside the paste panel."""
+    bits = [f"{int(nc[k])} {_WHY_WORDS.get(k, k)}" for k in props.NOT_COMPARABLE if nc.get(k)]
     return "; ".join(bits)
 
 
@@ -297,8 +327,21 @@ def report_messages(report: dict | None) -> list[tuple[str, str]]:
     if report.get("nonempty") and kept <= 0:
         return [("warning", _empty_reason(report))]
     view = report.get("view_date")
-    by_date = report.get("comparable_by_date") or {}
+    held_by = report.get("period_held_by_date") or {}
+    by_date = {d: int(n) - int(held_by.get(d, 0) or 0)
+               for d, n in (report.get("comparable_by_date") or {}).items()}
+    by_date = {d: n for d, n in by_date.items() if n > 0}
     here = int(by_date.get(view, 0)) if view else 0
+    held = int(report.get("period_held", 0) or 0)
+    wrong = report.get("wrong_board")
+    if held:
+        out.append(("warning", f"{_plural(held, 'line')} sat far below the full-game line "
+                    "already on your board, so they were held back: that looks like a "
+                    "quarter or half board. Paste the full-game board."))
+    if comparable <= 0 and wrong:
+        out.append(("warning", f"That is the {md_escape(wrong)} board, not the full-game NBA "
+                    "board, so nothing in it can be compared. Open the NBA board (or the "
+                    "feed link above) and copy that."))
     if comparable > 0:
         if here:
             out.append(("success", f"{_plural(comparable, 'line')} loaded. {here} are for "
@@ -308,7 +351,7 @@ def report_messages(report: dict | None) -> list[tuple[str, str]]:
             out.append(("success", f"{_plural(comparable, 'line')} loaded."))
         if why:
             out.append(("info", f"Also in that paste and not compared: {why}."))
-    elif report.get("nonempty"):
+    elif report.get("nonempty") and not wrong and not held:
         head = f"None of the {_plural(kept, 'line')} in that paste can be compared"
         out.append(("warning", f"{head}: {why}." if why else f"{head}."))
     for d, n in sorted(by_date.items()):
@@ -408,8 +451,9 @@ def _paste_panel(view_date, schedule, roster, now, dates) -> None:
     st.caption(
         "A paste ADDS to your board, so stat tabs can come in one at a time, and "
         "alt-line ladders collapse to one line per player and stat. Your board "
-        "lives only in this visit's link: it is never saved to disk, never shared, "
-        "and never enters any accuracy record. Nothing here fetches from "
+        "lives only in this visit's link: it is never saved to disk and never "
+        "enters any accuracy record, but anyone you send the link to sees it. "
+        "Clear all takes it off your link only. Nothing here fetches from "
         "PrizePicks: their API blocks server requests and their terms prohibit "
         "automated access.")
 
@@ -468,13 +512,23 @@ def _sides_tag(sides) -> str:
 
 def _void_tag(r) -> str:
     """Reboot: PrizePicks voids a More pick if the player leaves in the first
-    half and does not return. Not priced yet; flagged on More leans."""
-    if r.get("lean") != "More" or not _finite(r.get("void_risk")):
+    half and does not return. Nothing measures how often by role yet (an exit
+    model needs play-by-play, v1.1), so a More lean with props' `void_note`
+    (a bench role) gets the words and never a number. A provider that does
+    carry a measured `void_risk` (the hook for that model) gets its number."""
+    if r.get("lean") != "More":
         return ""
-    pct = round(100 * float(r["void_risk"]))
-    tip = (f"PrizePicks voids a More pick if he leaves in the first half and does "
-           f"not return. Estimated chance for his role: {pct} in 100. Not priced "
-           "into the lean.")
+    if _finite(r.get("void_risk")):
+        pct = round(100 * float(r["void_risk"]))
+        tip = (f"PrizePicks voids a More pick if he leaves in the first half and does "
+               f"not return. Estimated chance for his role: {pct} in 100. Not priced "
+               "into the lean.")
+    elif r.get("void_note"):
+        tip = ("PrizePicks voids a More pick if he leaves in the first half and does not "
+               "return. A bench role carries more of that risk. Not measured yet, and not "
+               "priced into the lean.")
+    else:
+        return ""
     return f'<span class="bv-pp-tag void" title="{esc(tip)}">void risk</span>'
 
 
@@ -566,25 +620,67 @@ def ledger_html(rows: pd.DataFrame, more: dict | None = None) -> str:
     return f'<div class="bv-ledger">{head}{"".join(out)}</div>'
 
 
+# What happened to a line, after tip (store.line_actuals fills `actual` and
+# `settle`). PrizePicks voids a pick on a player who does not play; a value on
+# the line is neither a win nor a loss, and is never called a push.
+VOID_TEXT = "Did not play, pick voided"
+EXACT_TEXT = "landed on the line"
+
+
+def actual_text(stat, value) -> str:
+    """An actual as the pages print it (the line rows here and the Game
+    table's box-score rows): minutes and Fantasy Score to a tenth, counts
+    whole; the sentinel when there is none yet (not in the game yet, or a
+    component missing: never zero-filled)."""
+    if not _finite(value):
+        return SENTINEL
+    return f"{float(value):.1f}" if stat in ("min", "fantasy") else f"{float(value):g}"
+
+
+def _actual_text(r) -> str:
+    return actual_text(r.get("stat"), r.get("actual"))
+
+
+def _fmt_actual(r) -> str:
+    return f'<span class="num act">{esc(_actual_text(r))}</span>'
+
+
+def _settle_note(r) -> str:
+    """The full-width note under a settled line, or ''."""
+    s = r.get("settle")
+    if s == "void":
+        return f'<div class="bv-pl-note">{VOID_TEXT}</div>'
+    if s == "exact":
+        return f'<div class="bv-pl-note">{esc(_actual_text(r))}: {EXACT_TEXT}</div>'
+    return ""
+
+
 def render_player_lines(rows) -> str:
     """One player's SHOWN lines, for his expandable row on the game page.
-    `rows` is a list of row dicts (rows_by_person) or a DataFrame."""
+    `rows` is a list of row dicts (rows_by_person) or a DataFrame. After tip
+    (rows carrying `actual`, from store.line_actuals) an Actual column, and
+    a note under a settled line: VOID_TEXT for a player who did not play,
+    EXACT_TEXT for a value on the line."""
     if rows is None:
         return ""
     recs = rows.to_dict(orient="records") if isinstance(rows, pd.DataFrame) else list(rows)
     if not recs:
         return ""
+    after_tip = any("actual" in r for r in recs)
     body = []
     for r in recs:
         body.append(
             '<div class="bv-pl-row">'
             f"{_stat_cell(r)}{_fmt_model(r)}{_fmt_line(r)}{_fmt_gap(r)}"
             f'<span class="lean {_lean_cls(r.get("lean"))}">{esc(r.get("lean"))}</span>'
-            "</div>")
+            + (_fmt_actual(r) if after_tip else "") + "</div>" + _settle_note(r))
+    final = any(r.get("final") for r in recs)
+    act_head = (f'<span class="num">{"Final" if final else "So far"}</span>' if after_tip else "")
     head = ('<div class="bv-pl-head"><span class="st">Stat</span>'
             '<span class="num">Model</span><span class="num">Line</span>'
-            '<span class="num">Gap</span><span class="lean">Lean</span></div>')
-    return f'<div class="bv-pl">{head}{"".join(body)}</div>'
+            f'<span class="num">Gap</span><span class="lean">Lean</span>{act_head}</div>')
+    cls = "bv-pl has-actual" if after_tip else "bv-pl"
+    return f'<div class="{cls}">{head}{"".join(body)}</div>'
 
 
 def top_per_player(table: pd.DataFrame, n: int = TOP_N) -> tuple[pd.DataFrame, dict]:
@@ -701,12 +797,9 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
     foot = odds_footnote(shown)
     if foot:
         out.append(foot)
-    if shown is not None and len(shown) and (shown["lean"] == "More").any():
-        out.append(_note(
-            "<b>Reboot.</b> PrizePicks voids a More pick on a full-game line if the "
-            "player leaves in the first half and does not return, unless he already "
-            "cleared it. The model does not price that yet, so More leans on "
-            "low-minute players carry more void risk than the lean suggests."))
+    reboot = reboot_note(shown)
+    if reboot:
+        out.append(reboot)
     if shown is not None and len(shown) and shown["stat"].isin(props.COMBO_STATS).any():
         out.append(_note(
             "Combination lines (Pts+Rebs+Asts, Blks+Stls, Fantasy Score and the "
@@ -721,6 +814,18 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
         f"as an edge: a leg has to hit {props.BREAKEVEN_LO:.1f}% to "
         f"{props.BREAKEVEN_HI:.1f}% just to break even. Not betting advice."))
     return out
+
+
+def reboot_note(shown) -> str:
+    """The Reboot footnote, when a More lean is on screen (the void tags on
+    bench roles point at it), else ''."""
+    if shown is None or not len(shown) or "lean" not in shown or not (shown["lean"] == "More").any():
+        return ""
+    return _note(
+        "<b>Reboot.</b> PrizePicks voids a More pick on a full-game line if the "
+        "player leaves in the first half and does not return, unless he already "
+        "cleared it. The model does not price that yet, so More leans on "
+        "bench roles carry more void risk than the lean suggests.")
 
 
 # ── The board ────────────────────────────────────────────────────────────────
@@ -805,20 +910,23 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
                             "Your lines are still saved; try reloading the page."),
                     unsafe_allow_html=True)
         return 0
+    period = int(meta.get("period_withheld", 0) or 0) if meta.get("period_board_suspect") else 0
     if n[0]:
         st.success(f"{_plural(posted, 'PrizePicks line')} on file for "
                    f"{md_escape(scope_label)}, {n[0]} shown.")
-    elif matched == 0:
+    elif matched == 0 and not period:
         st.markdown(none_matched_html(posted, scope_label), unsafe_allow_html=True)
-    else:
+    elif matched:
         st.markdown(_notice(
             f"<b>All {matched} matched lines are withheld.</b> The reasons are below."),
             unsafe_allow_html=True)
-    if meta.get("period_board_suspect"):
+    if period:
+        # props.compare refuses these rows (they never reach a pill, the
+        # ledger or the record): say so, never "none matched".
         st.markdown(_notice(
-            "<b>This looks like a quarter or half board.</b> Most lines sit far below "
-            "the full-game projections. Period props are not priced; paste the "
-            "full-game board."), unsafe_allow_html=True)
+            f"<b>{_plural(period, 'line')} withheld: this looks like a quarter or half "
+            "board.</b> Those lines sit far below the full-game projections. Period props "
+            "are not priced; paste the full-game board."), unsafe_allow_html=True)
     if n[0]:
         _board_fragment(shown, key, game_labels)
     for block in notes_html(meta, shown, hidden, thin, void):

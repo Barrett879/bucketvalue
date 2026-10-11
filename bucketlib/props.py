@@ -84,6 +84,7 @@ from .cache import DATA_DIR, logger
 from .names import NameIndex
 from .names import normalize as normalize_name
 from .pmf import Pmf
+from .tables import STATE_TYPES
 from .util import UTC, now_utc, season_end_year, season_for_date, to_et
 
 VERSION = "v1"
@@ -236,6 +237,15 @@ _REFUSALS: list[tuple[re.Pattern, str]] = [
 REFUSE_PERIOD = "a period prop; BucketValue projects full games only"
 REFUSE_COMBO = "a combined line for two players; v1 does not price joint lines"
 REFUSE_LEAGUE = "from a period, live or non-NBA board ({}); full-game NBA lines only"
+REFUSE_PERIOD_BOARD = ("sits far below the full-game projections, as the lines on a quarter or "
+                       "half board do; BucketValue projects full games only")
+
+
+def is_league_refusal(why) -> bool:
+    """True for a REFUSE_LEAGUE reason (the projection came from another
+    board: NBA1Q, a live board, NHL...). One test, used by compare() and by
+    the paste report, so the two never disagree about which rows those are."""
+    return isinstance(why, str) and why.startswith(REFUSE_LEAGUE.split("{")[0])
 
 
 def classify_stat(stat_type, name=None, is_combo=False, league=None
@@ -291,17 +301,27 @@ def _person_like(name) -> bool:
 # ── Which sides a line offers ────────────────────────────────────────────────
 # The last-resort default when neither the feed nor the board says. Kept
 # permissive on purpose: hiding a real pick is worse than showing one the market
-# may not offer. One place, so changing the rule is a one-line edit.
+# may not offer. One place, so changing the rule is a one-line edit, and it
+# reaches BOTH paste paths: a board square with no buttons and a feed row with
+# no allowed_wager_types are each "unknown" ('') and fall through to here
+# (audit 2026-10-09: the feed path used to read an absent field as "both", so
+# this table was dead code for every feed row).
 ODDS_TYPE_SIDES = {"standard": "both", "demon": "both", "goblin": "both"}
 _WAGER_TYPE_SIDES = {"over": "more", "under": "less", "more": "more", "less": "less"}
 
 
 def sides_from_allowed_wager_types(value) -> str:
-    """The feed's `allowed_wager_types` as an offered-sides string. Absent
-    means unrestricted. An unrecognised value is logged and treated as
-    two-sided rather than silently hiding the line."""
+    """The feed's `allowed_wager_types` as a direction: 'both', 'more',
+    'less', or '' for UNKNOWN.
+
+    Absent (None) is unknown, not unrestricted: the row says nothing about its
+    sides, so offered_sides() falls back to ODDS_TYPE_SIDES for its odds type,
+    exactly as for a board square that shows no Less/More buttons. A field
+    that IS present decides: [] and [over, under] are both sides. An
+    unrecognised value is logged and treated as two-sided rather than silently
+    hiding the line."""
     if value is None:
-        return "both"
+        return ""
     items = value if isinstance(value, (list, tuple, set)) else [value]
     sides = set()
     for item in list(items)[:10]:
@@ -338,6 +358,10 @@ def is_pickable(lean, sides) -> bool:
 PARSED_COLUMNS = ["name", "team", "position", "stat_type", "line", "start_time",
                   "direction", "odds_type", "opp", "is_combo", "league", "source"]
 _ODDS_TYPES = {"standard", "demon", "goblin"}
+# attrs['json_shape'] for a feed whose data[] is an empty list: the projections
+# feed itself, with no lines on it right now. Any other json_shape means the
+# JSON is not the feed.
+EMPTY_FEED = "empty feed"
 
 
 def _new_attrs() -> dict:
@@ -399,14 +423,20 @@ def parse_prizepicks_json(raw) -> pd.DataFrame:
     if not isinstance(raw, dict):
         attrs["json_shape"] = "not a JSON object"
         return _frame([], attrs)
-    data = raw.get("data")
+    raw_data = raw.get("data")
     included = raw.get("included")
     # A PASTE BOX. `{"data": ["x"]}` is valid JSON whose data[] holds a string;
     # calling .get on it raised AttributeError out of the page on GridironValue.
-    data = [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+    data = [d for d in raw_data if isinstance(d, dict)] if isinstance(raw_data, list) else []
     included = ([i for i in included if isinstance(i, dict)]
                 if isinstance(included, list) else [])
-    if not data:
+    if isinstance(raw_data, list) and not raw_data and "errors" not in raw:
+        # The RIGHT feed with nothing on it: before the slate's lines post, and
+        # once every game has tipped. Telling the visitor "that is not the
+        # feed" here made them doubt the correct link (audit 2026-10-09), the
+        # trap NBA_LEAGUE_ID's note recounts from DiamondValue.
+        attrs["json_shape"] = EMPTY_FEED
+    elif not any(d.get("type") == "projection" for d in data):
         attrs["json_shape"] = "no projections in data[]"
 
     players: dict[str, dict] = {}
@@ -835,10 +865,37 @@ def _utc_iso(ts) -> str | None:
     return None if ts is None else ts.astimezone(UTC).isoformat(timespec="seconds")
 
 
+# The schedule column a page sets to say which games the site projects. The
+# rule is pipeline.state_games (state games, both teams known, not postponed,
+# of a pipeline.PROJECTED_TYPES type), which props cannot import: pipeline
+# reaches the network, and this module is PASTE ONLY. So the page, which can,
+# marks its schedule and props reads the mark.
+PROJECTED_COL = "projected"
+
+
 def _schedule_frame(schedule: pd.DataFrame) -> pd.DataFrame:
-    """game_id, home, away, tip (aware ET), date (ISO), final (bool)."""
+    """game_id, home, away, tip (aware ET), date (ISO), final (bool),
+    projectable (bool).
+
+    projectable: a game the site projects at all. A line for a game it does
+    not (preseason, playoffs, the Cup final, All-Star, and the play-in) is
+    still routed to its own date and saved (stale beats empty), but the paste
+    report must never promise a comparison that cannot appear (audit
+    2026-10-09: a preseason paste said "2 lines loaded ... see Model vs the
+    board" and the page promised the comparison "once projections are
+    published").
+
+    The schedule's PROJECTED_COL, when the page sets it, decides: it is the
+    pipeline's own answer. Without it, a game outside tables.STATE_TYPES or
+    without both teams is never projectable, which always holds (a projected
+    game is a state game with both teams, by pipeline.state_games's
+    construction); a play-in or postponed game is then left projectable,
+    since only the pipeline's rule knows it is not. A schedule with neither
+    column (constructed tests) counts every game with both teams.
+    """
+    cols = ["game_id", "home", "away", "tip", "date", "final", "projectable"]
     if schedule is None or schedule.empty:
-        return pd.DataFrame(columns=["game_id", "home", "away", "tip", "date", "final"])
+        return pd.DataFrame(columns=cols)
     s = schedule
     tips = [(_parse_ts(t) if t is not None else None) for t in s.get("tip_utc", [None] * len(s))]
     if "game_date" in s.columns:
@@ -847,19 +904,28 @@ def _schedule_frame(schedule: pd.DataFrame) -> pd.DataFrame:
     else:
         dates = [t.date().isoformat() if t is not None else None for t in tips]
     dates = [d or (t.date().isoformat() if t is not None else None) for d, t in zip(dates, tips)]
+    home = [teams.canonical(x) for x in s["home"]]
+    away = [teams.canonical(x) for x in s["away"]]
+    state = (s["game_type"].isin(STATE_TYPES).to_numpy() if "game_type" in s.columns
+             else np.ones(len(s), dtype=bool))
+    marked = (s[PROJECTED_COL].to_numpy(dtype=object) if PROJECTED_COL in s.columns
+              else np.full(len(s), None, dtype=object))
     return pd.DataFrame({
         "game_id": s["game_id"].astype(str).to_numpy(),
-        "home": [teams.canonical(x) for x in s["home"]],
-        "away": [teams.canonical(x) for x in s["away"]],
+        "home": home, "away": away,
         "tip": pd.Series(tips, dtype=object), "date": dates,
         "final": (s["status"].astype(str).str.lower() == "final").to_numpy()
         if "status" in s.columns else np.zeros(len(s), dtype=bool),
-    })
+        "projectable": [bool(m) if isinstance(m, (bool, np.bool_))
+                        else bool(typ) and h is not None and a is not None
+                        for m, typ, h, a in zip(marked, state, home, away)],
+    }, columns=cols)
 
 
 def _route_one(rec: dict, games_all: list[dict], by_team: dict, want: set,
-               now_et) -> tuple[str | None, str | None, str, str | None]:
-    """(game_date, game_id, route_how, tip_utc) for one line."""
+               now_et) -> tuple[str | None, str | None, str, str | None, bool | None]:
+    """(game_date, game_id, route_how, tip_utc, projectable) for one line.
+    projectable is None when the line reached a date but no single game."""
     team = teams.canonical(rec.get("team")) or teams.canonical(rec.get("roster_team"))
     opp = teams.canonical(rec.get("opp"))
     ts = _parse_ts(rec.get("start_time"))
@@ -876,20 +942,25 @@ def _route_one(rec: dict, games_all: list[dict], by_team: dict, want: set,
         # has tipped (or gone Final) is never a pre-game line: the board-text
         # path already refused these, the feed path priced them (audit).
         if ts <= now_et or tip <= now_et or (g is not None and g["final"]):
-            return None, None, "tipped", None
-        return d, (g["game_id"] if g is not None else None), "start_time", _utc_iso(tip)
+            return None, None, "tipped", None, None
+        return (d, (g["game_id"] if g is not None else None), "start_time", _utc_iso(tip),
+                (bool(g["projectable"]) if g is not None else None))
     cands = [g for g in games if g["date"] in want and not g["final"]
              and (g["tip"] is None or g["tip"] > now_et)
              and (opp is None or opp in (g["home"], g["away"]))]
     if cands:
         g = min(cands, key=lambda g: (g["date"], g["tip"] or now_et))
-        return g["date"], g["game_id"], "team_schedule", _utc_iso(g["tip"])
-    return None, None, "unrouted", None
+        return g["date"], g["game_id"], "team_schedule", _utc_iso(g["tip"]), bool(g["projectable"])
+    return None, None, "unrouted", None, None
+
+
+_ROUTE_COLUMNS = ("game_date", "game_id", "route_how", "tip_utc", "projectable")
 
 
 def route_lines(lines: pd.DataFrame, schedule: pd.DataFrame, now=None,
                 dates=None) -> pd.DataFrame:
-    """Add game_date (ISO), game_id, route_how and tip_utc to every line.
+    """Add game_date (ISO), game_id, route_how, tip_utc and projectable to
+    every line.
 
     Feed rows carry start_time: the line goes to the ET date of THAT time
     (00:30Z is the previous evening in New York), and to the team's game on it,
@@ -900,10 +971,13 @@ def route_lines(lines: pd.DataFrame, schedule: pd.DataFrame, now=None,
     route_how 'unrouted' / 'tipped' / 'error', reported rather than filed under
     the date on screen. tip_utc is the schedule's tip (or the feed's start
     time): the record refuses to freeze a line whose tip it does not know.
+    projectable is False for a game the site does not project (preseason,
+    playoffs, Cup final, and whatever else the page's PROJECTED_COL says: see
+    _schedule_frame), None when no single game was found.
     """
     out = lines.copy()
     if out.empty:
-        for c in ("game_date", "game_id", "route_how", "tip_utc"):
+        for c in _ROUTE_COLUMNS:
             out[c] = pd.Series(dtype=object)
         return out
     now = now or now_utc()
@@ -919,21 +993,15 @@ def route_lines(lines: pd.DataFrame, schedule: pd.DataFrame, now=None,
             if g[side]:
                 by_team.setdefault(g[side], []).append(g)
 
-    gd, gid, how, tips = [], [], [], []
+    routed = []
     for rec in out.to_dict(orient="records"):
         try:
-            d, g_id, h, tip = _route_one(rec, games_all, by_team, want, now_et)
+            routed.append(_route_one(rec, games_all, by_team, want, now_et))
         except Exception as e:  # noqa: BLE001 - one bad row costs one row (audit)
             logger.warning("route_lines: row failed (%s)", type(e).__name__)
-            d, g_id, h, tip = None, None, "error", None
-        gd.append(d)
-        gid.append(g_id)
-        how.append(h)
-        tips.append(tip)
-    out["game_date"] = gd
-    out["game_id"] = gid
-    out["route_how"] = how
-    out["tip_utc"] = tips
+            routed.append((None, None, "error", None, None))
+    for i, c in enumerate(_ROUTE_COLUMNS):
+        out[c] = pd.Series([r[i] for r in routed], index=out.index, dtype=object)
     return out
 
 
@@ -956,6 +1024,43 @@ def _collapse_key(df: pd.DataFrame) -> pd.Series:
     return date + "|" + who + "|" + stat
 
 
+# A standard line re-pasted at under PERIOD_REPASTE_RATIO of the standard line
+# already held for the same game date, player and stat, AND at least
+# PERIOD_REPASTE_MIN_DROP below it, is held back as a suspected quarter or half
+# line instead of replacing it. A period board whose square labels say only
+# "Points" (unverified for the NBA board, but the code cannot tell) otherwise
+# REPLACED the full-game line, newest paste winning, and priced 9.5 against a
+# 33-point projection (audit 2026-10-09). A 1Q line is about a quarter of the
+# full game and a 1H line about half; a real market move is never 40%. The
+# absolute floor keeps the small-count moves real markets do make (Blocks 1.5
+# to 0.5) out of it. Only standard against standard: an alt rung is supposed
+# to sit off the standard number.
+PERIOD_REPASTE_RATIO = 0.6
+PERIOD_REPASTE_MIN_DROP = 2.0
+
+
+def _period_repastes(out: pd.DataFrame) -> np.ndarray:
+    """Rows of `out` (in recency order, with _key and _rank) that are a
+    standard line far below the standard line held before them."""
+    held = np.zeros(len(out), dtype=bool)
+    if "line" not in out.columns:
+        return held
+    lines = pd.to_numeric(out["line"], errors="coerce").to_numpy(dtype=float)
+    std = (np.asarray(out["_rank"]) == 0) if "_rank" in out.columns else np.ones(len(out), bool)
+    current: dict[str, float] = {}
+    for i, k in enumerate(out["_key"].to_numpy()):
+        x = lines[i]
+        if not std[i] or not math.isfinite(x):
+            continue
+        prev = current.get(k)
+        if (prev is not None and x < PERIOD_REPASTE_RATIO * prev
+                and prev - x >= PERIOD_REPASTE_MIN_DROP):
+            held[i] = True                   # keep the full-game line
+            continue
+        current[k] = x
+    return held
+
+
 def collapse_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
     """One line per (game date, player, stat): standard first, then Goblin,
     then Demon; among equals, the NEWEST paste wins.
@@ -968,6 +1073,11 @@ def collapse_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
     every re-paste and the board kept comparing against a number the market no
     longer posts.
 
+    Except a suspected period line (PERIOD_REPASTE_RATIO above): it never
+    replaces the full-game line it sits far below. How many were held back is
+    `attrs['period_held']` on the result, and per game date
+    `attrs['period_held_by_date']`, so the paste report can say so.
+
     Safe for the record because the record's FREEZE_KEYS are (game_id,
     person_id, stat), WITHOUT the line, and first seen wins: the pick made at
     24.5 stays frozen as the evidence it is, and the board moves to 26.5.
@@ -979,12 +1089,19 @@ def collapse_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
     out["_rank"] = out["odds_type"].map(lambda o: _ODDS_RANK.get(str(o).lower(), 3)) \
         if "odds_type" in out.columns else 0
     out["_ord"] = np.arange(len(out))
-    out = (out.sort_values(["_key", "_rank", "_ord"], ascending=[True, True, False],
-                           kind="mergesort")
-              .drop_duplicates("_key", keep="first")
-              .sort_values("_ord", kind="mergesort")
-              .drop(columns=["_key", "_rank", "_ord"]))
-    return out.reset_index(drop=True)
+    held = _period_repastes(out)
+    held_dates = (out.loc[held, "game_date"].astype(str).value_counts()
+                  if "game_date" in out.columns else pd.Series(dtype=int))
+    out = (out[~held]
+           .sort_values(["_key", "_rank", "_ord"], ascending=[True, True, False],
+                        kind="mergesort")
+           .drop_duplicates("_key", keep="first")
+           .sort_values("_ord", kind="mergesort")
+           .drop(columns=["_key", "_rank", "_ord"])
+           .reset_index(drop=True))
+    out.attrs["period_held"] = int(held.sum())
+    out.attrs["period_held_by_date"] = {str(k): int(v) for k, v in held_dates.items()}
+    return out
 
 
 # ── One call from paste text to stored lines ─────────────────────────────────
@@ -997,8 +1114,27 @@ def _classify_row(stat_type, name, is_combo, league) -> tuple[str | None, str, s
 
 
 # Why a line that reached a date still cannot be compared, in compare()'s own
-# order (a refusal outranks a failed match). Keys are shown to the visitor.
-NOT_COMPARABLE = ("not priced", "unrecognised stat", "not matched")
+# order (a refusal outranks a failed match, a failed match outranks a game the
+# site does not project). Keys are shown to the visitor, so props_ui words
+# EVERY key here (its _WHY_WORDS); a key it does not know raises there.
+#   not priced         period props, Dunks, double-doubles, two-player squares
+#   other board        a projection from another board: NBA1Q, a live board, NHL
+#   unrecognised stat  a label nothing maps
+#   not matched        a name not on a current roster (or ambiguous)
+#   not projected      a matched line for a game the site does not project
+#                      (preseason, playoffs, Cup final; the play-in too when the
+#                      page marks its schedule, see PROJECTED_COL)
+NOT_COMPARABLE = ("not priced", "other board", "unrecognised stat", "not matched",
+                  "not projected")
+# Other boards named in the report, and the share of a paste that makes one
+# of them THE board the visitor copied (props_ui then says "that is the NHL
+# board, not the NBA board" instead of "not priced").
+MAX_BOARD_NAMES = 8
+WRONG_BOARD_SHARE = 0.5
+
+
+def _board_name(league) -> str:
+    return " ".join(str(league or "").split()).upper()[:20]
 
 
 def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
@@ -1013,16 +1149,25 @@ def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
       kept = comparable + sum(not_comparable.values()) + unrouted
 
     `comparable` counts the lines that can reach a board at all (a mapped stat,
-    a matched player, an upcoming game). The confirmation counts THOSE, never
-    `kept`: "2 lines loaded" for one unknown name and one 1Q prop promised two
-    rows and showed none (audit 2026-10-09; DiamondValue's "6000 lines
-    updated, nothing showing"). Each stage catches errors per row.
+    a matched player, an upcoming game the site projects). The confirmation
+    counts THOSE, never `kept`: "2 lines loaded" for one unknown name and one
+    1Q prop promised two rows and showed none (audit 2026-10-09; DiamondValue's
+    "6000 lines updated, nothing showing"), and so did a preseason paste
+    (not_comparable['not projected']). Each stage catches errors per row.
+
+    Also: `other_boards` {board name: lines} for lines from another board,
+    whether or not they routed; `wrong_board`, that board's name when it holds
+    at least WRONG_BOARD_SHARE of the paste (the visitor copied the wrong
+    feed), else None; `period_held`, standard lines held back as suspected
+    quarter or half lines (collapse_alt_lines). Names are capped, never
+    escaped here: the page escapes what it renders.
     """
     parsed = parse_any(text)
     report = {"parsed": int(len(parsed)), "parse": dict(parsed.attrs),
               "by_date": {}, "unrouted": 0, "unrouted_names": [], "kept": 0,
               "comparable": 0, "comparable_by_date": {},
-              "not_comparable": {k: 0 for k in NOT_COMPARABLE}}
+              "not_comparable": {k: 0 for k in NOT_COMPARABLE},
+              "other_boards": {}, "wrong_board": None, "period_held": 0}
     if parsed.empty:
         return parsed, report
     df = parsed.copy()
@@ -1046,22 +1191,38 @@ def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
     df = df.sort_values("_i", kind="mergesort").drop(columns="_i").reset_index(drop=True)
     df = route_lines(df, schedule, now=now, dates=dates)
     df = collapse_alt_lines(df)
+    report["period_held"] = int(df.attrs.get("period_held", 0))
     vc = df["game_date"].dropna().value_counts()
     report["by_date"] = {str(k): int(v) for k, v in sorted(vc.items())}
     unr = df[df["game_date"].isna()]
     report["unrouted"] = int(len(unr))
     report["unrouted_names"] = sorted({str(x) for x in unr["name"]})[:8]
     report["kept"] = int(len(df))
-    routed = df[df["game_date"].notna()]
-    kind = routed["kind"].astype(str)
-    matched = routed["match"].astype(str).eq("matched")
+
+    other = (df["kind"].astype(str).eq("refused")
+             & df["refusal"].map(is_league_refusal).astype(bool))
+    boards = df.loc[other, "league"].map(_board_name).value_counts()
+    report["other_boards"] = {str(k): int(v) for k, v in boards.head(MAX_BOARD_NAMES).items()}
+    if len(boards) and boards.iloc[0] >= WRONG_BOARD_SHARE * len(df):
+        report["wrong_board"] = str(boards.index[0])
+
+    on_date = df["game_date"].notna()
+    kind = df["kind"].astype(str)
+    matched = df["match"].astype(str).eq("matched")
     ok = kind.eq("ok")
+    refused = kind.eq("refused")
+    # Explicitly False only: a line that reached a date but no single game
+    # (projectable None) is left comparable, as it was before the flag.
+    unprojected = df["projectable"].map(lambda v: v is False or v is np.False_).astype(bool)
+    comparable = on_date & ok & matched & ~unprojected
     report["not_comparable"] = {
-        "not priced": int(kind.eq("refused").sum()),
-        "unrecognised stat": int((~ok & ~kind.eq("refused")).sum()),
-        "not matched": int((ok & ~matched).sum()),
+        "not priced": int((on_date & refused & ~other).sum()),
+        "other board": int((on_date & other).sum()),
+        "unrecognised stat": int((on_date & ~ok & ~refused).sum()),
+        "not matched": int((on_date & ok & ~matched).sum()),
+        "not projected": int((on_date & ok & matched & unprojected).sum()),
     }
-    comp = routed[ok & matched]
+    comp = df[comparable]
     report["comparable"] = int(len(comp))
     cvc = comp["game_date"].value_counts()
     report["comparable_by_date"] = {str(k): int(v) for k, v in sorted(cvc.items())}
@@ -1080,10 +1241,16 @@ def lines_for_date(lines: pd.DataFrame | None, date) -> pd.DataFrame:
 # Every internal link is a full page load (a new Streamlit session), so
 # st.session_state cannot carry a paste from the slate to a game page. The
 # board lives HERE, in this process, keyed by an unguessable token that rides
-# in ?board=. It is never written to disk and never frozen: a visitor's paste
-# reaches the board in front of them and nothing else. Bounded by an LRU with a
-# sliding TTL, a board cap and a total-row cap, because one process serves
-# every visitor and a hostile one could otherwise fill memory.
+# in ?board=. It is never written to disk and never frozen. Bounded by an LRU
+# with a sliding TTL, a board cap and a total-row cap, because one process
+# serves every visitor and a hostile one could otherwise fill memory.
+#
+# THE TOKEN IS IN EVERY URL (nav, cards, back links, share), so anyone handed a
+# link READS that board. Nobody can WRITE to it: a board is immutable once
+# stored. add_to_board is copy-on-write (a NEW token holding old + new), and
+# the page's Clear all only drops the token from that visitor's own URL. A
+# second visitor on a copied link used to merge into, and clear, the first
+# visitor's board (audit 2026-10-09).
 BOARD_TTL_S = 18 * 3600
 BOARD_MAX = 200
 BOARD_MAX_ROWS = 5_000
@@ -1114,6 +1281,8 @@ class _Board:
     touched: float = field(default=0.0)
     nbytes: int = 0
     dropped: int = 0            # rows the BOARD_MAX_ROWS cap dropped on the last write
+    period_held: dict = field(default_factory=dict)   # {game_date: lines} held back on
+                                                      # the write that made this board
 
 
 _BOARDS: "OrderedDict[str, _Board]" = OrderedDict()
@@ -1150,9 +1319,11 @@ def _cap(lines: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return lines.reset_index(drop=True).copy(), dropped
 
 
-def _store_locked(token: str, lines: pd.DataFrame, now: float) -> None:
+def _store_locked(token: str, lines: pd.DataFrame, now: float,
+                  period_held: dict | None = None) -> None:
     stored, dropped = _cap(lines)
-    _BOARDS[token] = _Board(stored, now, int(stored.memory_usage(deep=True).sum()), dropped)
+    _BOARDS[token] = _Board(stored, now, int(stored.memory_usage(deep=True).sum()), dropped,
+                            dict(period_held or {}))
     _BOARDS.move_to_end(token)
     _evict_locked(now)
 
@@ -1181,40 +1352,56 @@ def get_board(token) -> pd.DataFrame | None:
 
 
 def board_info(token) -> dict | None:
-    """{rows, nbytes, dropped} for `token`'s board, or None. `dropped` is how
-    many rows the BOARD_MAX_ROWS cap removed on the last write: counted, so the
-    paste panel can say so instead of shrinking the board in silence."""
+    """{rows, nbytes, dropped, period_held, period_held_by_date} for
+    `token`'s board, or None. `dropped` is how many rows the BOARD_MAX_ROWS
+    cap removed on the write that made this board, `period_held` how many
+    pasted lines that write held back as suspected quarter or half lines
+    against the board's full-game lines (collapse_alt_lines), per game date in
+    `period_held_by_date`: counted, so the paste panel can say so instead of
+    changing the board in silence."""
     if not valid_token(token):
         return None
     with _BOARDS_LOCK:
         b = _BOARDS.get(token)
         if b is None:
             return None
-        return {"rows": int(len(b.lines)), "nbytes": int(b.nbytes), "dropped": int(b.dropped)}
+        return {"rows": int(len(b.lines)), "nbytes": int(b.nbytes), "dropped": int(b.dropped),
+                "period_held": int(sum(b.period_held.values())),
+                "period_held_by_date": dict(b.period_held)}
 
 
 def add_to_board(token, lines: pd.DataFrame) -> str:
-    """Merge `lines` into the board for `token` (collapsing the ladder, newest
-    winning) and return the token that now holds it: the same token, or a new
-    one if `token` was unknown, expired or not a token at all."""
+    """COPY ON WRITE: store `token`'s board plus `lines` (collapsing the
+    ladder, newest winning) under a NEW token and return it. The board under
+    `token` is left exactly as it was, so a visitor who opened someone else's
+    link can add lines without changing the board that link shows. An
+    unknown, expired or malformed `token` starts from nothing.
+
+    The superseded board moves to the eviction end of the LRU: it is usually
+    the same visitor's previous copy, dead weight once their URL carries the
+    new token, so under pressure it goes before anyone's live board. Reading
+    it again (an old or shared link) moves it back."""
     with _BOARDS_LOCK:
         now = _clock()
         _evict_locked(now)
         b = _BOARDS.get(token) if valid_token(token) else None
-        if b is None:
-            token = secrets.token_urlsafe(24)
-            merged = collapse_alt_lines(lines) if lines is not None and not lines.empty \
-                else pd.DataFrame()
-        else:
-            parts = [x for x in (b.lines, lines) if x is not None and not x.empty]
-            merged = collapse_alt_lines(pd.concat(parts, ignore_index=True)) if parts \
-                else pd.DataFrame()
-        _store_locked(token, merged, now)
-    return token
+        parts = [x for x in ((b.lines if b is not None else None), lines)
+                 if x is not None and not x.empty]
+        merged = collapse_alt_lines(pd.concat(parts, ignore_index=True)) if parts \
+            else pd.DataFrame()
+        held = dict(merged.attrs.get("period_held_by_date") or {}) if parts else {}
+        if b is not None:
+            _BOARDS.move_to_end(token, last=False)
+        new = secrets.token_urlsafe(24)
+        _store_locked(new, merged, now, period_held=held)
+    return new
 
 
 def clear_board(token) -> None:
-    """Forget ONE visitor's board. Nobody else's is touched; nothing on disk is."""
+    """Forget the board under `token` for EVERYONE holding that link (it rides
+    in every URL). The page does not call this: Clear all drops the token from
+    the visitor's own URL and the board ages out of the LRU. Kept for tests and
+    for an operator. Nothing on disk is touched."""
     if not valid_token(token):
         return
     with _BOARDS_LOCK:
@@ -1412,11 +1599,21 @@ TABLE_COLUMNS = [
     "person_id", "game_id", "game_date", "player", "team", "opp", "stat",
     "stat_label", "line", "model", "mean", "gap", "p_over", "p_push", "p_under",
     "q_more", "q_less", "confidence", "lean", "sides", "odds_type", "tier",
-    "tier_edge", "tier_note", "games_prior", "thin", "void_risk", "source",
-    "how", "pasted_name", "model_version", "as_of", "provisional", "tip_utc",
-    "tie_possible",
+    "tier_edge", "tier_note", "games_prior", "thin", "void_risk", "mu_min",
+    "void_note", "source", "how", "pasted_name", "model_version", "as_of",
+    "provisional", "adjusted", "tip_utc", "tie_possible",
 ]
 _GAMES_COLS = ("games_prior", "n_games", "games")
+_MIN_COLS = ("mu_min", "min")
+
+# ROLE-BASED VOID NOTE (spec 3.5: "More leans show a role-based void risk
+# note"). PrizePicks' Reboot voids a More pick on a first-half exit with no
+# return, and nothing here measures how often that happens by role (an exit
+# model needs play-by-play, v1.1), so there is NO percentage: a More lean for
+# a player projected under VOID_NOTE_BELOW_MIN minutes carries `void_note`,
+# and the page says in words that a bench role carries more of that risk.
+# PROVISIONAL, not measured: 20 minutes is a bench role, not a fitted cut.
+VOID_NOTE_BELOW_MIN = 20.0
 
 
 def _new_meta(n: int) -> dict:
@@ -1424,8 +1621,36 @@ def _new_meta(n: int) -> dict:
             "unprojected": 0, "n_refused": 0, "refused": {}, "refused_why": {},
             "unmapped": {}, "unprojected_why": {}, "unmatched_names": [],
             "ambiguous_names": [], "nonexact": [], "errors": 0,
-            "period_board_suspect": False, "games_unknown": False,
-            "unresolved": pd.DataFrame()}
+            "period_board_suspect": False, "period_withheld": 0,
+            "games_unknown": False, "unresolved": pd.DataFrame()}
+
+
+def _finite_or_nan(v) -> float:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+    return x if math.isfinite(x) else float("nan")
+
+
+def _flag(v) -> bool | None:
+    """A projection row's bool flag (provisional, adjusted), or None when the
+    row does not say. Never guessed: the record refuses None."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    return None
+
+
+def projection_as_of(prow) -> str | None:
+    """The projection's as-of stamp: its own `as_of`, else `computed_at` (the
+    production frame's stamp, pipeline section 3) as ISO UTC. None when it
+    carries neither: the record then refuses the row."""
+    own = _jsonable(prow.get("as_of")) if hasattr(prow, "get") else None
+    if own:
+        return str(own)
+    return _utc_iso(_parse_ts(prow.get("computed_at"))) if hasattr(prow, "get") else None
 
 
 def _bump(d: dict, k, n: int = 1) -> None:
@@ -1499,7 +1724,7 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
                 shown_label = label
                 if why == REFUSE_COMBO:
                     shown_label = f"{label} (two-player square)"
-                elif why.startswith("from a period"):
+                elif is_league_refusal(why):
                     shown_label = f"{label} ({str(rec.get('league') or '').upper()[:20]} board)"
                 _bump(meta["refused"], shown_label)
                 meta["refused_why"][shown_label] = why
@@ -1563,9 +1788,9 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
             gp = float(gp) if gp is not None and not pd.isna(gp) else np.nan
             # Unknown history is thin: no column, NaN, or below MIN_GAMES.
             thin = not math.isfinite(gp) or gp < MIN_GAMES
-            prov = prow.get("provisional")
-            prov = None if prov is None or (isinstance(prov, float) and math.isnan(prov)) \
-                else bool(prov)
+            prov = _flag(prow.get("provisional"))
+            mu_min = next((x for x in (_finite_or_nan(prow.get(c)) for c in _MIN_COLS)
+                           if math.isfinite(x)), float("nan"))
             tip = rec.get("tip_utc")
             if tip is None or (isinstance(tip, float) and math.isnan(tip)):
                 tip = prow.get("tip_utc")
@@ -1588,10 +1813,16 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
                 "sides": offered_sides(rec.get("direction"), rec.get("odds_type")),
                 "odds_type": str(rec.get("odds_type") or "standard").lower(),
                 "tier": rel["tier"], "tier_edge": rel["edge"], "tier_note": rel["note"],
-                "games_prior": gp, "thin": thin, "void_risk": vr, "source": src,
-                "how": how, "pasted_name": rec.get("name"),
-                "model_version": prow.get("model_version"), "as_of": prow.get("as_of"),
+                "games_prior": gp, "thin": thin, "void_risk": vr,
+                "mu_min": mu_min,
+                "void_note": bool(lean == "More" and math.isfinite(mu_min)
+                                  and mu_min < VOID_NOTE_BELOW_MIN),
+                "source": src, "how": how, "pasted_name": rec.get("name"),
+                "model_version": prow.get("model_version"), "as_of": projection_as_of(prow),
                 "provisional": prov,
+                # A row recomputed with this visitor's mark-outs (pipeline's
+                # `adjusted`): shown on the page, never scored (spec 4).
+                "adjusted": _flag(prow.get("adjusted")),
                 "tip_utc": tip,
                 # On the stat's outcome grid, so an exact landing is possible:
                 # whole numbers for counts, tenths for Fantasy (35.5 can tie).
@@ -1602,13 +1833,28 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
             meta["unprojected"] += 1
             _bump(meta["unprojected_why"], "internal error")
             logger.warning("compare: row failed (%s: %s)", type(e).__name__, e)
-    meta["matched"] = len(rows)
     meta["unresolved"] = pd.DataFrame(unresolved_rows)
     table = pd.DataFrame(rows, columns=TABLE_COLUMNS)
     if not table.empty:
+        # A board whose lines sit far below the full-game projections is a
+        # quarter or half board pasted as full-game. Its rows are REFUSED,
+        # counted like any refusal, so board_rows, the card pills and the
+        # record never see them (audit 2026-10-09: they used to stay shown,
+        # ranked first, More at q near 1, under a notice).
+        held = _period_suspect_rows(table)
+        if held.any():
+            for label in table.loc[held, "stat_label"]:
+                shown_label = f"{label} (looks like a quarter or half board)"
+                _bump(meta["refused"], shown_label)
+                meta["refused_why"][shown_label] = REFUSE_PERIOD_BOARD
+            meta["n_refused"] += int(held.sum())
+            meta["period_board_suspect"] = True
+            meta["period_withheld"] = int(held.sum())
+            table = table[~held].reset_index(drop=True)
+    meta["matched"] = len(table)
+    if not table.empty:
         table = rank_rows(table)
         meta["by_tier"] = table["tier"].value_counts().to_dict()
-        meta["period_board_suspect"] = _period_board_suspect(table)
     return table, meta
 
 
@@ -1628,14 +1874,42 @@ def _resolve_inline(df: pd.DataFrame, roster) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else df
 
 
-def _period_board_suspect(table: pd.DataFrame) -> bool:
-    """A 1Q or 1H board pasted as if it were full-game prices Jokic's 6.5
-    first-quarter points against a 26-point projection, and every row leans
-    More by a mile. Flag it when most matched lines sit far below their means."""
-    t = table[(table["mean"] > 2.0)]
-    if len(t) < 10:
+# A 1Q or 1H board pasted as if it were full-game prices Jokic's 6.5
+# first-quarter points against a 26-point projection, and every row leans More
+# by a mile. A group of lines is that board when, over at least
+# PERIOD_MIN_PLAYERS players with a mean above 2, the median player's median
+# line/mean ratio is under PERIOD_RATIO (a 1Q line is ~0.25 of the full game,
+# a 1H line ~0.5; a real full-game board sits near 1). Per PLAYER, so one star
+# on a minutes restriction the model has not heard of (all his lines far
+# below) never takes his game down with him. The groups are each game and the
+# whole date, so a period board for one game is caught inside a full-game
+# slate, and a period slate with a few lines per game is caught as a whole.
+# Was: 10 rows, date only, and a notice that left the rows shown.
+PERIOD_RATIO = 0.55
+PERIOD_MIN_PLAYERS = 3
+
+
+def _period_group_suspect(t: pd.DataFrame) -> bool:
+    mean = pd.to_numeric(t["mean"], errors="coerce")
+    line = pd.to_numeric(t["line"], errors="coerce")
+    keep = (mean > 2.0) & line.notna()
+    if not keep.any():
         return False
-    return bool((t["line"] / t["mean"]).median() < 0.55)
+    ratio = (line[keep] / mean[keep]).groupby(t.loc[keep, "person_id"]).median()
+    return len(ratio) >= PERIOD_MIN_PLAYERS and float(ratio.median()) < PERIOD_RATIO
+
+
+def _period_suspect_rows(table: pd.DataFrame) -> np.ndarray:
+    """Rows of a compare() table that belong to a suspected period board."""
+    if table is None or table.empty:
+        return np.zeros(0, dtype=bool)
+    if _period_group_suspect(table):
+        return np.ones(len(table), dtype=bool)
+    mask = np.zeros(len(table), dtype=bool)
+    for _gid, idx in table.groupby(table["game_id"].astype(str), sort=False).indices.items():
+        if _period_group_suspect(table.iloc[idx]):
+            mask[idx] = True
+    return mask
 
 
 def rank_rows(table: pd.DataFrame) -> pd.DataFrame:
@@ -1758,22 +2032,28 @@ def ledger(meta: dict, shown=None, hidden=None, thin=None, void=None) -> dict:
 # player and stat and the same result was graded twice (GridironValue). The
 # record keeps the pick actually made, at the line it was made against.
 #
-# Stamped with model_version and the projection's as-of stamp. Never written on
-# a READ_ONLY (shared) host, never for a provisional projection, never after
-# tip. Lives in cache/props_record_*.json, which .gitignore fences off.
+# Stamped with the model_version and the as-of stamp OF THE PROJECTION ROW (its
+# computed_at in the production frame). Never written on a READ_ONLY (shared)
+# host, never for a provisional projection, never for a row recomputed with a
+# visitor's mark-outs (spec 4: "in-session recomputes are never scored"),
+# never after tip. Lives in cache/props_record_*.json, which .gitignore fences
+# off.
 #
 # EVERY GUARD FAILS CLOSED (audit 2026-10-09: compare() output with no tip and
 # no provisional flag froze all 9 rows at a time after every game had tipped).
 # A row freezes only when its tip is KNOWN and in the future, its projection
-# says provisional=False EXPLICITLY, it carries an as-of stamp, and a model
-# version is given. And only rows the board SHOWS freeze: board_rows() is the
-# one definition, so a hidden side, an Even, a thin or a void line is never a
-# pick in the record.
+# says provisional=False AND adjusted=False EXPLICITLY, it carries an as-of
+# stamp, and its own model_version equals the one the caller freezes for (a
+# frozen game served from an older model's committed rows is not that model's
+# pick; it used to be stamped with the caller's version). And only rows the
+# board SHOWS freeze: board_rows() is the one definition, so a hidden side,
+# an Even, a thin or a void line is never a pick in the record.
 FREEZE_KEYS = ("game_id", "person_id", "stat")
 _FREEZE_FIELDS = ("game_id", "person_id", "stat", "game_date", "player", "team", "opp",
                   "stat_label", "line", "model", "mean", "gap", "p_over", "p_push",
                   "p_under", "q_more", "q_less", "lean", "sides", "odds_type", "tier",
-                  "tier_edge", "games_prior", "void_risk", "source", "how")
+                  "tier_edge", "games_prior", "void_risk", "source", "how",
+                  "model_version")
 
 
 def record_path(game_date) -> Path:
@@ -1816,7 +2096,9 @@ def freeze_projections(table: pd.DataFrame, model_version: str | None,
     Refuses (returns 0) under cache.READ_ONLY: a snapshot taken on the shared
     host would carry that container's model, die at restart, and meanwhile
     make the published record disagree with the committed one. Raises
-    ValueError without a model_version (a caller bug, not a condition).
+    ValueError without a model_version (a caller bug, not a condition): the
+    version this record is for, which every frozen row's own model_version
+    must equal. `as_of` stands in only for a row that carries no stamp at all.
     `report`, if given, collects how many rows each guard turned away.
     """
     if not isinstance(model_version, str) or not model_version.strip():
@@ -1844,6 +2126,16 @@ def freeze_projections(table: pd.DataFrame, model_version: str | None,
             continue
         if not _explicit_false(rec.get("provisional")):
             skip("provisional_or_unknown")
+            continue
+        if not _explicit_false(rec.get("adjusted")):
+            skip("adjusted_or_unknown")       # a visitor's mark-out recompute
+            continue
+        row_version = rec.get("model_version")
+        if not isinstance(row_version, str) or not row_version.strip():
+            skip("no_model_version")
+            continue
+        if row_version != model_version:
+            skip("version_mismatch")
             continue
         tip = _parse_ts(rec.get("tip_utc"))
         if tip is None:
@@ -1875,7 +2167,6 @@ def freeze_projections(table: pd.DataFrame, model_version: str | None,
             if k in existing:
                 continue                  # first seen wins
             row["frozen_at"] = stamp
-            row["model_version"] = model_version
             row["as_of"] = _jsonable(rec.get("as_of")) or as_of
             row["tip_utc"] = _utc_iso(_parse_ts(rec.get("tip_utc")))
             existing[k] = row

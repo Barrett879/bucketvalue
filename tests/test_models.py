@@ -263,19 +263,22 @@ def test_loaded_models_predict_exactly_what_the_fitted_ones_do(fitted, saved, ta
 
 def test_predict_is_the_estimators_own_output(fitted, table):
     """predict() adds nothing to the estimators but the gated clip, the
-    FG3A <= FGA cap and the E[stat | plays] = mu_min x rate composition (p_play
-    is NOT multiplied in)."""
+    made <= attempts caps (FG3A and FGM at FGA, FG3M at the capped FG3A and
+    FGM, FTM at FTA) and the E[stat | plays] = mu_min x rate composition
+    (p_play is NOT multiplied in)."""
     rows = table[1]
     X = rows[fitted.features]
     out = M.predict(fitted, rows)
     assert list(out.columns) == CONTRACT_COLS
     np.testing.assert_array_equal(out["p_play"], fitted.availability.predict_proba(X)[:, 1])
     np.testing.assert_array_equal(out["mu_min"], np.clip(fitted.minutes.predict(X), 0, 53))
+    raw = {s: fitted.rates[s].predict(X) for s in CONTRACT_STATS}
+    raw["fg3a"] = np.minimum(raw["fg3a"], raw["fga"])
+    raw["fgm"] = np.minimum(raw["fgm"], raw["fga"])
+    raw["fg3m"] = np.minimum(np.minimum(raw["fg3m"], raw["fg3a"]), raw["fgm"])
+    raw["ftm"] = np.minimum(raw["ftm"], raw["fta"])
     for s in CONTRACT_STATS:
-        raw = fitted.rates[s].predict(X)
-        if s == "fg3a":
-            raw = np.minimum(raw, fitted.rates["fga"].predict(X))
-        np.testing.assert_array_equal(out[f"rate_{s}"], raw)
+        np.testing.assert_array_equal(out[f"rate_{s}"], raw[s])
         np.testing.assert_array_equal(out[s], out["mu_min"] * out[f"rate_{s}"])
     assert out["p_play"].between(0, 1).all() and out["p_play"].nunique() > 10
 
@@ -311,6 +314,37 @@ def test_fg3a_rate_is_capped_at_the_fga_rate(fitted, table):
     assert (out["fg3a"] <= out["fga"]).all() and (out["fga"] - out["fg3a"] >= 0).all()
     np.testing.assert_array_equal(out["rate_fg3a"].to_numpy()[factor < 1], (fga * factor)[factor < 1])
     np.testing.assert_array_equal(out["rate_fga"], fga)          # the cap moves fg3a only
+
+
+def test_every_made_rate_is_capped_at_its_attempts(fitted, table):
+    """Fixed fake rate models put each part above and below its whole, one
+    case per row: predict() serves the cap (FTM at FTA, FGM at FGA, FG3A at
+    FGA, FG3M at FG3A and at FGM, each cap itself capped first), builds the
+    mean from it, and leaves rows below the cap and the wholes alone."""
+    rows = table[1].head(6)
+
+    class Fixed:
+        def __init__(self, *v):
+            self.v = np.array(v, dtype=float)
+
+        def predict(self, X_):
+            return self.v
+    #                fga   fg3a   fgm    fg3m   fta   ftm
+    case = {"fga":  Fixed(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            "fg3a": Fixed(0.6, 0.6, 0.6, 1.4, 0.6, 0.6),   # row 3: threes above shots
+            "fgm":  Fixed(0.4, 0.4, 1.2, 0.4, 0.4, 0.4),   # row 2: makes above shots
+            "fg3m": Fixed(0.3, 0.5, 0.5, 0.9, 0.7, 0.3),   # row 1: above fgm; 4: above both
+            "fta":  Fixed(0.5, 0.5, 0.5, 0.5, 0.5, 0.5),
+            "ftm":  Fixed(0.4, 0.6, 0.4, 0.4, 0.4, 0.5)}   # row 1 above, row 5 at
+    out = M.predict(dataclasses.replace(fitted, rates={**fitted.rates, **case}), rows)
+    want = {"fga": [1.0] * 6, "fg3a": [0.6, 0.6, 0.6, 1.0, 0.6, 0.6],
+            "fgm": [0.4, 0.4, 1.0, 0.4, 0.4, 0.4], "fg3m": [0.3, 0.4, 0.5, 0.4, 0.4, 0.3],
+            "fta": [0.5] * 6, "ftm": [0.4, 0.5, 0.4, 0.4, 0.4, 0.5]}
+    for s, v in want.items():
+        np.testing.assert_array_equal(out[f"rate_{s}"], v, err_msg=s)
+        np.testing.assert_array_equal(out[s], out["mu_min"] * out[f"rate_{s}"], err_msg=s)
+    for part, whole in PART_OF:
+        assert (out[part] <= out[whole]).all(), (part, whole)
 
 
 def test_predict_accepts_extra_columns_any_order_and_keeps_the_index(fitted, table):
@@ -633,20 +667,33 @@ def test_shipped_models_predict_real_rows_sanely(real):
     assert abs(out.loc[played, "pts"].mean() - rs.loc[played, "pts"].mean()) < 1.5
 
 
-def test_shipped_models_never_project_more_threes_than_shots():
-    """Every row of the real table: the shipped fg3a and fga rate models
-    disagree on some rows (21 measured 2026-10-09), and predict() still never
-    serves an FG3A rate or mean above FGA's."""
+# (part, whole): a made count is part of its attempts, a three part of the field
+# goals. Spelled out here, not read from models.RATE_CEILINGS.
+PART_OF = [("fg3a", "fga"), ("fgm", "fga"), ("fg3m", "fg3a"), ("fg3m", "fgm"), ("ftm", "fta")]
+
+
+def test_shipped_models_never_project_more_makes_than_attempts():
+    """Every row of the real table: the shipped rate models are fit apart and
+    disagree on real rows (measured 2026-10-09: ftm above fta on 837, fg3m
+    above fg3a on 87, fg3a above fga on 21, fg3m above fgm on 8), and
+    predict() still never serves a part's rate or mean above its whole's.
+    A row the raw models put above the cap is served AT the cap."""
     table_or_skip()
     m = M.load()
     rows = pd.read_parquet(TABLE, columns=m.features)
     X = M.feature_matrix(m, rows)
-    raw_over = m.rates["fg3a"].predict(X) > m.rates["fga"].predict(X)
-    assert raw_over.sum() > 0, "no raw disagreement left: this test measures nothing"
+    raw = {s: m.rates[s].predict(X) for s in {s for pair in PART_OF for s in pair}}
     out = M.predict(m, rows)
-    assert (out["rate_fg3a"] <= out["rate_fga"]).all() and (out["fg3a"] <= out["fga"]).all()
-    np.testing.assert_array_equal(out["rate_fg3a"].to_numpy()[raw_over],
-                                  out["rate_fga"].to_numpy()[raw_over])
+    for part, whole in PART_OF:
+        assert (out[f"rate_{part}"] <= out[f"rate_{whole}"]).all(), (part, whole)
+        assert (out[part] <= out[whole]).all(), (part, whole)
+    for part, whole in [("fg3a", "fga"), ("fg3m", "fg3a"), ("fg3m", "fgm"), ("ftm", "fta")]:
+        over = raw[part] > raw[whole]
+        assert over.sum() > 0, f"no raw {part} > {whole} left: this check measures nothing"
+        assert (out[f"rate_{part}"].to_numpy()[over] <= raw[whole][over]).all(), (part, whole)
+    over = raw["ftm"] > raw["fta"]
+    np.testing.assert_array_equal(out["rate_ftm"].to_numpy()[over], raw["fta"][over])
+    np.testing.assert_array_equal(out["ftm"].to_numpy()[over], out["fta"].to_numpy()[over])
 
 
 def test_shipped_null_check_passes_real_slates_and_catches_serve_skews(real):
@@ -664,3 +711,61 @@ def test_shipped_null_check_passes_real_slates_and_catches_serve_skews(real):
         M.check_nulls(m, mid.assign(home_line=np.nan))
     with pytest.raises(M.NullSkew, match=r"0\|0 min_std_s serve 0\.00 vs train 1\.00"):
         M.check_nulls(m, opener.assign(min_std_s=0.0))
+
+
+def _listed_out(rows: pd.DataFrame, share: float) -> tuple[pd.DataFrame, np.ndarray]:
+    """`rows` with the first `share` of their 10+|0 rows listed Out the way
+    livectx.build_context encodes it (inj_out 1, the other status one-hots
+    0, tm_out_max_min NaN: an Out player is not redistributed to), and the
+    mask of the rows changed."""
+    rows = rows.copy()
+    ten = np.flatnonzero((M.null_strata(rows) == "10+|0").to_numpy())
+    mask = np.zeros(len(rows), bool)
+    mask[ten[: int(np.ceil(share * len(ten)))]] = True
+    for c in ("inj_doubtful", "inj_questionable", "inj_probable", "inj_available",
+              "inj_not_listed", "inj_unknown"):
+        rows.loc[mask, c] = 0.0
+    rows.loc[mask, "inj_out"] = 1.0
+    rows.loc[mask, "tm_out_max_min"] = np.nan
+    return rows, mask
+
+
+def test_a_slate_with_many_players_out_passes_the_null_check(real):
+    """tm_out_max_min is NaN exactly on the rows listed Out (livectx; exact on
+    every training row), so its null fraction is the slate's Out share. The
+    registry's 10+|0 reference (0.16) pools the four horizons, while serving
+    checks the games still to tip: 2025-26 rebuilt at t_15 had 0.37 on the
+    15-game final day and 0.40 on its 8-game remainder, and the fraction test
+    withheld every untipped game of those dates. A real slate with 40% of
+    its 10+|0 rows Out projects; models.STRUCTURAL_NAN checks the
+    invariant instead."""
+    m = M.load()
+    out, mask = _listed_out(real.slates["2026-01-14"], 0.40)
+    ten = (M.null_strata(out) == "10+|0").to_numpy()
+    assert out.loc[ten, "tm_out_max_min"].isna().mean() > 0.40
+    assert (out["tm_out_max_min"].isna() == out["inj_out"].eq(1.0)).all()
+    M.check_nulls(m, out)
+    assert M.null_skew(m, out).empty
+
+
+def test_the_out_invariant_catches_both_skews_on_any_slate_size(real):
+    """What the fraction test on tm_out_max_min stood for, checked exactly:
+    NaN on a row not listed Out (a serving path that lost the value), or a
+    value on a row listed Out (a fill), raises on a slate of any size, the
+    small strata check_nulls skips included."""
+    m = M.load()
+    out, mask = _listed_out(real.slates["2026-01-14"], 0.40)
+    healthy = np.flatnonzero(~out["inj_out"].eq(1.0).to_numpy())[:5]
+    lost = out.copy()
+    lost.iloc[healthy, lost.columns.get_loc("tm_out_max_min")] = np.nan
+    with pytest.raises(M.NullSkew, match=r"tm_out_max_min is NaN exactly where inj_out == 1 in "
+                                         r"training, broken on 5 of"):
+        M.check_nulls(m, lost)
+    filled = out.copy()
+    filled.iloc[np.flatnonzero(mask)[:1], filled.columns.get_loc("tm_out_max_min")] = 0.0
+    with pytest.raises(M.NullSkew, match="broken on 1 of"):
+        M.check_nulls(m, filled)
+    few = lost.iloc[healthy[:2]]
+    assert len(few) < M.NULL_MIN_ROWS
+    bad = M.null_skew(m, few)
+    assert bad["feature"].tolist() == ["tm_out_max_min"] and bad["serve"].tolist() == [1.0]

@@ -135,13 +135,25 @@ def test_missing_seed_is_a_cold_failure(state_dir):
 
 
 # ── Partitions and history ───────────────────────────────────────────────────
+def test_odds_path_is_the_dates_season_partition(state_dir):
+    """The one odds path: the bot writes it (step_odds), the app reads it
+    (store.committed_odds). The season is the DATE's (util.season_for_date),
+    so a January date files under the season that began in October."""
+    assert S.odds_path("2025-10-21") == S.season_dir(SEASON) / "odds_2025-10-21.parquet"
+    assert S.odds_path(dt.date(2026, 1, 5)) == S.season_dir("2025-26") / "odds_2026-01-05.parquet"
+    assert S.odds_path(dt.date(2026, 10, 20)).parent == S.STATE_DIR / "season" / "2026-27"
+    with pytest.raises(TypeError, match="ET date"):
+        S.odds_path(dt.datetime(2026, 10, 20, 23, 0))
+    assert not S.odds_path("2025-10-21").parent.exists()        # a path helper creates nothing
+
+
 def test_partitions_concatenate_and_ignore_other_files(state_dir):
     _write(_game("0022500001", "2025-10-21"), "2025-10-21")
     _write(_game("0022500002", "2025-10-21", "LAL", "GSW", ((5, 6), (7, 8))), "2025-10-21")
     _write(_game("0022500020", "2025-10-23"), "2025-10-23")
     d = S.season_dir(SEASON)
     (d / ".part_2025-10-24.parquet.tmp123").write_bytes(b"partial")
-    C.write_parquet(pd.DataFrame({"game_id": ["x"]}), d / "odds_2025-10-21.parquet")
+    C.write_parquet(pd.DataFrame({"game_id": ["x"]}), S.odds_path("2025-10-21"))
     parts = S.season_partitions(SEASON)
     assert set(parts) == {"participation", "games", "player_games", "team_games"}
     assert len(parts["games"]) == 3 and len(parts["participation"]) == 12
@@ -326,15 +338,76 @@ def test_completeness_flags_a_missing_final(state_dir):
         ("0022500003", "RS", "2025-11-01", "final", "MIA", "PHI"),   # half-ingested: flagged
         ("0022500010", "RS", "2025-11-02", "final", "BOS", "MIA"),   # missing: flagged
         ("0022500011", "RS", "2025-11-02", "final", "LAL", "GSW"),   # teams idle on D
-        ("0022500012", "RS", "2025-11-02", "live", "NYK", "PHI"),    # not final
+        ("0022500012", "RS", "2025-11-02", "live", "NYK", "PHI"),    # not final yet: flagged too
         ("0012500001", "PRE", "2025-10-10", "final", "BOS", "PHI"),  # preseason
         ("0022500020", "RS", "2025-11-03", "scheduled", "BOS", "NYK"),
         ("0022500021", "RS", "2025-11-03", "scheduled", "MIA", "DAL"),
     ])
-    assert V.completeness("2025-11-03", sched, SEASON) == ["0022500003", "0022500010"]
+    assert V.completeness("2025-11-03", sched, SEASON) == ["0022500003", "0022500010", "0022500012"]
+    # Per game: each game's own two teams (BOS-NYK misses BOS's and NYK's
+    # games, MIA-DAL only MIA's).
+    assert V.completeness_by_game("2025-11-03", sched, SEASON) == {
+        "0022500020": ["0022500010", "0022500012"],
+        "0022500021": ["0022500003", "0022500010"]}
     _write(_game("0022500010", "2025-11-02", "BOS", "MIA", ((1, 2), (5, 6))), "2025-11-02")
-    assert V.completeness("2025-11-03", sched, SEASON) == ["0022500003"]
+    assert V.completeness("2025-11-03", sched, SEASON) == ["0022500003", "0022500012"]
     assert V.completeness("2025-11-01", sched, SEASON) == []
+
+
+def test_a_previous_game_still_live_is_a_gap_until_it_is_ingested(state_dir):
+    """A 10:30 PM ET first leg is still live when the runs after midnight
+    land: the second leg's state lacks it, so that game is provisional (never
+    freezable), whatever the schedule's status says."""
+    sched = _sched([("0022600215", "RS", "2026-11-10", "live", "ORL", "DEN"),
+                    ("0022600224", "RS", "2026-11-11", "scheduled", "ORL", "MIL"),
+                    ("0022600225", "RS", "2026-11-11", "scheduled", "BOS", "NYK")]).assign(season="2026-27")
+    by_game = V.completeness_by_game("2026-11-11", sched, "2026-27")
+    assert by_game == {"0022600224": ["0022600215"], "0022600225": []}
+    prov, gaps = V.provisional_by_game("2026-11-11", dt.date(2026, 11, 11), sched, "2026-27")
+    assert prov == {"0022600224": True, "0022600225": False} and gaps == by_game
+    # The same game final but not ingested: the same answer.
+    fin = sched.assign(status=sched["status"].replace({"live": "final"}))
+    assert V.completeness_by_game("2026-11-11", fin, "2026-27") == by_game
+    # Ingested: no gap.
+    _write(_game("0022600215", "2026-11-10", "ORL", "DEN", season="2026-27"), "2026-11-10",
+           season="2026-27")
+    assert V.provisional_by_game("2026-11-11", dt.date(2026, 11, 11), sched, "2026-27")[0] \
+        == {"0022600224": False, "0022600225": False}
+    # Tomorrow's slate is provisional whatever its state.
+    assert set(V.provisional_by_game("2026-11-11", dt.date(2026, 11, 10), sched, "2026-27")[0].values()) \
+        == {True}
+
+
+def test_a_postponed_game_is_no_state_game_no_gap_and_no_rest_day(state_dir):
+    """A postponed game stays on its original date in the live schedule until
+    it is rescheduled; training's schedule lists it only where it was played.
+    It is no state game (no targets, never a completeness gap, never
+    projected), and its date never counts for rest, back-to-back or games in
+    the last 7 days (serve.without_postponed)."""
+    S.build_seed(SEASON)
+    _write(_game("0022500001", "2025-11-01"), "2025-11-01")
+    sched = _sched([("0022500001", "RS", "2025-11-01", "final", "BOS", "NYK"),
+                    ("0022500005", "RS", "2025-11-03", "scheduled", "BOS", "NYK"),
+                    ("0022500010", "RS", "2025-11-04", "scheduled", "BOS", "NYK")]
+                   ).assign(postponed=[False, True, False])
+    roster = pd.DataFrame({"person_id": [1, 3], "team": ["BOS", "NYK"], "name": ["A", "C"],
+                           "two_way": [False, False]})
+    assert list(V._state_games(sched)["game_id"]) == ["0022500001", "0022500010"]
+    assert V.targets_for(sched.iloc[[1]], roster, SEASON).empty
+    assert V.completeness_by_game("2025-11-03", sched, SEASON) == {}
+    assert V.completeness_by_game("2025-11-04", sched, SEASON) == {"0022500010": []}
+    hist = S.history(SEASON, "2025-11-04")
+    f = V.history_features("2025-11-04", sched.iloc[[2]], roster, hist, sched)
+    assert len(f) == 2
+    assert (f["rest_days"] == 3).all() and (f["b2b"] == 0).all() and (f["games_l7"] == 1).all()
+    assert (f["opp_rest_days"] == 3).all()
+    # Unflagged (what the flag prevents): the PPD date reads as a game played.
+    leak = V.history_features("2025-11-04", sched.iloc[[2]], roster, hist,
+                              sched.drop(columns="postponed"))
+    assert (leak["rest_days"] == 1).all() and (leak["b2b"] == 1).all() and (leak["games_l7"] == 2).all()
+    # A schedule without the column (training's, or one committed before it)
+    # is read as is.
+    assert V.without_postponed(sched.drop(columns="postponed")).equals(sched.drop(columns="postponed"))
 
 
 # ── Targets and the serve guards ─────────────────────────────────────────────
@@ -428,7 +501,9 @@ def test_bot_partitions_join_like_the_backfill(tmp_path, monkeypatch):
     tips = {g: pd.Timestamp(p["game"]["gameTimeUTC"]) for g, p in payloads.items()}
     sched = pd.DataFrame([{"game_id": g, "season": "2019-20", "game_type": "RS", "status": "final",
                            "game_date": tips[g].tz_convert("America/New_York").date(),
-                           "home": None, "away": None} for g in BOT_GAMES])
+                           "tip_utc": tips[g], "home": p["game"]["homeTeam"]["teamTricode"],
+                           "away": p["game"]["awayTeam"]["teamTricode"]}
+                          for g, p in payloads.items()])
     du.RED.clear()
     du.step_finals(sched, dt.date(2019, 12, 31), dry=False)
     assert du.RED == [] and S.ingested_ids("2019-20") == set(BOT_GAMES)

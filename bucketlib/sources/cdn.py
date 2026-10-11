@@ -1,6 +1,7 @@
 """cdn.nba.com: the current-season schedule and roster index, the two feeds the
-SITE and the BOT read live. Both are reachable from GitHub Actions (measured
-2026-10-09), unlike stats.nba.com, which hangs from Azure.
+SITE and the BOT read live. The schedule was reachable from GitHub Actions
+(probe of 2026-10-09; the playerIndex was not in that probe), unlike
+stats.nba.com, which hangs from Azure.
 
 Traps handled here (all observed live):
   - `gameDateTimeEst` is EASTERN WALL CLOCK with a "Z" suffix
@@ -9,13 +10,27 @@ Traps handled here (all observed live):
   - `gameDate` is 'MM/DD/YYYY 00:00:00'. String comparison sorts January first.
   - Cup knockout placeholders carry team id 0 (TBD) until the group stage ends;
     the regular season is listed incomplete (1206 of 1230) until then too, so the
-    schedule is always refetched, never cached for the season.
+    schedule is always refetched, never cached for the season. Their tip TIME
+    is unknown too (gameStatusText 'TBD', gameTimeEst '0001-01-01...') while
+    gameDateTimeUTC carries a made-up 05:00Z: `time_tbd` flags it, and
+    nothing may print or use that tip time.
+  - `postponed` is set on positive evidence only ('Y', or the status text
+    PPD/Postponed). The stats schedules of 2014-18, 2021-22 and 2023-24 carry
+    postponedStatus 'A' on every game, so "anything but N" would drop whole
+    seasons; an unrecognised value is listed in
+    df.attrs['postponed_status_unknown'] and never excludes a game. Whether
+    cdn keeps a postponed game on its original date until it is rescheduled
+    was not observed live (no 2026-27 game postponed yet); the serve path
+    drops postponed rows either way (serve.without_postponed).
   - Preseason includes non-NBA opponents (London Lions 'LON'). Those games are
     dropped and COUNTED, never mapped onto an NBA team.
   - staticData/playerIndex.json is the same table as stats.nba.com's playerindex
-    (615 players, identical teams and two-way flags on 2026-10-08), so the bot
-    can refresh rosters without the blocked host. SUPPLEMENTAL_STATUS == 1 is the
-    two-way flag. Preseason it holds camp rosters (18-21 per team).
+    (615 players, identical teams and two-way flags on 2026-10-08, compared
+    from Barrett's Mac), so the bot can refresh rosters without the blocked
+    host. SUPPLEMENTAL_STATUS == 1 is the two-way flag. Preseason it holds camp
+    rosters (18-21 per team). Its reachability FROM ACTIONS was not in the
+    2026-10-09 probe (scripts/probe_hosts.py now lists it); the schedule on
+    the same host and path was.
 """
 from __future__ import annotations
 
@@ -35,6 +50,12 @@ BOX_URL = "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{gid}.json
 GAME_TYPES = {"001": "PRE", "002": "RS", "003": "ALLSTAR", "004": "PO", "005": "PI",
               "006": "CUP_FINAL"}
 STATUS = {1: "scheduled", 2: "live", 3: "final"}
+# A playerIndex with fewer rostered players is a broken pull, never "the
+# league emptied" (it held 615 on 2026-10-08). The one threshold: the bot
+# refuses to commit such a pull (scripts/daily_update.step_roster) and the
+# app's live layer treats it as a failed fetch (live.roster). Both read it at
+# call time, so a test patches it here.
+MIN_ROSTER = 400
 
 
 def fetch_schedule() -> dict:
@@ -52,7 +73,7 @@ def parse_schedule(payload: dict) -> pd.DataFrame:
     if not isinstance(ls, dict) or "gameDates" not in ls:
         raise H.BadPayload(SCHEDULE_URL, "no leagueSchedule.gameDates")
     season = ls.get("seasonYear")
-    rows, dropped = [], []
+    rows, dropped, unknown_ppd = [], [], []
     for day in ls["gameDates"]:
         for g in day.get("games", []):
             gid = str(g["gameId"])
@@ -97,7 +118,13 @@ def parse_schedule(payload: dict) -> pd.DataFrame:
                 "is_neutral": bool(g.get("isNeutral")),
                 "label": g.get("gameLabel", ""),
                 "subtype": g.get("gameSubtype", ""),
-                "postponed": g.get("postponedStatus", "N") not in ("N", "", None),
+                "postponed": _postponed(g, unknown_ppd),
+                # The tip TIME is unknown (Cup knockout placeholders): the feed
+                # says 'TBD' and gameTimeEst is 0001-01-01, while
+                # gameDateTimeUTC holds a made-up 05:00Z (midnight ET). The
+                # date stands; the tip time must never be shown or used.
+                "time_tbd": (str(g.get("gameStatusText") or "").strip().upper() == "TBD"
+                             or str(g.get("gameTimeEst") or "").startswith("0001")),
                 "national_tv": ", ".join(b.get("broadcasterDisplay", "") for b in nat
                                          if b.get("broadcasterDisplay")),
                 "_date_est": str(g.get("gameDateEst", ""))[:10],
@@ -105,6 +132,7 @@ def parse_schedule(payload: dict) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
         df.attrs["dropped_non_nba"] = dropped
+        df.attrs["postponed_status_unknown"] = unknown_ppd
         return df
     # The wall-clock field and the UTC-derived ET date must agree. If they do
     # not, one of the two parses is wrong and every rest/B2B feature would be.
@@ -115,7 +143,29 @@ def parse_schedule(payload: dict) -> pd.DataFrame:
         raise ValueError("duplicate game ids in schedule")
     df = df.drop(columns="_date_est").sort_values(["tip_utc", "game_id"]).reset_index(drop=True)
     df.attrs["dropped_non_nba"] = dropped
+    df.attrs["postponed_status_unknown"] = unknown_ppd
     return df
+
+
+# postponedStatus values that say nothing about a postponement: 'N' on the
+# live 2026-27 feed, 'A' on EVERY game of the 2014-18, 2021-22 and 2023-24
+# stats schedules (the same scheduleleaguev2 shape), and blank.
+NOT_POSTPONED = {"N", "A", ""}
+POSTPONED_TEXT = {"PPD", "POSTPONED"}
+
+
+def _postponed(g: dict, unknown: list) -> bool:
+    """True only on positive evidence: postponedStatus 'Y', or the status text
+    'PPD' / 'Postponed'. Any other postponedStatus value is recorded in
+    `unknown` (game id, value) and is never an exclusion: excluding on an
+    unrecognised value would drop whole seasons ('A')."""
+    code = str(g.get("postponedStatus") or "").strip().upper()
+    text = str(g.get("gameStatusText") or "").strip().upper()
+    if code == "Y" or text in POSTPONED_TEXT:
+        return True
+    if code not in NOT_POSTPONED:
+        unknown.append((str(g.get("gameId")), g.get("postponedStatus")))
+    return False
 
 
 def _height_in(h) -> float:

@@ -491,6 +491,53 @@ def test_committed_pair_comes_from_one_report(report, sched, committed_paths):
         X.read_committed()
 
 
+def test_a_same_content_reissue_is_not_a_new_committed_pair(report, sched, committed_paths):
+    """The NBA re-titles an unchanged report every 15 minutes, and the title is
+    on every row of both files, so writing each re-issue made both files a
+    new commit on every bot run. The real 12:15 PM report is row for row the
+    12:00 PM one: not written, byte for byte, and the pair keeps the 12:00
+    title. Past COMMITTED_RESTAMP the same content is written once under the
+    new title (the fallback's report_age_h stays bounded, far inside the
+    30-hour reach); a changed row is written at once."""
+    reissue = INJ.parse_report((FIX / "Injury-Report_2026-03-12_12_15PM.pdf").read_bytes())
+    assert reissue.meta["report_ts_et"] == et(2026, 3, 12, 12, 15)
+    assert X.write_committed(report, sched) is True
+    before = [p.read_bytes() for p in committed_paths]
+    assert X.write_committed(reissue, sched) is False
+    assert [p.read_bytes() for p in committed_paths] == before
+    rep, _ = X.read_committed()
+    assert rep.meta["report_ts_et"] == et(2026, 3, 12, 12, 0)
+    # Still the same content, the committed title now more than 3 hours behind.
+    assert X.COMMITTED_RESTAMP == dt.timedelta(hours=3)
+    assert X.write_committed(retitled(reissue, et(2026, 3, 12, 15, 0)), sched) is False
+    assert X.write_committed(retitled(reissue, et(2026, 3, 12, 15, 1)), sched) is True
+    rep, _ = X.read_committed()
+    assert rep.meta["report_ts_et"] == et(2026, 3, 12, 15, 1)
+    assert (pd.to_datetime(rep.rows["report_ts_et"], utc=True) == pd.Timestamp(et(2026, 3, 12, 15, 1))).all()
+    assert X.write_committed(retitled(reissue, et(2026, 3, 12, 15, 15)), sched) is False
+    # One status changed: written at once, both files, under the new title.
+    rows = reissue.rows.copy()
+    rows.loc[rows.index[0], "status"] = "Available"
+    changed = retitled(INJ.ParsedReport(reissue.meta, rows, reissue.team_rows), et(2026, 3, 12, 15, 30))
+    assert X.write_committed(changed, sched) is True
+    rep, _ = X.read_committed()
+    assert rep.meta["report_ts_et"] == et(2026, 3, 12, 15, 30) and rep.rows.iloc[0]["status"] == "Available"
+
+
+def test_a_report_with_no_player_rows_restamps_both_files(report, sched, committed_paths):
+    """An empty players file hashes the same under any title, so the writer
+    rewrites BOTH files whenever it writes: the pair's two titles never
+    split, and the next same-content re-issue is again no write."""
+    empty = INJ.ParsedReport(report.meta, report.rows.iloc[0:0], report.team_rows)
+    assert X.write_committed(retitled(empty, et(2026, 3, 13, 9, 0)), sched) is True
+    assert X.write_committed(retitled(empty, et(2026, 3, 13, 12, 30)), sched) is True
+    metas = [C.read_parquet_meta(p) for p in committed_paths]
+    assert {m[X.TITLE] for m in metas} == {pd.Timestamp(et(2026, 3, 13, 12, 30)).isoformat()}
+    assert X.write_committed(retitled(empty, et(2026, 3, 13, 12, 45)), sched) is False
+    rep, _ = X.read_committed()
+    assert rep.meta["report_ts_et"] == et(2026, 3, 13, 12, 30) and rep.rows.empty
+
+
 def test_committed_paths_are_the_state_modules_paths(tmp_path, monkeypatch):
     """One writer per path: the pair is where docs/serving_design.md section 1
     puts it, through bucketlib.state (which owns state/), resolved at call time."""

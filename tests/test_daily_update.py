@@ -27,6 +27,7 @@ from bucketlib import cache as C
 from bucketlib import http as H
 from bucketlib import models as M
 from bucketlib import pipeline as P
+from bucketlib import serve as V
 from bucketlib import state as S
 from bucketlib.sources import box, cdn, cdnbox, espn
 from bucketlib.sources import injury as INJ
@@ -107,9 +108,9 @@ def bot(tmp_path, monkeypatch, feats, mdl):
 ROSTER = pd.DataFrame({"person_id": [1], "team": ["DET"], "name": ["x"], "two_way": [False]})
 
 
-def run(du, sched, report, snaps, at, today=DATE):
+def run(du, sched, report, snaps, at, today=DATE, held=None):
     du.clock[0] = at.astimezone(UTC)
-    du.step_projections(sched, ROSTER, report, {DATE: snaps}, today, False)
+    du.step_projections(sched, ROSTER, report, {DATE: snaps}, today, False, held)
     return C.read_parquet(P.projections_path(DATE))
 
 
@@ -207,15 +208,36 @@ def test_tomorrow_is_provisional(bot, sched, report):
     assert bot.RED == [] and len(out) and out["provisional"].all()
 
 
-def test_a_date_whose_state_misses_a_final_is_provisional(bot, sched, report):
+def test_a_game_whose_teams_miss_a_final_is_provisional_and_only_that_game(bot, sched, report):
+    """Completeness is per game (spec 4: "every Final game of both teams
+    before D"): DET-ATL missing from the state holds back DET's and ATL's
+    games only; the other seven stay freezable."""
     missed = pd.DataFrame([{"game_id": "0022500940", "season": "2025-26", "game_type": "RS",
                             "game_date": DATE - dt.timedelta(days=1),
                             "tip_utc": pd.Timestamp("2026-03-12 00:00", tz="UTC"), "status": "final",
                             "home": "DET", "away": "ATL"}])
     full = pd.concat([missed, sched], ignore_index=True)
     out = run(bot, full, report, odds(sched), MORNING)
-    assert bot.RED == [] and out["provisional"].all()
-    assert P.provisional_for(DATE, DATE, full, "2025-26") == (True, ["0022500940"])
+    stale = {"0022500953", "0022500956"}                     # DET-PHI, ATL-BKN
+    assert bot.RED == [] and set(out["game_id"]) == set(sched["game_id"])
+    assert out.groupby("game_id")["provisional"].all().to_dict() == {
+        g: g in stale for g in sched["game_id"]}
+    prov, gaps = V.provisional_by_game(DATE, DATE, full, "2025-26")
+    assert {g for g, p in prov.items() if p} == stale and gaps["0022500953"] == ["0022500940"]
+
+
+def test_a_previous_game_still_live_makes_its_teams_games_provisional(bot, sched, report):
+    """A first leg still live (or not yet flipped to Final) when the run lands
+    is missing from the state just the same: the second leg is provisional,
+    never the frozen projection, and the run is not RED for it."""
+    live = pd.DataFrame([{"game_id": "0022500941", "season": "2025-26", "game_type": "RS",
+                          "game_date": DATE - dt.timedelta(days=1),
+                          "tip_utc": pd.Timestamp("2026-03-12 02:30", tz="UTC"), "status": "live",
+                          "home": "LAL", "away": "CHI"}])
+    out = run(bot, pd.concat([live, sched], ignore_index=True), report, odds(sched), MORNING)
+    assert bot.RED == []
+    assert out.groupby("game_id")["provisional"].all().to_dict() == {
+        g: g == "0022500960" for g in sched["game_id"]}
 
 
 # ── What is RED ──────────────────────────────────────────────────────────────
@@ -279,7 +301,280 @@ def test_a_failing_date_does_not_stop_the_other(bot, sched, monkeypatch):
     assert len(bot.RED) == 1 and "KeyError" in bot.RED[0] and str(DATE) in bot.RED[0]
 
 
+# ── The report's title is a stamp; a report out of reach; play-in ────────────
+def retitled(report: INJ.ParsedReport, ts: dt.datetime) -> INJ.ParsedReport:
+    """The same report under another title time (what a re-issue is)."""
+    return INJ.ParsedReport({**report.meta, "report_ts_et": ts}, report.rows.assign(report_ts_et=ts),
+                            report.team_rows.assign(report_ts_et=ts))
+
+
+@pytest.fixture(scope="module")
+def reissue() -> INJ.ParsedReport:
+    """The real 12:15 PM report of 2026-03-12: row for row the 12:00 PM report
+    under a new title (the NBA re-titles an unchanged report every 15
+    minutes)."""
+    return INJ.parse_report((FIX / "injury" / "Injury-Report_2026-03-12_12_15PM.pdf").read_bytes())
+
+
+def _step_injuries(du, sched, rep):
+    """The bot's step 4 with the walk answered by `rep` (no network)."""
+    import types
+    from unittest import mock
+    with mock.patch.object(INJ, "latest_report", lambda *a, **k: types.SimpleNamespace(report=rep)):
+        return du.step_injuries(sched, False)
+
+
+def test_a_same_content_reissue_rewrites_no_committed_file(bot, sched, report, reissue):
+    """12:05: the 12:00 PM report is committed (step 4) and projected. 12:20:
+    the 12:15 PM re-issue, the same rows under a new title, is not a new
+    committed report (context.write_committed returns False) and the run
+    leaves projections_v1 and both committed injury files byte-identical: a
+    title is a stamp, so a re-issue every 15 minutes is no commit every run."""
+    from bucketlib import context as CTX
+    assert reissue.meta["report_ts_et"] > report.meta["report_ts_et"]
+    rep = _step_injuries(bot, sched, report)
+    run(bot, sched, rep, odds(sched), dt.datetime(2026, 3, 12, 12, 5, tzinfo=ET))
+    assert bot.RED == []
+    files = [P.projections_path(DATE), *CTX.committed_paths()]
+    before = {p: p.read_bytes() for p in files}
+    assert not CTX.write_committed(reissue, sched)
+    rep = _step_injuries(bot, sched, reissue)
+    assert rep.meta["report_ts_et"] == reissue.meta["report_ts_et"]
+    run(bot, sched, rep, odds(sched), dt.datetime(2026, 3, 12, 12, 20, tzinfo=ET))
+    assert bot.RED == []
+    assert {p: p.read_bytes() for p in files} == before
+
+
+def test_a_report_out_of_reach_for_every_game_is_red_today_and_writes_nothing(bot, sched, report,
+                                                                               capsys):
+    """A report titled 31 hours before the run (the committed one after a day
+    of ak-static outage) is out of reach for every game: no injury report.
+    RED today, naming why, and no projections written; a warning when the
+    date is tomorrow."""
+    stale = retitled(report, MORNING - dt.timedelta(hours=31))
+    assert run(bot, sched, stale, odds(sched), MORNING) is None
+    assert len(bot.RED) == 1 and "out of reach for every game" in bot.RED[0]
+    assert "nothing new written" in bot.RED[0] and not P.projections_path(DATE).exists()
+    bot.RED.clear()
+    capsys.readouterr()
+    assert run(bot, sched, stale, odds(sched), MORNING, today=DATE - dt.timedelta(days=1)) is None
+    out = capsys.readouterr().out
+    assert bot.RED == [] and "WARN projections 2026-03-12: nothing new written: " in out
+    assert "out of reach for every game" in out
+
+
+def test_a_play_in_game_gets_no_projection_rows_and_no_red(bot, sched, report, capsys):
+    """Play-in is ingested as state but never projected (the models trained on
+    regular-season rows only): a play-in game on the date has no rows, is
+    not a game "without a whole roster", and the run stays green."""
+    pi = pd.DataFrame([{"game_id": "0052500101", "season": "2025-26", "game_type": "PI",
+                        "game_date": DATE, "tip_utc": pd.Timestamp("2026-03-12 23:30", tz="UTC"),
+                        "status": "scheduled", "home": "CHA", "away": "NOP"}])
+    out = run(bot, pd.concat([sched, pi], ignore_index=True), report, odds(sched), MORNING)
+    assert bot.RED == [] and set(out["game_id"]) == set(sched["game_id"])
+    assert "0052500101" not in capsys.readouterr().out
+    # A date with only the play-in game: nothing to project, said in words.
+    bot.step_projections(pi.assign(game_date=DATE + dt.timedelta(days=5)), ROSTER, report, {},
+                         DATE + dt.timedelta(days=5), False)
+    assert bot.RED == [] and "no regular-season games today or tomorrow (preseason and play-in " \
+        "are never projected)" in capsys.readouterr().out
+
+
+# ── A game frozen on an old report ───────────────────────────────────────────
+def _froze_on_old(out: str) -> dict[str, str]:
+    return {line.split(": ", 1)[1].split(" ")[0]: line for line in out.splitlines()
+            if line.startswith("WARN projections 2026-03-12: ") and "froze on rows" in line}
+
+
+def test_a_game_frozen_on_rows_older_than_a_committed_report_is_a_warning(bot, sched, report,
+                                                                          capsys):
+    """The three 7:00 PM games froze at 6:55 PM on rows the bot computed at
+    12:20 with the 12:00 PM report. Whether a committed report titled before
+    6:55 PM was newer decides a WARN naming the game and both report times
+    (never RED: the carried rows are the record either way)."""
+    at = dt.datetime(2026, 3, 12, 19, 20, tzinfo=ET)
+    six45 = retitled(report, dt.datetime(2026, 3, 12, 18, 45, tzinfo=ET))
+    seven15 = retitled(report, dt.datetime(2026, 3, 12, 19, 15, tzinfo=ET))
+    run(bot, sched, report, odds(sched), MORNING)
+    capsys.readouterr()
+    # 6:58 PM: the run's own report, titled 6:45 PM, is newer than the rows.
+    run(bot, sched, six45, odds(sched), dt.datetime(2026, 3, 12, 18, 58, tzinfo=ET))
+    warns = _froze_on_old(capsys.readouterr().out)
+    assert bot.RED == [] and set(warns) == EARLY
+    for w in warns.values():
+        assert "computed with the 2026-03-12 12:00 ET report, but the 2026-03-12 18:45 ET report " \
+               "was committed before its freeze point (2026-03-12 18:55 ET)" in w
+    assert "(PHI at DET)" in warns["0022500953"]
+    # 7:20 PM with the 7:15 PM report: the bot holds no report titled before
+    # 6:55 PM newer than 12:00 PM, so nothing to say.
+    run(bot, sched, seven15, odds(sched), at)
+    assert bot.RED == [] and _froze_on_old(capsys.readouterr().out) == {}
+    # The pair the run found (committed by a run whose projections never
+    # reached those games) was titled 6:45 PM: a warning per frozen game.
+    run(bot, sched, seven15, odds(sched), at, held=six45.meta["report_ts_et"])
+    assert set(_froze_on_old(capsys.readouterr().out)) == EARLY and bot.RED == []
+    # Rows computed with the newest pre-freeze report: no warning.
+    P.projections_path(DATE).unlink()
+    run(bot, sched, six45, odds(sched), dt.datetime(2026, 3, 12, 18, 50, tzinfo=ET))
+    run(bot, sched, seven15, odds(sched), at, held=six45.meta["report_ts_et"])
+    assert bot.RED == [] and _froze_on_old(capsys.readouterr().out) == {}
+
+
+def test_rows_carried_past_the_freeze_as_provisional_never_warn_of_an_old_report(bot, sched, report,
+                                                                                 capsys):
+    """A provisional row is never the frozen projection, so a game that
+    reached its freeze point on provisional rows (here published the day
+    before, as tomorrow's) did not freeze on an old report: no WARN, though
+    the 6:45 PM report was committed before 6:55 PM and the rows carry the
+    12:00 PM one."""
+    six45 = retitled(report, dt.datetime(2026, 3, 12, 18, 45, tzinfo=ET))
+    seven15 = retitled(report, dt.datetime(2026, 3, 12, 19, 15, tzinfo=ET))
+    first = run(bot, sched, report, odds(sched), MORNING, today=DATE - dt.timedelta(days=1))
+    assert first["provisional"].all()
+    capsys.readouterr()
+    out = run(bot, sched, six45, odds(sched), dt.datetime(2026, 3, 12, 18, 58, tzinfo=ET))
+    assert out.loc[out["game_id"].isin(EARLY), "provisional"].all()
+    assert bot.RED == [] and _froze_on_old(capsys.readouterr().out) == {}
+    run(bot, sched, seven15, odds(sched), dt.datetime(2026, 3, 12, 19, 20, tzinfo=ET),
+        held=six45.meta["report_ts_et"])
+    assert bot.RED == [] and _froze_on_old(capsys.readouterr().out) == {}
+
+
+def test_main_hands_step_6_the_committed_report_as_the_run_found_it(tmp_path, monkeypatch, sched,
+                                                                    report):
+    """The pair step 4 replaces is still known to step 6: main() reads the
+    committed title BEFORE step 4 writes the new report."""
+    from bucketlib import context as CTX
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    _pin(du, monkeypatch, dt.datetime(2026, 3, 12, 19, 20, tzinfo=ET))
+    assert du.committed_title() is None
+    assert CTX.write_committed(report, sched)                      # the 12:00 PM pair
+    late = retitled(report, dt.datetime(2026, 3, 12, 19, 15, tzinfo=ET))
+
+    def injuries(sched_, dry):
+        assert CTX.write_committed(late, sched_)                   # 7 hours on: re-stamped
+        return late
+    seen = []
+    monkeypatch.setattr(du, "step_schedule", lambda dry: sched)
+    monkeypatch.setattr(du, "step_roster", lambda dry: ROSTER)
+    monkeypatch.setattr(du, "step_finals", lambda *a: None)
+    monkeypatch.setattr(du, "step_injuries", injuries)
+    monkeypatch.setattr(du, "step_odds", lambda *a: {})
+    monkeypatch.setattr(du, "step_projections", lambda *a: seen.append(a))
+    assert du.main(["--date", "2026-03-12"]) == 0, du.RED
+    (args,) = seen
+    assert args[2] is late and args[-1] == pd.Timestamp(report.meta["report_ts_et"])
+    assert du.committed_title() == pd.Timestamp(late.meta["report_ts_et"])
+
+
 # ── Finals: state.ingested_ids is the one definition ─────────────────────────
+def _box(gid: str) -> dict:
+    return C.read_json(FIX / "cdnbox" / f"cdn_{gid}.json.gz")["data"]
+
+
+def _sched_row(payload: dict, status: str = "final") -> dict:
+    """The cdn.parse_schedule row of a box score's game."""
+    g = payload["game"]
+    tip = pd.Timestamp(g["gameTimeUTC"])
+    return {"game_id": g["gameId"], "season": "2019-20", "game_type": "RS", "status": status,
+            "game_date": tip.tz_convert("America/New_York").date(), "tip_utc": tip,
+            "home": g["homeTeam"]["teamTricode"], "away": g["awayTeam"]["teamTricode"]}
+
+
+def _stuck(payload: dict) -> dict:
+    """The same box frozen mid-game (17 cdn boxes of 2019-20 are)."""
+    p = json.loads(json.dumps(payload))
+    p["game"]["gameStatus"], p["game"]["gameStatusText"] = 2, "Q4 0:00"
+    return p
+
+
+def _no_team_stats(payload: dict) -> dict:
+    p = json.loads(json.dumps(payload))
+    p["game"]["homeTeam"]["statistics"] = None
+    return p
+
+
+@pytest.fixture
+def finals_bot(tmp_path, monkeypatch):
+    """The bot with its state in a tmp dir and box scores from `du.boxes`
+    ({game_id: payload, or an exception to raise})."""
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path)
+    du.boxes = {}
+
+    def cdn_box(gid):
+        b = du.boxes[gid]
+        if isinstance(b, Exception):
+            raise b
+        return b
+    monkeypatch.setattr(du, "cdn_box", cdn_box)
+    du.RED.clear()
+    return du
+
+
+GOOD, BAD = "0021900001", "0021900464"
+
+
+@pytest.mark.parametrize("bad", ["stuck", "bad_payload", "no_team_stats", "bad_request"])
+@pytest.mark.parametrize("order", ["bad_first", "good_first"])
+def test_one_bad_box_score_never_stops_the_others(finals_bot, bad, order):
+    """A box frozen mid-game (box.NotFinal), a bad payload, a payload the
+    parser chokes on (TypeError): that game is reported, and every other
+    final of the run is still written."""
+    du = finals_bot
+    good, other = _box(GOOD), _box(BAD)
+    du.boxes = {GOOD: good, BAD: {"stuck": _stuck(other),
+                                  "bad_payload": H.BadPayload(cdn.BOX_URL, "test: HTML 200"),
+                                  "no_team_stats": _no_team_stats(other),
+                                  "bad_request": H.BadRequest(cdn.BOX_URL, "test: 400")}[bad]}
+    rows = [_sched_row(other), _sched_row(good)]
+    sched = pd.DataFrame(rows if order == "bad_first" else rows[::-1])
+    du.step_finals(sched, dt.date(2019, 12, 31), dry=False)
+    assert S.ingested_ids("2019-20") == {GOOD}
+    assert du.RED and all(BAD in r for r in du.RED) and not any(GOOD in r for r in du.RED)
+    if bad == "stuck":
+        assert any("--override " + BAD in r for r in du.RED)
+
+
+def test_a_box_not_final_yet_is_a_warning_while_the_tip_is_recent(finals_bot, monkeypatch, capsys):
+    """The schedule can say Final before the box does: a warning (retried next
+    run) until STUCK_AFTER past the tip, RED after that."""
+    du = finals_bot
+    other = _box(BAD)
+    du.boxes = {BAD: _stuck(other)}
+    sched = pd.DataFrame([_sched_row(other)])
+    tip = pd.Timestamp(other["game"]["gameTimeUTC"]).to_pydatetime()
+    today = sched["game_date"].iloc[0]
+    monkeypatch.setattr(du, "now_utc", lambda: tip + dt.timedelta(hours=3))
+    du.step_finals(sched, today, dry=False)
+    assert du.RED == [] and f"WARN finals: {BAD}" in capsys.readouterr().out
+    monkeypatch.setattr(du, "now_utc", lambda: tip + du.STUCK_AFTER + dt.timedelta(minutes=1))
+    du.step_finals(sched, today, dry=False)
+    assert len(du.RED) == 1 and BAD in du.RED[0] and "still not final" in du.RED[0]
+
+
+def test_a_game_before_today_not_final_yet_is_a_warning_then_red(finals_bot, monkeypatch, capsys):
+    """After midnight a 10:30 PM ET game is still live: not ingested, which is
+    normal for a few hours (a warning; the next games of its teams are
+    provisional meanwhile), and RED once it is STUCK_AFTER past its tip (a
+    stuck feed). Live games are never fetched."""
+    du = finals_bot
+    du.boxes = {}                                   # any fetch fails the test (KeyError -> RED)
+    tip = dt.datetime(2026, 11, 11, 3, 30, tzinfo=UTC)          # 10:30 PM ET on Nov 10
+    sched = pd.DataFrame([{"game_id": "0022600215", "season": "2026-27", "game_type": "RS",
+                           "status": "live", "game_date": dt.date(2026, 11, 10), "tip_utc": tip,
+                           "home": "DEN", "away": "ORL"}])
+    monkeypatch.setattr(du, "now_utc", lambda: tip + dt.timedelta(hours=1, minutes=47))  # 12:17 AM ET
+    du.step_finals(sched, dt.date(2026, 11, 11), dry=False)
+    out = capsys.readouterr().out
+    assert du.RED == [] and "WARN finals: 1 state game(s) before today not ingested yet" in out
+    assert "0022600215 (live)" in out
+    monkeypatch.setattr(du, "now_utc", lambda: tip + dt.timedelta(hours=7))
+    du.step_finals(sched, dt.date(2026, 11, 11), dry=False)
+    assert len(du.RED) == 1 and "0022600215 (live)" in du.RED[0]
+
+
 def test_a_final_game_with_a_committed_override_is_never_refetched(tmp_path, monkeypatch):
     du = _daily_update()
     monkeypatch.setattr(S, "STATE_DIR", tmp_path)
@@ -293,14 +588,12 @@ def test_a_final_game_with_a_committed_override_is_never_refetched(tmp_path, mon
     def fetch(game_id):
         raise AssertionError(f"re-fetched {game_id}, which is committed as an override")
     monkeypatch.setattr(du, "cdn_box", fetch)
-    tip = pd.Timestamp(payload["game"]["gameTimeUTC"])
-    sched = pd.DataFrame([{"game_id": gid, "season": "2019-20", "game_type": "RS", "status": "final",
-                           "game_date": tip.tz_convert("America/New_York").date(),
-                           "home": None, "away": None}])
+    sched = pd.DataFrame([_sched_row(payload)])
     du.RED.clear()
     du.step_finals(sched, dt.date(2019, 12, 31), dry=False)
     assert du.RED == []
     assert not list(S.season_dir("2019-20").glob("*.parquet"))   # nothing written beside the override
+    assert S.ingested_ids("2019-20") == {gid}
 
 
 # ── End to end: main() writes only under state/ ──────────────────────────────
@@ -370,7 +663,7 @@ def test_the_bot_writes_only_under_state(tmp_path, monkeypatch, network, capsys)
     _pin(du, monkeypatch, dt.datetime(2026, 10, 19, 18, 0, tzinfo=ET))
     state = tmp_path / "state"
     monkeypatch.setattr(S, "STATE_DIR", state)      # the committed seed is read where it is
-    monkeypatch.setattr(du, "MIN_ROSTER", 1)        # the fixture roster is a trim of six players
+    monkeypatch.setattr(cdn, "MIN_ROSTER", 1)       # the fixture roster is a trim of six players
     # cache/ is pointed at a tmp dir too (every module that holds the path),
     # so a write there is caught without ever landing in the real cache,
     # however the checkout's cache/ is linked.
@@ -414,7 +707,7 @@ def test_the_apps_fallbacks_read_what_the_bot_writes(tmp_path, monkeypatch, netw
     from bucketlib import live
     du = _daily_update()
     monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr(du, "MIN_ROSTER", 1)
+    monkeypatch.setattr(cdn, "MIN_ROSTER", 1)
     sched, roster = du.step_schedule(False), du.step_roster(False)
     assert S.current_path("schedule").exists() and S.current_path("roster").exists()
 
@@ -433,13 +726,13 @@ def test_an_exception_in_a_step_is_red_and_the_other_steps_run(tmp_path, monkeyp
     du = _daily_update()
     _pin(du, monkeypatch, dt.datetime(2026, 10, 9, 12, 0, tzinfo=ET))
     monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr(du, "MIN_ROSTER", 1)
+    monkeypatch.setattr(cdn, "MIN_ROSTER", 1)
 
     def boom(*a):
         raise RuntimeError("boom")
     ran = []
     monkeypatch.setattr(du, "step_finals", boom)
-    monkeypatch.setattr(du, "step_projections", lambda *a: ran.append(a[-2]))
+    monkeypatch.setattr(du, "step_projections", lambda *a: ran.append(a[4]))   # today
     assert du.main(["--date", "2026-10-09", "--dry-run"]) == 1
     assert du.RED == ["finals step raised RuntimeError: boom"]
     assert ran == [dt.date(2026, 10, 9)]
@@ -458,3 +751,192 @@ def test_the_report_resolves_against_the_historys_spellings(bot, sched, report):
     out = run(bot, sched, report, odds(sched), MORNING + dt.timedelta(minutes=30))
     me = out[out["person_id"] == pid].iloc[0]
     assert me["player_name"] == "Zz Renamed" and me["inj_status"] == listed["inj_status"]
+
+
+# ── Stale beats empty: ANY failed pull keeps the committed copy ──────────────
+def _schedule_payload() -> dict:
+    return json.loads((FIX / "cdn" / "schedule_2026-27_trim.json").read_text())
+
+
+def _mismatched_dates() -> dict:
+    p = _schedule_payload()
+    p["leagueSchedule"]["gameDates"][0]["games"][0]["gameDateEst"] = "1999-01-01T00:00:00Z"
+    return p
+
+
+def _unknown_team() -> dict:
+    p = json.loads((FIX / "cdn" / "playerIndex_trim.json").read_text())
+    rs = p["resultSets"][0]
+    i = rs["headers"].index("TEAM_ID")
+    rs["rowSet"][0][i] = 1612709999
+    return p
+
+
+@pytest.mark.parametrize("step,url,bad", [
+    ("schedule", cdn.SCHEDULE_URL, H.BadPayload(cdn.SCHEDULE_URL, "test: HTML 200")),
+    ("schedule", cdn.SCHEDULE_URL, H.Absent(cdn.SCHEDULE_URL, "test: gone")),
+    ("schedule", cdn.SCHEDULE_URL, _mismatched_dates()),          # the parser's ValueError
+    ("roster", cdn.PLAYER_INDEX_URL, H.BadPayload(cdn.PLAYER_INDEX_URL, "test: truncated JSON")),
+    ("roster", cdn.PLAYER_INDEX_URL, _unknown_team()),             # unknown TEAM_ID: ValueError
+])
+def test_a_failed_pull_keeps_the_committed_copy(tmp_path, monkeypatch, network, step, url, bad):
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(cdn, "MIN_ROSTER", 1)
+    fn = {"schedule": du.step_schedule, "roster": du.step_roster}[step]
+    good = fn(False)
+    assert good is not None and S.current_path(step).exists() and du.RED == []
+    before = S.current_path(step).read_bytes()
+    real = H.fetch
+
+    def fetch(u, **kw):
+        if u == url:
+            if isinstance(bad, Exception):
+                raise bad
+            return bad
+        return real(u, **kw)
+    monkeypatch.setattr(H, "fetch", fetch)
+    got = fn(False)
+    assert got is not None and len(got) == len(good)
+    assert len(du.RED) == 1 and step in du.RED[0]
+    assert S.current_path(step).read_bytes() == before
+
+
+def test_a_truncated_injury_pdf_keeps_the_committed_report(tmp_path, monkeypatch, sched, report):
+    from bucketlib import context as CTX
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    assert CTX.write_committed(report, sched)
+
+    def truncated(*a, **k):
+        raise H.BadPayload(INJ.BASE_URL, "test: truncated PDF")
+    monkeypatch.setattr(INJ, "latest_report", truncated)
+    rep = du.step_injuries(sched, False)
+    assert rep is not None and rep.meta["report_ts_et"] == report.meta["report_ts_et"]
+    assert len(du.RED) == 1 and "BadPayload" in du.RED[0]
+
+
+# ── Odds: one capture per change, regular season and play-in only ────────────
+def _scoreboard(at: dt.datetime, slug: str = "regular-season", move: float = 0.0) -> pd.DataFrame:
+    x = C.read_json(FIX / "espn" / "live_sb_20261020.json.gz")
+    x = x["data"] if "events" not in x else x
+    sb = espn.parse_scoreboard(x, at.astimezone(UTC))
+    sb.loc[sb["home"] == "DET", "home_line"] += move
+    return sb.assign(season_slug=slug)
+
+
+@pytest.fixture
+def odds_bot(tmp_path, monkeypatch):
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    du.boards = {}                       # {date: scoreboard frame, or an exception}
+
+    def scoreboard(d):
+        b = du.boards.get(d, pd.DataFrame(columns=espn.SCOREBOARD_COLUMNS))
+        if isinstance(b, Exception):
+            raise b
+        return b
+    monkeypatch.setattr(espn, "scoreboard", scoreboard)
+    du.RED.clear()
+    return du
+
+
+OPENER = dt.date(2026, 10, 20)
+
+
+def _odds_path(d: dt.date):
+    return S.odds_path(d)            # the one path the bot writes and the app reads
+
+
+def test_an_unchanged_board_leaves_the_odds_file_byte_identical(odds_bot):
+    """Each capture is stamped with its fetch time: a run whose lines did not
+    move is no new capture, so the file (and the commit) stays as it was."""
+    du = odds_bot
+    t0 = dt.datetime(2026, 10, 20, 9, 17, tzinfo=ET)
+    du.boards = {OPENER: _scoreboard(t0)}
+    du.step_odds(OPENER, False)
+    first = _odds_path(OPENER).read_bytes()
+    for minutes in (30, 60, 90):
+        du.boards = {OPENER: _scoreboard(t0 + dt.timedelta(minutes=minutes))}
+        out = du.step_odds(OPENER, False)
+        assert _odds_path(OPENER).read_bytes() == first, f"+{minutes} min rewrote the file"
+        assert len(out[OPENER]) == 3
+    # A moved line is a new capture: first and latest are kept for that game.
+    later = t0 + dt.timedelta(hours=2)
+    du.boards = {OPENER: _scoreboard(later, move=-1.0)}
+    out = du.step_odds(OPENER, False)[OPENER]
+    assert _odds_path(OPENER).read_bytes() != first and len(out) == 4
+    det = out[out["home"] == "DET"].sort_values("captured_at")
+    assert det["home_line"].tolist() == [-1.5, -2.5]
+    assert P.lines_from_odds(out, pd.DataFrame({"game_id": ["g"], "away": ["BOS"], "home": ["DET"]})
+                             )["home_line"].tolist() == [-2.5]
+    assert du.RED == []
+
+
+def test_playoff_and_preseason_lines_never_enter_state(odds_bot):
+    du = odds_bot
+    at = dt.datetime(2026, 10, 20, 9, 17, tzinfo=ET)
+    for slug in ("post-season", "preseason"):
+        du.boards = {OPENER: _scoreboard(at, slug=slug)}
+        assert du.step_odds(OPENER, False)[OPENER] is None
+        assert not _odds_path(OPENER).exists()
+    du.boards = {OPENER: _scoreboard(at, slug="play-in-season")}
+    assert len(du.step_odds(OPENER, False)[OPENER]) == 3
+
+
+def test_a_scoreboard_that_does_not_parse_keeps_the_committed_snapshots(odds_bot):
+    """Tomorrow's scoreboard raising (a parser ValueError) neither loses
+    today's capture nor tomorrow's committed one, and the run is RED."""
+    du = odds_bot
+    at = dt.datetime(2026, 10, 19, 21, 17, tzinfo=ET)
+    du.boards = {OPENER: _scoreboard(at)}
+    du.step_odds(OPENER - dt.timedelta(days=1), False)            # Oct 19: tomorrow is the opener
+    committed = C.read_parquet(_odds_path(OPENER))
+    du.boards = {OPENER: ValueError("test: one competitor")}
+    out = du.step_odds(OPENER - dt.timedelta(days=1), False)
+    pd.testing.assert_frame_equal(out[OPENER], committed)
+    assert len(du.RED) == 1 and "ValueError" in du.RED[0]
+
+
+# ── Camp rosters, --date, the probe ──────────────────────────────────────────
+def test_a_camp_roster_is_red_today_and_a_warning_tomorrow(bot, sched, report, capsys):
+    big = pd.DataFrame({"person_id": range(1, 22), "team": "DET", "name": "x", "two_way": False})
+    roster = pd.concat([big, pd.DataFrame({"person_id": [99], "team": ["PHI"], "name": ["y"],
+                                           "two_way": [False]})], ignore_index=True)
+    bot.clock[0] = MORNING.astimezone(UTC)
+    bot.step_projections(sched, roster, report, {DATE: odds(sched)}, DATE, False)
+    assert len(bot.RED) == 1 and "more than 18 players for DET 21" in bot.RED[0]
+    bot.RED.clear()
+    capsys.readouterr()
+    bot.step_projections(sched, roster, report, {DATE: odds(sched)}, DATE - dt.timedelta(days=1), False)
+    assert bot.RED == [] and "WARN projections 2026-03-12: the roster pull lists more than 18" \
+        in capsys.readouterr().out
+    assert bot.oversized(sched, ROSTER) == {}
+
+
+def test_a_future_date_is_refused(tmp_path, monkeypatch, capsys):
+    """--date replays the past: the injury walk, the odds and the freeze read
+    the real clock, so a future "today" would publish freezable rows from
+    stale inputs."""
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    _pin(du, monkeypatch, dt.datetime(2026, 10, 19, 18, 0, tzinfo=ET))
+    ran = []
+    for step in ("step_schedule", "step_roster", "step_odds", "step_projections"):
+        monkeypatch.setattr(du, step, lambda *a, _s=step: ran.append(_s))
+    assert du.main(["--date", "2026-10-20"]) == 2 and ran == []
+    assert "refusing --date 2026-10-20" in capsys.readouterr().out
+    assert du.main(["--date", "2026-10-19", "--dry-run"]) == 0 and "step_projections" in ran
+
+
+def test_the_probe_covers_every_source_the_bot_reads():
+    """scripts/probe_hosts.py (run on Actions) reaches every URL shape the bot
+    fetches: a source missing from the probe is an unproven assumption."""
+    spec = importlib.util.spec_from_file_location("probe_hosts", REPO / "scripts" / "probe_hosts.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    urls = [t[1] for t in mod.TARGETS]
+    for want in (cdn.SCHEDULE_URL, cdn.PLAYER_INDEX_URL):
+        assert want in urls, want
+    for prefix in (cdn.BOX_URL.split("{")[0], INJ.BASE_URL, espn.SITE + "scoreboard"):
+        assert any(u.startswith(prefix) for u in urls), prefix

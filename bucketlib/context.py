@@ -31,6 +31,10 @@ other games, or rewritten every run), and every row carries the report time:
   teams    per (game_id, team) of every game the report names: the state the
            report gives it, with no cutoff applied (report_states applies the
            cutoff on read-back, exactly as it does for a live report)
+A re-issue that says exactly what the committed pair says (only the title
+moved: the NBA re-titles an unchanged report every 15 minutes) is not
+written until the committed title is COMMITTED_RESTAMP behind, so the pair
+is not a new commit on every bot run.
 read_committed raises when the pair cannot be trusted, and a round-trip test
 proves the states survive for any games and any clock.
 """
@@ -57,6 +61,18 @@ LIVE = "live"
 # fallback. bucketlib.state owns every path under state/; these are names.
 INJURY_PLAYERS = "injury_players"
 INJURY_TEAMS = "injury_teams"
+# write_committed: a report saying what the committed pair says is not
+# written until the committed title is this far behind (the NBA re-issues an
+# unchanged report every 15 minutes with a new title). The bound keeps the
+# fallback's title, and so report_age_h in the app's committed fallback,
+# within 3 hours of the newest report the bot saw, and well inside the
+# 30-hour reach (horizons.MAX_BACK) beyond which a held report is no report.
+# It costs at most 8 restamp commits a day while nothing changes.
+COMMITTED_RESTAMP = dt.timedelta(hours=3)
+# Metadata keys of the committed pair: the content digest (_content_digest)
+# and the title it was written under.
+CONTENT = "report_content"
+TITLE = "report_title"
 
 PLAYER_COLS = ["game_id", "horizon", "cutoff_utc", "report_ts_et", "team", "player_raw",
                "status", "reason_cat", "reason_raw"]
@@ -296,15 +312,53 @@ def committed_frames(report, schedule: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
     return players.reset_index(drop=True), teams[COMMITTED_TEAM_COLS].reset_index(drop=True)
 
 
+def _content_digest(players: pd.DataFrame, teams: pd.DataFrame) -> str:
+    """What a report SAYS, without its title: both committed frames hashed
+    with report_ts_et dropped (every row carries it)."""
+    return C.json_hash([C.frame_hash(players.drop(columns="report_ts_et")),
+                        C.frame_hash(teams.drop(columns="report_ts_et"))])
+
+
+def _restamp_due(paths: tuple[Path, Path], digest: str, ts: dt.datetime) -> bool:
+    """True unless the committed pair already says what this report says
+    (both files carry `digest`) under one title no more than
+    COMMITTED_RESTAMP behind `ts`. A pair from an older writer (no digest),
+    a half-written pair (two titles) or a title gone stale is rewritten."""
+    metas = [C.read_parquet_meta(p) for p in paths]
+    if any(m.get(CONTENT) != digest for m in metas):
+        return True
+    titles = {m.get(TITLE) for m in metas}
+    if len(titles) != 1 or None in titles:
+        return True
+    held = pd.Timestamp(titles.pop())
+    return held < pd.Timestamp(ts) - COMMITTED_RESTAMP
+
+
 def write_committed(report, schedule: pd.DataFrame) -> bool:
-    """The bot's writer for the two committed files (if_changed: an unchanged
-    report is not a commit). Raises on any failure and refuses what
-    committed_frames refuses. Returns True when either file was written."""
+    """The bot's writer for the two committed files. Raises on any failure and
+    refuses what committed_frames refuses. Returns True when either file was
+    written.
+
+    A report whose content (every row and team state, the title aside) equals
+    the committed pair's is not written, unless the committed title is more
+    than COMMITTED_RESTAMP behind this report's: the NBA re-issues the report
+    every 15 minutes around the clock with a new title even when nothing
+    changed, and the title is on every row, so a write per re-issue made both
+    files a new commit on every bot run (2026-03-12: 96 titles, the row
+    count changed about 11 times). Both files are written or neither, so the pair
+    always carries one title (read_committed refuses two)."""
     players, teams = committed_frames(report, schedule)
-    pp, tp = committed_paths()
-    a = C.write_parquet(players, pp, if_changed=True)
-    b = C.write_parquet(teams, tp, if_changed=True)
-    return a or b
+    paths = committed_paths()
+    digest = _content_digest(players, teams)
+    ts = report.meta["report_ts_et"]
+    if not _restamp_due(paths, digest, ts):
+        return False
+    # Both, unconditionally: an empty players file hashes the same under any
+    # title, and skipping it would leave the pair's metadata on two titles.
+    meta = {CONTENT: digest, TITLE: pd.Timestamp(ts).isoformat()}
+    C.write_parquet(players, paths[0], meta=meta)
+    C.write_parquet(teams, paths[1], meta=meta)
+    return True
 
 
 def read_committed() -> tuple[CommittedReport | None, float | None]:

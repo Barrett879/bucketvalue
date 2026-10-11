@@ -4,12 +4,15 @@ install() points bucketlib.state at a temp state dir holding what the bot
 would have committed for 2026-03-12 (the two games' history features, stamped
 as pipeline.write_features stamps them, and their projections), makes the
 live layer answer from the fixture (schedule, rosters, the real 12:00 PM ET
-injury report, the made-up lines) and pins every clock the pages read. No
-network, no repo state, no writes outside the temp dir.
+injury report, the made-up lines) and pins every clock the pages read. The
+box score is "unavailable" unless a test serves the real final box of PHI at
+DET (serve_box) through the real live.box. No network, no repo state, no
+writes outside the temp dir.
 """
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 from dataclasses import dataclass
 from functools import lru_cache
@@ -73,6 +76,35 @@ def load() -> World:
                  (HERE / "board.txt").read_text())
 
 
+def box_payload() -> dict:
+    """The real cdn liveData box score of PHI at DET (final, 2026-03-12)."""
+    with gzip.open(HERE / f"box_{EARLY}.json.gz", "rt") as f:
+        return json.load(f)
+
+
+def no_box(game_id):
+    raise RuntimeError(f"box:{game_id}: offline in the tests")
+
+
+def serve_box(monkeypatch) -> None:
+    """live.box answers through its REAL code (_cached, the final check,
+    cdnbox.player_lines) from the fixture payload; any other game id is
+    absent."""
+    payload = box_payload()
+
+    def fetch(url, **kw):
+        if EARLY not in url:
+            raise LV.H.Absent(url, "test: no box for this game")
+        return payload
+    monkeypatch.setattr(LV, "box", REAL_BOX)
+    monkeypatch.setattr(LV.H, "fetch", fetch)
+    monkeypatch.setattr(LV, "_good", {})
+    monkeypatch.setattr(LV, "_fail", {})
+
+
+REAL_BOX = LV.box
+
+
 def pin(monkeypatch, at: dt.datetime) -> None:
     """Every clock a page reads, at `at` (util's, and the names live and
     store imported from it)."""
@@ -96,6 +128,7 @@ def install(monkeypatch, tmp_path: Path, at: dt.datetime = MORNING, report=None)
     monkeypatch.setattr(LV, "roster", lambda: LV.Live(w.roster, 0.0))
     monkeypatch.setattr(LV, "odds_on", lambda d: LV.Live(w.odds if d == DATE else {}, 0.0))
     monkeypatch.setattr(LV, "injury_report", lambda sched=None: LV.Live(rep, 0.0))
+    monkeypatch.setattr(LV, "box", no_box)
     pin(monkeypatch, at)
     store._live_frame.clear()
     return w

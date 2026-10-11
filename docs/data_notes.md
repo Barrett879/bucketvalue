@@ -46,7 +46,13 @@ reachability from those hosts is still UNVERIFIED and must be probed.
 - LeagueDashPlayerStats(starter_bench='Starters', DateFrom=DateTo=d) returns that
   day's starters, but labels TEAM_ID with the player's LATER team. Join on
   PLAYER_ID + date only. LeagueGameFinder SILENTLY IGNORES the starter filter.
-- ScheduleLeagueV2('2026-27'): opener 2026-10-20 (BOS@DET 7pm ET, PHI@NY, OKC@SA).
+- ScheduleLeagueV2('2026-27'): opener 2026-10-20 (BOS@DET 3pm ET, PHI@NYK 7pm ET,
+  OKC@SAS 9:30pm ET). Corrected 2026-10-09: this line said BOS@DET 7pm, but the
+  stats and cdn schedules (gameDateTimeUTC 2026-10-20T19:00:00Z, '3:00 pm ET') and
+  ESPN 401909088 all have it at 3pm; PHI@NYK is the 7pm game. Tips come from
+  gameDateTimeUTC: gameDateTimeEst is the ET wall clock with a false 'Z'. The
+  season's first freeze point follows from this tip (opening-night runbook, spec
+  section 4).
   1206 of 1230 RS games listed (post-Cup games added later), 7 Cup knockout
   placeholders with team id 0, Cup final 0062600001 on 2026-12-11. gameDate is
   'MM/DD/YYYY 00:00:00': parse it (string min() returns January). Preseason includes
@@ -73,7 +79,7 @@ GitHub Actions probe, 2026-10-09 00:24 UTC, egress AS8075 Microsoft (San Jose),
 |---|---|
 | stats.nba.com (LeagueGameLog, playerindex, CommonTeamRoster) | **BLOCKED**: hangs to timeout, even with curl_cffi Chrome + nba_api headers |
 | cdn.nba.com schedule, todaysScoreboard, liveData box score, headshots | OK, 0.07-0.42s |
-| cdn.nba.com `staticData/playerIndex.json` | OK; IDENTICAL to stats `playerindex` for 2026-27 (615 players, same teams, same 83 two-way flags, checked 2026-10-08) |
+| cdn.nba.com `staticData/playerIndex.json` | NOT PROBED FROM ACTIONS on 2026-10-09 (the probe fetched other cdn paths; the audit caught the overclaim). Checked from this Mac: IDENTICAL to stats `playerindex` for 2026-27 (615 players, same teams, same 83 two-way flags, 2026-10-08). `probe_hosts.py` now includes it; confirm on the next probe run before Oct 19 |
 | ak-static injury PDFs | OK |
 | ESPN scoreboard, core odds, injuries | OK |
 

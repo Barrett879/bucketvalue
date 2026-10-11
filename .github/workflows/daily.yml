@@ -3,16 +3,25 @@
 # commits ONLY state/. docs/serving_design.md section 4.
 #
 # Manual runs only for now. The schedule below is written and commented out:
-# enable at the deploy STOP (a private repo spends Actions minutes).
+# enable at the deploy STOP, AFTER the repo is public (36 runs a day of 6-10
+# minutes would spend a private repo's free Actions minutes within days).
+# The go-live order and checks: .github/runbook_opening_night.md.
 # Dense off-minute crons (:17 and :47, 13:00-06:47 UTC = 9 AM to 2:47 AM EDT,
 # 8 AM to 1:47 AM EST); the cadence logic lives in Python, which derives the
 # ET date every run (cron starts were measured hours late on DiamondValue).
+#
+# Runs that never start send no failure email: the last step pings a
+# dead-man's switch (the BV_HEALTHCHECK_URL secret, healthchecks.io style),
+# which alerts when the pings stop. The offseason keepalive lives in
+# scripts/commit_state.sh (a dated state/keepalive.txt commit once the newest
+# commit is 45 days old: scheduled workflows of a public repo are disabled
+# after 60 days without activity).
 name: daily-update
 on:
   workflow_dispatch:
     inputs:
       date:
-        description: "ET date to treat as today (YYYY-MM-DD; empty = now)"
+        description: "PAST ET date to replay as today (YYYY-MM-DD). Leave EMPTY for live runs: a future date is refused, and a plain run projects tomorrow anyway"
         required: false
         default: ""
   # schedule:
@@ -30,7 +39,13 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
     steps:
+      # The branch TIP when the job starts, not the commit the run was created
+      # on: a run that queued behind another one (concurrency below) would
+      # otherwise compute on a base without that run's push, and its state
+      # files would conflict on the rebase.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
       - name: Python version from runtime.txt
         id: py
         run: echo "version=$(sed -e 's/^python-//' runtime.txt | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
@@ -59,41 +74,30 @@ jobs:
       - name: App smoke render (AppTest) on the new state
         run: python -m pytest -q tests/test_pages_smoke.py
       - name: Commit state/ only
-        run: |
-          # Anything changed outside state/, tracked, untracked or ignored
-          # (cache/ is ignored), fails the job: the bot writes ONLY state/.
-          # Each porcelain line is "XY path" (the path quoted when it holds a
-          # space), so every exclusion is anchored on the path right after
-          # the two status columns: state/ itself, and the interpreter's and
-          # pytest's caches at ANY depth (the Tests step leaves a root
-          # .pytest_cache/, the imports a __pycache__/ in every package).
-          other=$(git status --porcelain --untracked-files=all --ignored \
-                  | grep -v -E '^.. "?(state/|(.*/)?(__pycache__|\.pytest_cache)/)' || true)
-          if [ -n "$other" ]; then
-            echo "::error::the bot changed files outside state/:"
-            echo "$other"
-            exit 1
-          fi
-          git config user.name "BucketValue bot"
-          git config user.email "bucketvalue-bot@users.noreply.github.com"
-          git add -A state/
-          if git diff --cached --quiet; then
-            echo "state unchanged: nothing to commit"
-            exit 0
-          fi
-          git commit -m "Bot: state as of $(TZ=America/New_York date '+%Y-%m-%d %H:%M') ET"
-          branch="${GITHUB_REF_NAME}"
-          for attempt in 1 2 3; do
-            if git pull --rebase origin "$branch" && git push origin "HEAD:$branch"; then
-              exit 0
-            fi
-            echo "push attempt $attempt failed; retrying"
-            sleep $((attempt * 15))
-          done
-          echo "::error::could not push state after 3 attempts"
-          exit 1
+        # scripts/commit_state.sh: the allow-list (anything changed outside
+        # state/ fails the job), the offseason keepalive, and the push with
+        # pull --rebase (a conflicting rebase is aborted and fails the job:
+        # this run computed on a stale base; other failures are retried).
+        run: bash scripts/commit_state.sh "${GITHUB_REF_NAME}"
       - name: Fail a RED run
         if: steps.bot.outcome == 'failure'
         run: |
           echo "::error::the bot run was RED (see the Bot step)"
           exit 1
+      - name: Dead-man's switch
+        # Every run that gets this far pings the monitor (success, or /fail
+        # for a RED or failed run); the monitor alerts when pings stop
+        # arriving, which is the only signal a run that never starts gives.
+        # Skipped (with a warning) until the secret is set: see the runbook.
+        if: always()
+        env:
+          HC_URL: ${{ secrets.BV_HEALTHCHECK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::BV_HEALTHCHECK_URL is not set: no dead-man's switch for this workflow"
+            exit 0
+          fi
+          url="$HC_URL"
+          if [ "$JOB_STATUS" != "success" ]; then url="$HC_URL/fail"; fi
+          curl -fsS -m 10 --retry 3 -o /dev/null "$url" || echo "::warning::the healthcheck ping failed"

@@ -53,9 +53,13 @@ pmf -> None, never an exception:
   (FG3A projected above FGA makes FG2A = FGA - FG3A negative, which no count
   distribution can have).
 - From the simulator (price), a stat whose draws a CLIPPED split degenerates
-  (see _degenerate): FTM when rate_ftm >= rate_fta, FG2M, FG2A and FGM when
-  rate_fg3a >= rate_fga. Their re-centred means still match, which is exactly
-  why a mean test cannot catch them.
+  (see _degenerate): FTM when rate_ftm >= rate_fta, FG3M when rate_fg3m >=
+  rate_fg3a, FG2M, FG2A and FGM when rate_fg3a >= rate_fga, FG2M when
+  rate_fg3m >= rate_fgm. Their re-centred means still match, which is
+  exactly why a mean test cannot catch them.
+- From the baseline, a stat whose shipped mean a models.predict cap pins at
+  exactly zero (see _baseline_degenerate): FG2A at the fg3a cap, FG2M at the
+  fg3m-at-fgm cap. The baseline would price that zero as a certain Less.
 
 A shipped mean of exactly zero on a count (a rate of 0) IS priced: the only
 non-negative distribution with mean zero is the point mass at zero, so that is
@@ -211,24 +215,40 @@ def _degenerate(inp: D.PlayerInput) -> frozenset[str]:
     stays as it is (prob_gate scores through it); the refusal lives here.
     - pft >= 1 (rate_ftm at or above rate_fta): every draw has FTM = FTA, and
       FTA is 2 x trips, so the FTM pmf has no mass on an odd count.
+    - p3 >= 1 (rate_fg3m at or above rate_fg3a, models.predict's fg3m cap):
+      every draw has FG3M = FG3A, a perfect night from deep on every draw.
     - fg3a_share >= 1 (rate_fg3a at or above rate_fga): no 2-point attempt is
       ever drawn, so FG2M re-centres onto a two-point mass at maximum
       confidence, FGM piles its mass on its top atom, and FG2A's mean is <= 0.
+    - p2 <= 0 (rate_fg3m at or above rate_fgm, the other fg3m cap): no
+      2-pointer is ever made, and FG2M's mean is exactly 0.
     """
     out: set[str] = set()
     if inp.pft >= 1.0:
         out.add("ftm")
+    if inp.p3 >= 1.0:
+        out.add("fg3m")
     if inp.fg3a_share >= 1.0:
         out.update(("fg2m", "fg2a", "fgm"))
+    if inp.p2 <= 0.0:
+        out.add("fg2m")
     return frozenset(out)
 
 
-# The one BASELINE stat a clipped FG3A share also breaks. FG2A's composed mean,
-# FGA - FG3A, is <= 0 once the share clips, and exactly 0 at models.predict's
-# rate_fg3a cap, where the baseline would price it as the point mass at zero:
-# a certain Less on every 2-PT Attempted line. That zero is a cap, not a
-# forecast. FG2M and FGM keep positive means and ordinary baseline pmfs.
-_BASELINE_DEGENERATE = frozenset({"fg2a"})
+def _baseline_degenerate(inp: D.PlayerInput) -> frozenset[str]:
+    """BASELINE stats a models.predict cap pins at a mean of exactly zero,
+    where the baseline would price the point mass at zero: a certain Less on
+    every line. That zero is a cap, not a forecast.
+    - fg3a_share >= 1: FG2A = FGA - FG3A is <= 0 (exactly 0 at the fg3a cap).
+      FG2M and FGM keep positive means and ordinary baseline pmfs.
+    - p2 <= 0: FG2M = FGM - FG3M is <= 0 (exactly 0 at the fg3m-at-fgm cap).
+    """
+    out: set[str] = set()
+    if inp.fg3a_share >= 1.0:
+        out.add("fg2a")
+    if inp.p2 <= 0.0:
+        out.add("fg2m")
+    return frozenset(out)
 
 
 def price(inp: D.PlayerInput, params: D.SimParams, seed: int, n: int = D.N_DRAWS,
@@ -306,7 +326,7 @@ class SimProvider:
         if row is not None:
             try:
                 inp = player_input(row, prefix="")
-                self._refused[key] = _degenerate(inp) & _BASELINE_DEGENERATE
+                self._refused[key] = _baseline_degenerate(inp)
                 out = price(inp, self._params, seed_of(*key), self._n, stats=GATED)
             except ValueError as e:
                 logger.warning("simprov: cannot price %s in %s: %s", key[0], key[1], e)

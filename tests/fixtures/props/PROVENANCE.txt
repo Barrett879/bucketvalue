@@ -26,7 +26,12 @@ feed_constructed.json
 
 roster_constructed.csv, schedule_constructed.csv, projections_constructed.csv
   Real players and person ids where known, current-season teams as a test
-  needs them. "Chris Smith" (two players, BOS and TOR, ids 1699001/1699002) is
+  needs them. The projections carry the PRODUCTION frame's provenance columns
+  (pipeline.py, serving_design section 3 and amendment 7): computed_at (UTC)
+  and adjusted, and NO as_of column, which the production frame never had; an
+  as_of column here hid that the record refused every real row (audit
+  2026-10-09, props-9). provisional is left out on purpose (a test checks the
+  record refuses rows that do not say). "Chris Smith" (two players, BOS and TOR, ids 1699001/1699002) is
   INVENTED to exercise ambiguity and team scoping. The schedule is invented
   around the real 2026-10-20 opener; game ids follow the NBA format. The
   0022600002 tip (00:00Z on Oct 21) is 8pm ET on Oct 20: the routing trap.
