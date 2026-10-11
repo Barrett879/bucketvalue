@@ -79,7 +79,7 @@ GitHub Actions probe, 2026-10-09 00:24 UTC, egress AS8075 Microsoft (San Jose),
 |---|---|
 | stats.nba.com (LeagueGameLog, playerindex, CommonTeamRoster) | **BLOCKED**: hangs to timeout, even with curl_cffi Chrome + nba_api headers |
 | cdn.nba.com schedule, todaysScoreboard, liveData box score, headshots | OK, 0.07-0.42s |
-| cdn.nba.com `staticData/playerIndex.json` | NOT PROBED FROM ACTIONS on 2026-10-09 (the probe fetched other cdn paths; the audit caught the overclaim). Checked from this Mac: IDENTICAL to stats `playerindex` for 2026-27 (615 players, same teams, same 83 two-way flags, 2026-10-08). `probe_hosts.py` now includes it; confirm on the next probe run before Oct 19 |
+| cdn.nba.com `staticData/playerIndex.json` | OK, 0.4s, 135 KB (probed 2026-10-11 00:05 UTC, `docs/probes/probe_github-actions_20261011T000505+0000.json`; the first probe had not fetched it). IDENTICAL to stats `playerindex` for 2026-27 (615 players, same teams, same 83 two-way flags, checked from this Mac 2026-10-08) |
 | ak-static injury PDFs | OK |
 | ESPN scoreboard, core odds, injuries | OK |
 

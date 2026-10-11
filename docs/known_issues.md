@@ -140,8 +140,9 @@ Found by the build 1 verifiers and the cross-module fix pass that followed.
   2026-27 postponement uses another code, that game keeps both teams
   provisional and the run goes RED 6 hours after its tip. Fix: add the code to
   `cdn._postponed`.
-- **playerIndex from Actions** was not in the 2026-10-09 probe; `probe_hosts.py`
-  now includes it. Run the probe workflow and read docs/probes before Oct 19.
+- ~~playerIndex from Actions~~ RESOLVED 2026-10-11: the second Actions probe
+  fetched it (OK, 0.4s). Every source the bot reads is now proven reachable from
+  Actions; stats.nba.com still hangs there, as expected.
 - **Dead-man's switch needs a secret.** daily.yml pings `BV_HEALTHCHECK_URL`
   after every run and only warns until the secret exists (a healthchecks.io
   check with the cron schedule and a 3-hour grace).
