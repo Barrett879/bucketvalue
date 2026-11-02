@@ -108,7 +108,7 @@ import pandas as pd
 
 from .. import http, teams
 from ..cache import CACHE_DIR, READ_ONLY, read_json, write_json
-from ..names import Match
+from ..names import Match, last_first_orders
 from ..util import ET, UTC, now_et, now_utc, season_for_date, to_et
 
 # pypdf logs a warning per odd xref in some iTextSharp files; the content is
@@ -1244,13 +1244,13 @@ def latest_report(now: dt.datetime | None = None, *, getter: Getter | None = Non
 # ── Name resolution ──────────────────────────────────────────────────────────
 def _resolve_last_first(idx, last_first: str, team: str | None) -> Match:
     """names.NameIndex.resolve_last_first, except that an ambiguous order is
-    reported as 'ambiguous' (proposed for the foundation; kept private here
-    so the two cannot drift silently: same orders, same index calls)."""
+    reported as 'ambiguous' (proposed for the foundation; kept private here).
+    The orders are names.last_first_orders, the ones resolve_last_first tries,
+    so the two cannot drift: same orders, same index calls."""
     if "," not in last_first:
         return idx.get(last_first, team=team)
-    last, first = [p.strip() for p in last_first.split(",", 1)]
     how = "none"
-    for cand in (f"{first} {last}", f"{last} {first}"):
+    for cand in last_first_orders(last_first):
         m = idx.get(cand, team=team)
         if m.value is not None:
             return m
@@ -1265,7 +1265,8 @@ def resolve(rows: pd.DataFrame, index_by_team) -> tuple[pd.DataFrame, pd.DataFra
     whose indexes are ALSO built with team= (names.NameIndex drops its prefix
     fallback when asked for a team its entries were not tagged with).
     Each 'Last, First' is resolved scoped to the row's team, in both name
-    orders (the report prints 'Yang, Hansen' for Yang Hansen).
+    orders (the report prints 'Yang, Hansen' for Yang Hansen; a suffix
+    between two commas, 'Udeh, Jr., Ernest', is part of the last name).
 
     match_how is 'ambiguous' when either order hit two players, 'none' only
     when neither order found anyone: names.resolve_last_first reports both as

@@ -14,6 +14,9 @@ the gaps the 2026-10-08 identity research measured against the 615-player
     KJ Martin, Lu Dort, Mo Bamba): data/name_aliases.csv, consulted first
   - family-name-first players: the injury report prints "Yang, Hansen" while
     stats.nba.com has Yang Hansen, so `resolve_last_first` tries both orders
+  - a suffix between two commas: the report prints "Udeh, Jr., Ernest" (the
+    playerIndex last name is "Udeh, Jr."; found live 2026-11-02), which
+    `last_first_orders` reads as "Udeh Jr., Ernest"
   - team scoping: when the source names a team, candidates are filtered to it
     BEFORE the prefix fallback, which keeps "Jay Williams" off Jaylin Williams
     unless he is the only Williams on that team.
@@ -31,7 +34,8 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-_SUF = re.compile(r"\s+(jr|sr|ii|iii|iv|v)$")
+_SUFFIXES = ("jr", "sr", "ii", "iii", "iv", "v")
+_SUF = re.compile(rf"\s+({'|'.join(_SUFFIXES)})$")
 _PUNC = re.compile(r"[^a-z0-9 ]")
 
 ALIASES_PATH = Path(__file__).resolve().parent.parent / "data" / "name_aliases.csv"
@@ -62,6 +66,24 @@ def name_keys(n: str) -> list[str]:
 def name_split(n: str) -> tuple[str | None, str | None]:
     parts = " ".join(_PUNC.sub("", _SUF.sub("", n)).split()).split()
     return (parts[0], " ".join(parts[1:])) if len(parts) >= 2 else (None, None)
+
+
+def last_first_orders(last_first: str) -> tuple[str, str]:
+    """The two names an injury-report 'Last, First' (it holds a comma) can be,
+    in the order to try them: 'First Last', then the printed order for
+    family-name-first players ('Yang, Hansen' is Yang Hansen).
+
+    The suffix belongs to the last name. The report usually prints it there
+    ('Lively II, Dereck'), but for a player whose playerIndex last name holds
+    a comma it prints it between two ('Udeh, Jr., Ernest'). That suffix goes
+    back on the last name, so both printings try the same two names: split at
+    the first comma alone they were 'Jr., Ernest Udeh' and 'Udeh Jr., Ernest',
+    which match nobody."""
+    last, first = (p.strip() for p in last_first.split(",", 1))
+    suf, sep, rest = first.partition(",")
+    if sep and normalize(suf) in _SUFFIXES:
+        last, first = f"{last} {suf.strip()}", rest.strip()
+    return f"{first} {last}", f"{last} {first}"
 
 
 @dataclass(frozen=True)
@@ -150,12 +172,12 @@ class NameIndex:
         return Match(None, "none")
 
     def resolve_last_first(self, last_first: str, team: str | None = None) -> Match:
-        """Injury-report 'Last, First' (suffix attached to the last name, e.g.
-        'Lively II, Dereck'). Tries 'First Last' and, for family-name-first
-        players, the printed order."""
+        """Injury-report 'Last, First' (suffix on the last name, 'Lively II,
+        Dereck', or between two commas, 'Udeh, Jr., Ernest'). Tries
+        'First Last' and, for family-name-first players, the printed order
+        (last_first_orders)."""
         if "," in last_first:
-            last, first = [p.strip() for p in last_first.split(",", 1)]
-            for cand in (f"{first} {last}", f"{last} {first}"):
+            for cand in last_first_orders(last_first):
                 m = self.get(cand, team=team)
                 if m.value is not None:
                     return m

@@ -623,6 +623,36 @@ def test_resolve_on_parsed_rows():
     assert len(res) + unres.n_rows.sum() == len(rows) and len(unres) > 100
 
 
+def test_suffix_between_two_commas_on_the_2026_11_02_report():
+    """The report as published prints CLE's two-way Ernest Udeh Jr. as 'Udeh,
+    Jr., Ernest' (the playerIndex: person 1643640, last name 'Udeh, Jr.');
+    its other suffixed names are 'Lively II, Dereck' style. Split at the first
+    comma he resolved to nobody, so his Out never reached his row (he read as
+    not listed on a team that filed) and the bot rebuilt him INACTIVE_UNLISTED."""
+    from bucketlib import livectx as L
+    udeh, gid = 1643640, "0022600158"                       # OKC@CLE, 7:00 PM ET
+    rep = load("2026-11-02_02_15AM")
+    rows = rep.rows[rep.rows["player_raw"].str.count(",") >= 2]
+    assert rows[["matchup", "team", "player_raw", "status", "reason_cat"]].values.tolist() == \
+        [["OKC@CLE", "CLE", "Udeh, Jr., Ernest", "Out", "g_league_two_way"]]
+    idx = NameIndex(aliases={})
+    idx.add("Ernest Udeh, Jr.", udeh, team="CLE")
+    res, unres = I.resolve(rows, idx)
+    assert (res.person_id.tolist(), res.match_how.tolist(), len(unres)) == ([udeh], ["exact"], 0)
+    # The bot's and the app's path: context.context_for and box._report_people.
+    roster = pd.DataFrame({"game_id": [gid], "team": ["CLE"], "person_id": [udeh],
+                           "player_name": ["Ernest Udeh, Jr."]})
+    ip = L.resolve_names(rows.assign(game_id=gid), roster)
+    assert ip["person_id"].tolist() == [udeh] and ip.attrs["unresolved"] == 0
+    me = pd.DataFrame({"game_id": [gid], "team": ["CLE"], "person_id": [udeh],
+                       "tip_utc": [pd.Timestamp("2026-11-03T00:00Z")]})
+    teams = pd.DataFrame({"game_id": [gid], "team": ["CLE"], "state": ["listed"],
+                          "report_ts_et": [rep.meta["report_ts_et"]],
+                          "cutoff_utc": [pd.Timestamp("2026-11-02T23:45Z")]})
+    c = L.build_context(me, ip, teams).iloc[0]
+    assert (c["inj_out"], c["inj_reason_gleague"], c["inj_not_listed"]) == (1.0, 1.0, 0.0)
+
+
 # ── script: offline end to end ───────────────────────────────────────────────
 def _script():
     spec = importlib.util.spec_from_file_location("build_injury_reports",

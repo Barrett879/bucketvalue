@@ -1,5 +1,7 @@
 """Every case here was measured against the real 2026-27 index on 2026-10-08."""
-from bucketlib.names import NameIndex, normalize
+import pytest
+
+from bucketlib.names import NameIndex, last_first_orders, normalize
 
 ROSTER = [
     ("Nikola Jokić", 1, "DEN"), ("P.J. Washington", 2, "DAL"), ("PJ Hall", 3, "MEM"),
@@ -54,6 +56,36 @@ def test_injury_report_order():
     assert ix.resolve_last_first("Lively II, Dereck", team="DAL").value == 14
     assert ix.resolve_last_first("Yang, Hansen", team="POR").value == 7
     assert ix.resolve_last_first("Schroder, Dennis").value == 11
+
+
+def test_suffix_between_two_commas_is_part_of_the_last_name():
+    # The 2026-11-02 report printed 'Udeh, Jr., Ernest' (playerIndex last name
+    # 'Udeh, Jr.'). Split at the first comma it tried 'Jr., Ernest Udeh' and
+    # 'Udeh Jr., Ernest', and resolved to nobody.
+    assert last_first_orders("Udeh, Jr., Ernest") == last_first_orders("Udeh Jr., Ernest") \
+        == ("Ernest Udeh Jr.", "Udeh Jr. Ernest")
+    ix = idx()
+    for printed in ("Udeh, Jr., Ernest", "Udeh, Jr, Ernest"):
+        assert ix.resolve_last_first(printed) == ix.resolve_last_first("Udeh Jr., Ernest")
+        m = ix.resolve_last_first(printed, team="LAC")
+        assert (m.value, m.how) == (13, "exact")
+    stats = NameIndex(aliases={})
+    stats.add("Ernest Udeh Jr.", 13, team="CLE")              # the stats.nba spelling
+    assert stats.resolve_last_first("Udeh, Jr., Ernest", team="CLE").value == 13
+
+
+@pytest.mark.parametrize("suffix", ["Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV", "V"])
+def test_every_suffix_between_two_commas(suffix):
+    ix = NameIndex(aliases={})
+    ix.add(f"Sam Doe {suffix}", 1, team="CLE")
+    m = ix.resolve_last_first(f"Doe, {suffix}, Sam", team="CLE")
+    assert (m.value, m.how) == (1, "exact")
+
+
+def test_a_second_comma_without_a_suffix_splits_as_before():
+    # Only a suffix moves back onto the last name.
+    assert last_first_orders("Doe, Sam, Lee") == ("Sam, Lee Doe", "Doe Sam, Lee")
+    assert last_first_orders("Yang, Hansen") == ("Hansen Yang", "Yang Hansen")
 
 
 def test_ambiguous_exact_needs_team():
