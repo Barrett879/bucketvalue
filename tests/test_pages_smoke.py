@@ -152,12 +152,25 @@ def game(**params):
 
 
 # ── The pages render ─────────────────────────────────────────────────────────
-def test_home_opening_night():
+def test_home_opening_night(monkeypatch):
+    # Which notice an unpublished date gets depends on the WALL clock
+    # (store.now_utc against each game's freeze point), and this is the
+    # 2026-10-20 slate (first tip 19:00Z), so the clock is pinned to that noon
+    # ET: unpinned, this test began failing when the real opener tipped.
+    wall = {"now": dt.datetime(2026, 10, 20, 16, 0, tzinfo=dt.timezone.utc)}
+    monkeypatch.setattr(store, "now_utc", lambda: wall["now"])
     at = run("app.py", date="2026-10-20")
     page = html(at)
     assert "BOS" in page and "DET" in page and "DET -1.5" in page
-    # A regular-season date the bot has not published says so.
+    # A regular-season date the bot has not published says so...
     assert "Projections not published yet for this date" in page
+    # ...until every game is past its freeze point: then none ever will be,
+    # and the page makes no promise.
+    wall["now"] = dt.datetime(2026, 10, 21, 6, 0, tzinfo=dt.timezone.utc)
+    store._live_frame.clear()
+    page = html(run("app.py", date="2026-10-20"))
+    assert "No projections were published for this date before tip" in page
+    assert "Projections not published yet for this date" not in page
 
 
 def test_home_empty_date_and_preseason():

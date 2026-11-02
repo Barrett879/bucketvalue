@@ -169,7 +169,13 @@ def test_an_error_body_with_nothing_cached_is_the_outage_not_no_lines(env):
     assert got.stale and got.source == "none" and got.value == {}
 
 
-def test_a_line_seen_before_tip_survives_espn_dropping_it_at_tip(env):
+def test_a_line_seen_before_tip_survives_espn_dropping_it_at_tip(env, monkeypatch):
+    # odds_on tells a started game by its status OR its tip against the WALL
+    # clock (util.now_utc, which env's fake does not move). The fixture is the
+    # 2026-10-20 slate (BOS at DET tips 19:00Z), so the wall clock is pinned to
+    # that noon ET: unpinned, this test began failing at the opener's real tip.
+    wall = {"now": dt.datetime(2026, 10, 20, 16, 0, tzinfo=dt.timezone.utc)}
+    monkeypatch.setattr(live, "now_utc", lambda: wall["now"])
     d = dt.date(2026, 10, 20)
     sb = _scoreboard()
     env.answer = sb
@@ -203,6 +209,16 @@ def test_a_line_seen_before_tip_survives_espn_dropping_it_at_tip(env):
     env.clock[0] += 301
     env.answer = pulled
     assert ("BOS", "DET") not in live.odds_on(d).value
+    # Past its tip a game has started even while ESPN still says SCHEDULED (a
+    # late status flip): the line it showed before tip is kept, not dropped.
+    live._good.clear()
+    env.answer = sb
+    live.odds_on(d)
+    wall["now"] = dt.datetime(2026, 10, 20, 19, 5, tzinfo=dt.timezone.utc)
+    env.clock[0] += 301
+    env.answer = pulled
+    late = live.odds_on(d).value[("BOS", "DET")]
+    assert late["pre_tip"] and late["home_line"] == before[("BOS", "DET")]["home_line"]
 
 
 # ── Memory or committed: the newer one ───────────────────────────────────────
