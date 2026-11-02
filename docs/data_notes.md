@@ -99,6 +99,42 @@ before a team's first game come from playerIndex.json.
   player: status ACTIVE/INACTIVE, starter '1'/'0', played '1'/'0', notPlayingReason
   (INACTIVE_INJURY, DNP_INJURY, DND_INJURY, INACTIVE_HEALTH_AND_SAFETY_PROTOCOLS,
   ...), notPlayingDescription, minutes 'PT25M01.00S'. One call per game.
+- **From 2026-27 the liveData box lists ACTIVE players only** (found by the live
+  rehearsal of 2026-11-02, never by a test: every fixture and the parity replay are
+  2025-26 payloads). Through 2025-26 a box listed every rostered player of both
+  teams, 15-22 a team (median 18), the ones who did not dress as INACTIVE with a
+  notPlayingReason (11,106 inactive rows in the 1,236 regular-season and play-in
+  games of 2025-26). The 92 boxes of 2026-10-20..11-01 list only the players who
+  dressed: 11-16 a team (median 13), statuses played 2,079 / dnp 414 / inactive
+  0, no INACTIVE row and no inactive field anywhere; game, team and player keys
+  are unchanged. Kept as `tests/fixtures/box/cdn_0022600005.json` (GSW at LAL,
+  2026-10-21): 13 a side, against 18 per team in the playerIndex. The bot rebuilds
+  the inactive list from its roster snapshots (docs/serving_design.md section 9).
+- **How to tell the formats apart**: no INACTIVE player on EITHER side. Every
+  2025-26 regular-season and play-in box lists one on at least one side; three
+  team-games listed none (BOS twice in the regular season and CHA in the
+  play-in, 15 dressed each) while the opponent listed its own; the 14 games with
+  none on either side were all playoffs (no two-way players).
+- **Two-way players after the regular season** (ineligible for the play-in and
+  the playoffs; 2019-20 and 2020-21 let them in, 16-17 listed a team): the
+  listing mostly leaves them out, not always. 2021-22..2025-26: 38 of 60
+  play-in team-games and 824 of 844 playoff team-games listed 15 or fewer; the
+  other play-in boxes listed their two-way players inactive
+  (INACTIVE_GLEAGUE_TWOWAY, INACTIVE_INELIGIBLE_TO_PLAY, INACTIVE_COACH, no
+  reason) or even active (ORL's two on 2026-04-15). In 2025-26's play-in four
+  games listed 15 a side, without the three (ORL two) two-way players each
+  team's 2026-04-12 box had listed; 0052500111 listed MIA's and CHA's five as
+  inactive. The rebuild leaves them out (box.TWO_WAY_INELIGIBLE).
+- **The report and the inactive list** (2023-24..2025-26, t_15 report, 33,018
+  inactive rows): 89.5% listed Out, 1.0% listed with another status, 9.5% not
+  listed (two-way and assignment players, healthy inactives). So the report alone
+  cannot rebuild the list; the roster minus the box can.
+- **The old listing was close to the roster, not equal to it.** A few rostered
+  players were missing from 2025-26 boxes altogether: HOU's Finney-Smith and Tate
+  on opening night (both listed Out by HOU's report), ATL's Djurisic in about 40
+  games. 86 of 13,993 t_15 report rows resolve to nobody in their game's listing,
+  and 112 team-player-games fall inside a stint (listed before and after, not in
+  that game). Training has no row for those; a rebuild from a true roster does.
 - scheduleLeagueV2(_1).json, todaysScoreboard_00.json, odds_todaysGames.json all 200
   with the Referer.
 - Headshots `/headshots/nba/latest/{260x190|1040x760}/{pid}.png` and logos

@@ -24,6 +24,9 @@ Steps, each independent (one failing step does not skip the others; an
 exception in a step is caught, recorded and turns the run RED):
   1. schedule      cdn schedule            -> state/current/schedule_v1.parquet
   2. roster        cdn playerIndex          -> state/current/roster_v1.parquet
+                   and, dated by the run's own ET date, the snapshot
+                   state/season/{season}/roster_{date}.parquet
+                   (state.roster_snapshot_path; a failed pull writes neither)
   3. finals        cdn box scores of every FINAL state game not yet ingested
                    (state.ingested_ids: overrides count, so a game committed as
                    an override is never re-fetched)
@@ -36,6 +39,22 @@ exception in a step is caught, recorded and turns the run RED):
                    A state game before today that is not ingested is a WARN
                    while its tip is under STUCK_AFTER old (a late West Coast
                    game still live after midnight) and RED after that.
+                   A box listing no INACTIVE player on either side (the
+                   2026-27 format: actives only) gets its inactive rows rebuilt
+                   (sources.box.rebuild_inactives): the roster snapshot of the
+                   game's date (state.roster_for_game: the latest on or before
+                   it, else the earliest after it, the backlog) minus the box,
+                   minus anyone another team's box lists between the snapshot
+                   and the game (every box of the run is parsed first, so the
+                   backlog's later boxes count), minus a play-in game's
+                   two-way players (ineligible), reasons from the last real
+                   report before the t_15 horizon
+                   (horizons, one fetch per slot per run; no report means
+                   INACTIVE_UNLISTED, never a failure). One line per such game
+                   says which snapshot and which report. No usable snapshot:
+                   the game is not ingested (RED, retried next run), because
+                   a history written without its inactive rows would never be
+                   rewritten.
   4. injuries      latest REAL report (horizons.real_report)
                    -> state/current/injury_{players,teams}_v1.parquet
                    (context.write_committed); with no new report the committed
@@ -65,7 +84,13 @@ exception in a step is caught, recorded and turns the run RED):
                    game's status). Games without a line are withheld
                    (pipeline's documented policy), never RED. A team with more
                    than MAX_TEAM_ROWS roster rows (camp rosters not cut) is
-                   RED today and a warning tomorrow. A game carried past its
+                   RED today and a warning tomorrow until the day after the
+                   regular season's first game day; from then on it is
+                   checked against ESPN's roster (espn.team_roster): the same
+                   players is an info line, any difference a WARN naming the
+                   players only one source lists, and nothing is dropped
+                   either way (an in-season 19 is a hardship signing, not a
+                   camp roster: LAC on 2026-11-02). A game carried past its
                    freeze point on rows computed with a report older than the
                    newest committed report titled before that point is a
                    warning naming both report times (frozen_on_old_report).
@@ -80,6 +105,8 @@ Rules (ops review):
     payload, a parser refusing it), not only for a Blocked host.
   - The run goes RED (exit 1) on any Blocked source, on any source that
     could not be read, when a date with final games ingested zero of them,
+    when a box listing only its active players has no roster snapshot to
+    rebuild its inactive list from (that game is not ingested),
     when ingestion trails a state game by more than STUCK_AFTER after its tip,
     when today's untipped games could not be projected for a reason other than
     the missing-line policy (no injury report at all is such a reason: unknown
@@ -109,7 +136,7 @@ from bucketlib import models as M  # noqa: E402
 from bucketlib import pipeline as P  # noqa: E402
 from bucketlib import serve as V  # noqa: E402
 from bucketlib import state as S  # noqa: E402
-from bucketlib.sources import cdn, cdnbox  # noqa: E402
+from bucketlib.sources import box, cdn, cdnbox  # noqa: E402
 from bucketlib.sources import injury as INJ  # noqa: E402
 from bucketlib.util import now_et, now_utc, season_for_date, to_et  # noqa: E402
 
@@ -128,7 +155,16 @@ STUCK_AFTER = dt.timedelta(hours=6)
 # committed copy stands in for every one of them (stale beats empty).
 UNUSABLE = (H.FetchError, ValueError, KeyError, TypeError, AttributeError)
 STATE_SLUGS = {"regular-season", "play-in-season"}    # ESPN season slugs that enter state
+# The report a rebuilt inactive list takes its reasons from: the last real
+# report before this horizon (horizons.HORIZONS: tip minus 15 minutes, the one
+# training calls "the last report before tip"; 89.5% of 2023-24..2025-26
+# inactive players are listed Out on it).
+REBUILD_HORIZON = "t_15"
 RED: list[str] = []
+# Run-scoped caches, emptied by main(): the in-memory report store every step
+# shares (report_store) and ESPN rosters fetched for the roster-size check.
+REPORTS: INJ.ReportStore | None = None
+ESPN_ROSTERS: dict[str, object] = {}
 
 
 def red(msg: str) -> None:
@@ -195,8 +231,14 @@ def step_roster(dry: bool) -> pd.DataFrame | None:
         print(f"roster (dry run): {len(r)} players, {_per_team(r)}, {int(r['two_way'].sum())} two-way")
         return r
     wrote = C.write_parquet(r, path, if_changed=True)
+    # The dated snapshot: who was on each team, which a 2026-27 box no longer
+    # says (step 3 rebuilds a box's inactive rows from it). Dated by the run's
+    # own ET date, never --date: it is the roster as pulled now.
+    snap = S.roster_snapshot_path(now_et().date())
+    snapped = C.write_parquet(r[S.ROSTER_SNAPSHOT_COLS].reset_index(drop=True), snap, if_changed=True)
     print(f"roster: {len(r)} players, {_per_team(r)}, {int(r['two_way'].sum())} two-way "
-          f"({'updated' if wrote else 'unchanged'})")
+          f"({'updated' if wrote else 'unchanged'}); snapshot {snap.name} "
+          f"({'updated' if snapped else 'unchanged'})")
     return r
 
 
@@ -212,8 +254,153 @@ def _tip_age(g, now: dt.datetime) -> dt.timedelta:
     return dt.timedelta(days=365) if pd.isna(tip) else now - tip.to_pydatetime()
 
 
+def report_store() -> INJ.ReportStore:
+    """The run's one in-memory report store (nothing under cache/ is written),
+    shared by steps 3 and 4 so a slot fetched for one is not fetched again."""
+    global REPORTS
+    if REPORTS is None:
+        REPORTS = INJ.ReportStore(persist=False)
+    return REPORTS
+
+
+class NoRoster(Exception):
+    """No roster snapshot can say who else was on a team: a box listing only
+    its active players cannot be ingested yet."""
+
+
+class OncePerSlot:
+    """A report getter that asks the store about each slot ONCE per run, its
+    answer (a report, None for absent, or the parse error) remembered: the
+    backlog's games share slots, and ReportStore alone re-probes a recent
+    absent slot every time."""
+
+    def __init__(self, store: INJ.ReportStore):
+        self.store, self.seen = store, {}
+
+    def __call__(self, slot):
+        if slot.filename not in self.seen:
+            try:
+                self.seen[slot.filename] = self.store.get(slot)
+            except ValueError as e:              # a PDF that does not parse stays that way
+                self.seen[slot.filename] = e
+        got = self.seen[slot.filename]
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+
+class Rebuild:
+    """Step 3's rebuild of the inactive rows of a box that lists none
+    (sources.box.rebuild_inactives). Snapshots, names and reports are read on
+    first use only, so a run of old-format boxes reads none of them."""
+
+    def __init__(self, season: str, sched: pd.DataFrame, first_day: dt.date):
+        self.season, self.sched, self.first_day = season, sched, first_day
+        self._known = None
+        self._getter = None
+        self._tables: dict[str, tuple] = {}
+        self._blocked: str | None = None
+        self._run: list[pd.DataFrame] = []
+        self._listings = None
+
+    def known(self) -> pd.DataFrame:
+        if self._known is None:
+            self._known = S.known_names(self.season)
+        return self._known
+
+    def boxes(self, parsed: list[tuple[pd.DataFrame, str]]) -> None:
+        """This run's parsed boxes, (participation rows, ET date) each: with
+        the committed ones (state.box_listings) they are the evidence that a
+        snapshot is stale for a player (box.rebuild_inactives' elsewhere)."""
+        self._run = [p[["person_id", "team"]].assign(et_date=d) for p, d in parsed]
+        self._listings = None
+
+    def listings(self) -> pd.DataFrame:
+        if self._listings is None:
+            frames = [f for f in [S.box_listings(self.season), *self._run] if len(f)]
+            self._listings = (pd.concat(frames, ignore_index=True) if frames
+                              else pd.DataFrame(columns=S.LISTING_COLS))
+        return self._listings
+
+    def elsewhere(self, roster_date: dt.date, game_date: dt.date) -> pd.DataFrame:
+        """(person_id, team) of every box listing dated between the snapshot's
+        date and the game's, both included."""
+        lo, hi = sorted((roster_date, game_date))
+        ev = self.listings()
+        on = (ev["et_date"] >= lo.isoformat()) & (ev["et_date"] <= hi.isoformat())
+        return ev.loc[on, ["person_id", "team"]]
+
+    def listed(self, g, tip) -> tuple[pd.DataFrame | None, str]:
+        """(the game's rows of the last real report before REBUILD_HORIZON,
+        where it came from) through horizons, the training snapshots' own
+        functions. No report, a blocked host or a PDF that does not parse is
+        (None, why): reasons are then INACTIVE_UNLISTED, never a failure."""
+        if self._blocked:
+            return None, f"no report (the report host is blocked: {self._blocked})"
+        if self._getter is None:
+            self._getter = OncePerSlot(report_store())
+            self._frame = HZ.schedule_frame(self.sched)
+            self._real = HZ.real_report(self._frame)
+        cut = HZ.cutoff_for(REBUILD_HORIZON, tip)
+        try:
+            found = HZ.report_at(cut, self._getter, accept=self._real)
+        except H.Blocked as e:
+            self._blocked = str(e)
+            print(f"WARN finals: the injury report host is blocked ({e}): the rest of this run's "
+                  f"rebuilt inactive rows carry {box.UNLISTED}")
+            return None, f"no report (the report host is blocked: {e})"
+        except ValueError as e:
+            # The newest candidate does not parse: never an older report
+            # instead (horizons.snapshot_games' rule).
+            return None, f"no report (the newest before {_et(cut)} ET does not parse: {e})"
+        except H.FetchError as e:
+            return None, f"no report ({type(e).__name__}: {e})"
+        if found is None:
+            return None, f"no report titled before {_et(cut)} ET"
+        slot, rep = found
+        if slot.url not in self._tables:
+            self._tables[slot.url] = HZ.report_tables(rep, self._frame)
+        kept, teams = self._tables[slot.url]
+        rows, _ = HZ.game_states(g, {"game_id": g["game_id"], "horizon": REBUILD_HORIZON,
+                                     "cutoff_utc": cut}, kept, teams, rep.meta["report_ts_et"])
+        return pd.DataFrame(rows), f"the {_et(rep.meta['report_ts_et'])} ET report"
+
+    def __call__(self, part: pd.DataFrame, g, tip) -> tuple[pd.DataFrame, str]:
+        """(the game's participation rows with its inactive rows rebuilt, the
+        log line). Raises NoRoster when no snapshot qualifies."""
+        at = S.roster_for_game(self.season, g["game_date"], self.first_day)
+        if at is None:
+            raise NoRoster(f"no roster snapshot of {self.season} on or after its first game day "
+                           f"{self.first_day} ({S.roster_snapshot_path(g['game_date']).parent})")
+        listed, whence = self.listed(g, tip)
+        rows, info = box.rebuild_inactives(part, at.roster, listed, known=self.known(),
+                                           roster_after=at.after,
+                                           elsewhere=self.elsewhere(at.date, g["game_date"]))
+        which = ("the earliest snapshot after the game: the backlog" if at.after
+                 else "the latest snapshot on or before the game")
+        per = []
+        for team in (g["away"], g["home"]):
+            c = info[team]
+            bits = [f"{c['listed']} listed", f"{c['unlisted']} unlisted"]
+            if c["left_since"]:
+                bits.append(f"{c['left_since']} left since")
+            if c["elsewhere"]:
+                bits.append(f"{c['elsewhere']} on the roster kept off: another team's box "
+                            f"lists them between the snapshot and the game")
+            if c["ineligible"]:
+                bits.append(f"{c['ineligible']} two-way left out (ineligible after the regular season)")
+            per.append(f"{team} {c['rebuilt']} ({', '.join(bits)})")
+        n = sum(info[t]["rebuilt"] for t in (g["away"], g["home"]))
+        line = (f"finals: {g['game_id']} {g['away']} at {g['home']} ({g['game_date']}): the box lists "
+                f"no inactive player; {n} rebuilt from the {at.date} roster ({which}) minus the box, "
+                f"reasons from {whence}: {'; '.join(per)}")
+        if info["unresolved"]:
+            line += (f"; {len(info['unresolved'])} report name(s) resolved to nobody: "
+                     f"{', '.join(info['unresolved'][:4])}")
+        return rows, line
+
+
 def step_finals(sched: pd.DataFrame, today: dt.date, dry: bool) -> None:
-    from bucketlib.sources import box  # participation parser (status, starters, reasons)
     # The state games (serve._state_games: RS and PI with both teams, postponed
     # excluded), as schedule rows (game_date stays a python date).
     state = sched[sched["game_id"].isin(set(V._state_games(sched)["game_id"]))
@@ -227,7 +414,9 @@ def step_finals(sched: pd.DataFrame, today: dt.date, dry: bool) -> None:
     todo = finals[~finals["game_id"].isin(have)]
     now = now_utc()
     print(f"finals: {len(finals)} final state games, {len(have)} ingested, {len(todo)} to fetch")
+    rebuild = Rebuild(season, sched, min(state["game_date"]))
     by_date: dict[dt.date, dict[str, list]] = {}
+    parsed = []
     # Each game stands alone: whatever one box does, every other game of the
     # run is still parsed and written (one stuck box must never stop the
     # league's ingestion). Only a Blocked host ends the loop.
@@ -261,6 +450,31 @@ def step_finals(sched: pd.DataFrame, today: dt.date, dry: bool) -> None:
         except Exception as e:  # noqa: BLE001 - one strange payload must never throw away the night
             red(f"parse failed for {gid}: {type(e).__name__}: {e}")
             continue
+        parsed.append((g, payload, part, meta, pl, tl))
+    # Every box of the run is parsed before any inactive list is rebuilt: a
+    # later box of the backlog is evidence about an earlier game (Rebuild.boxes).
+    rebuild.boxes([(part, meta["et_date"]) for _, _, part, meta, _, _ in parsed])
+    for g, payload, part, meta, pl, tl in parsed:
+        gid = g["game_id"]
+        if not box.lists_inactives(payload):
+            # The 2026-27 format: actives only. Ingested without its inactive
+            # rows, the game would read as "not on the team" for every injured
+            # player, for good (a final game is never re-fetched).
+            try:
+                part, line = rebuild(part, g, meta["tip_utc"].to_pydatetime())
+            except NoRoster as e:
+                why = (f"box score of {gid} lists no inactive player and there is {e}: "
+                       f"not ingested (retried next run)")
+                if dry:
+                    print(f"WARN finals (dry run): {why}")
+                else:
+                    red(why)
+                continue
+            except Exception as e:  # noqa: BLE001 - one game's rebuild never stops the others
+                red(f"inactive rows of {gid} could not be rebuilt ({type(e).__name__}): {e}; "
+                    f"not ingested (retried next run)")
+                continue
+            print(line)
         for frame, df in (("pg", pl), ("tg", tl), ("part", part), ("games", pd.DataFrame([meta]))):
             df = df.copy()
             df["season"] = season
@@ -322,7 +536,7 @@ def step_injuries(sched: pd.DataFrame, dry: bool):
     INJURY_SLOTS slot times (written as the committed pair), else the
     committed one, else None. PDFs go through an in-memory store: nothing
     under cache/ is written."""
-    store = INJ.ReportStore(persist=False)
+    store = report_store()
     try:
         sel = INJ.latest_report(now_et(), getter=store.get, max_slots=INJURY_SLOTS,
                                 accept=HZ.real_report(sched))
@@ -436,6 +650,70 @@ def oversized(games: pd.DataFrame, roster: pd.DataFrame, cap: int = MAX_TEAM_ROW
     return {str(t): int(k) for t, k in n.items() if k > cap}
 
 
+def first_game_day(sched: pd.DataFrame, season: str) -> dt.date | None:
+    """The ET date of `season`'s first regular-season game in the schedule
+    (serve._state_games: postponed games are not games), or None."""
+    g = V._state_games(sched)
+    g = g[(g["game_type"] == "RS") & ((g["season"] == season) if "season" in g else True)]
+    return None if g.empty else g["game_date"].min().date()
+
+
+def espn_check(d: dt.date, team: str, n: int, roster: pd.DataFrame) -> str:
+    """One line on an in-season team with more than MAX_TEAM_ROWS roster rows:
+    its playerIndex rows against ESPN's roster (espn.team_roster, matched by
+    espn.match_athletes, team-scoped names). The same players is an info line;
+    any difference, or no ESPN roster to compare, a WARN naming the players
+    only one source lists. Nothing is dropped either way. One ESPN fetch per
+    team per run (ESPN_ROSTERS)."""
+    from bucketlib.sources import espn
+    if team not in ESPN_ROSTERS:
+        try:
+            ESPN_ROSTERS[team] = espn.team_roster(team)
+        except UNUSABLE as e:
+            ESPN_ROSTERS[team] = e
+    theirs = ESPN_ROSTERS[team]
+    head = f"projections {d}: {team} has {n} players in the roster pull (more than {MAX_TEAM_ROWS})"
+    if isinstance(theirs, Exception):
+        return (f"WARN {head}, and ESPN's roster could not be read to check them "
+                f"({type(theirs).__name__}): {theirs}; projected as listed")
+    name = roster["name"] if "name" in roster.columns else roster["player_name"]
+    ours = pd.DataFrame({"person_id": roster["person_id"], "name": name, "team": roster["team"],
+                         "birthdate": None})
+    ours = ours[ours["team"] == team]
+    try:
+        m = espn.match_athletes(theirs, ours)
+    except ValueError as e:
+        return f"WARN {head}, and its names do not match ESPN's one to one: {e}; projected as listed"
+    matched = set(m["person_id"].dropna().astype("int64"))
+    only_ours = sorted(ours.loc[~ours["person_id"].isin(matched), "name"])
+    unmatched = set(m.loc[m["person_id"].isna(), "espn_athlete_id"])
+    only_theirs = sorted(theirs.loc[theirs["espn_athlete_id"].isin(unmatched), "full_name"])
+    if not only_ours and not only_theirs:
+        return f"{head}; ESPN's roster lists the same {len(theirs)}: projected as listed"
+    return (f"WARN {head}, ESPN's {len(theirs)}: only the playerIndex lists "
+            f"{', '.join(only_ours) or 'nobody'}; only ESPN lists {', '.join(only_theirs) or 'nobody'}. "
+            f"Projected as the playerIndex lists them (nothing dropped)")
+
+
+def check_big_rosters(d: dt.date, today: dt.date, sched: pd.DataFrame, roster: pd.DataFrame,
+                      big: dict[str, int]) -> None:
+    """The roster-size guard for `d`'s teams with more than MAX_TEAM_ROWS rows
+    (oversized). Until the day after the regular season's first game day
+    such a pull is camp rosters not cut yet: RED today, a warning tomorrow
+    (flag). From then on it is an in-season roster over the cap (LAC listed
+    19 on 2026-11-02, and so did ESPN: a hardship signing), told apart from a
+    feed error by ESPN's roster (espn_check): never RED, nothing dropped."""
+    first = first_game_day(sched, season_for_date(d))
+    if first is None or today < first + dt.timedelta(days=1):
+        flag(d, today, f"projections {d}: the roster pull lists more than {MAX_TEAM_ROWS} players for "
+                       + ", ".join(f"{t} {n}" for t, n in sorted(big.items()))
+                       + " (camp rosters not cut yet?): waived players are projected and shift "
+                         "their teammates' team features")
+        return
+    for team, n in sorted(big.items()):
+        print(espn_check(d, team, n, roster))
+
+
 def _title(report) -> pd.Timestamp | None:
     """A report's title time (report_ts_et), or None for no report."""
     if report is None:
@@ -513,10 +791,7 @@ def project_date(d: dt.date, games: pd.DataFrame, sched: pd.DataFrame, roster: p
         return
     big = oversized(live, roster)
     if big:
-        flag(d, today, f"projections {d}: the roster pull lists more than {MAX_TEAM_ROWS} players for "
-                       + ", ".join(f"{t} {n}" for t, n in sorted(big.items()))
-                       + " (camp rosters not cut yet?): waived players are projected and shift "
-                         "their teammates' team features")
+        check_big_rosters(d, today, sched, roster, big)
     feats, names = history_features(d, games, roster, sched, seeds)
     stamp = P.history_stamp(season, d)
     if not dry:
@@ -617,6 +892,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     RED.clear()
+    global REPORTS
+    REPORTS = None
+    ESPN_ROSTERS.clear()
     real = now_et().date()        # util.today_et, through the one clock the tests pin
     today = dt.date.fromisoformat(args.date) if args.date else real
     if today > real:

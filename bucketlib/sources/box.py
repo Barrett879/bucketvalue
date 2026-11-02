@@ -62,6 +62,21 @@ TRAPS, each one seen in a real payload:
   - V3 answers an id it does not know with HTTP 200 and an all-null
     boxScoreSummary (gameId None, gameStatus 0; live 0021601300). That is
     Absent, not a malformed payload: it must not stop a run.
+  - THE 2026-27 cdn BOX LISTS ACTIVE PLAYERS ONLY. Through 2025-26 every
+    listed player per team (median 18 in 2025-26) came with status ACTIVE or
+    INACTIVE, the inactive ones with a notPlayingReason; from the 2026-27
+    opener a box lists the dressed players only (11-16 a team, median 13, in
+    the first 92 games) and no INACTIVE row anywhere. Training's availability
+    history has a row for every listed player in every game, so a box that
+    lists no INACTIVE player on either side (lists_inactives) gets its
+    inactive rows REBUILT (rebuild_inactives): the team's roster at game time
+    minus the box, each with the reason the last injury report before tip
+    gives him (REPORT_REASON_CODES, the cdn vocabulary) or UNLISTED, source
+    ROSTER_MINUS_BOX. A box that lists an inactive player on either side is
+    the old format and is never touched (three 2025-26 team-games listed none,
+    BOS twice in the regular season and CHA in the play-in, 15 dressed each,
+    while the other side listed some). In a play-in or playoff game the
+    roster's two-way players get no row (TWO_WAY_INELIGIBLE).
 
 THE GAME LIST (the denominator of every season table), by season state:
 
@@ -101,7 +116,12 @@ CDN_FIRST_SEASON = "2019-20"     # older ids are S3-absent on the CDN
 RAW_SUBDIR = "raw/box"
 
 STATUSES = ("played", "dnp", "inactive")
-SOURCES = ("cdn", "v3")
+# A rebuilt inactive row (rebuild_inactives): a rostered player the box does
+# not list. Its reason codes are cdn's vocabulary; its game's source is cdn.
+ROSTER_MINUS_BOX = "roster_minus_box"
+SOURCES = ("cdn", "v3", ROSTER_MINUS_BOX)
+# The reason of a rebuilt inactive row the last report before tip does not name.
+UNLISTED = "INACTIVE_UNLISTED"
 # Why a listed player did not play: '' (he played), 'coach' (a healthy scratch:
 # the reason names the coach, or a cdn ACTIVE row with no reason, see
 # absence_kind), 'unavailable' (injury, illness, rest, personal, suspension,
@@ -339,6 +359,10 @@ def absence_kind(status: str, reason_code: str, reason_text: str, source: str) -
         raise ValueError(f"unknown status {status!r}")
     code, text = reason_code or "", (reason_text or "").lower()
     if source == "cdn":
+        if code == UNLISTED:
+            # A rebuilt inactive row no report names: no reason is known,
+            # exactly like a cdn INACTIVE row with an empty reason.
+            return "unknown"
         if not code:
             # The cdn never says DNP_COACH outside 2019-20: an ACTIVE player
             # who did not play with no reason is its coach's decision. On the
@@ -533,6 +557,269 @@ def _frame(rows: list[tuple]) -> pd.DataFrame:
                       "is_home": bool})
 
 
+# ── Inactive rows the box no longer lists (the 2026-27 cdn format) ───────────
+# The cdn notPlayingReason of an inactive row whose player the injury report
+# names, by the report's reason category (injury.REASON_CATS, every one of
+# them: a new category raises in report_reason until it is mapped here). Read
+# off 2025-26, where both exist: the t_15 report's category of every INACTIVE
+# row it names against the box's own code (INACTIVE_INJURY 6,393 of 6,563
+# from injury_illness, INACTIVE_GLEAGUE_TWOWAY 2,667 of 3,184 from
+# g_league_two_way, and so on). 'g_league' (2018-19's bare "G League Team")
+# has no cdn twin and reads as an assignment. A listing with no reason, or one
+# no rule classifies, gets cdn's empty reason (an INACTIVE row without one).
+REPORT_REASON_CODES = {
+    "injury_illness": "INACTIVE_INJURY",
+    "concussion_protocol": "INACTIVE_CONCUSSION_PROTOCOL",
+    "reconditioning": "INACTIVE_RETURN_TO_COMPETITION_RECONDITIONING",
+    "health_protocols": "INACTIVE_HEALTH_AND_SAFETY_PROTOCOLS",
+    "g_league_two_way": "INACTIVE_GLEAGUE_TWOWAY",
+    "g_league_assignment": "INACTIVE_GLEAGUE_ON_ASSIGNMENT",
+    "g_league": "INACTIVE_GLEAGUE_ON_ASSIGNMENT",
+    "not_with_team": "INACTIVE_NOT_WITH_TEAM",
+    "personal": "INACTIVE_PERSONAL",
+    "suspension": "INACTIVE_LEAGUE_SUSPENSION",
+    "coach_decision": "INACTIVE_COACH",
+    "rest": "INACTIVE_REST",
+    "trade_pending": "INACTIVE_TRADE",
+    "unspecified": "",
+    "other": "",
+}
+# The report rows rebuild_inactives reads: horizons.game_states' player rows
+# (one game, both teams).
+REPORT_COLUMNS = ["team", "player_raw", "status", "reason_cat", "reason_raw"]
+# The games (season_type_of) a two-way contract cannot play in: after the
+# regular season. A rebuilt inactive list of such a game leaves the roster's
+# two-way players out (rebuild_inactives), the way the training listing
+# mostly does: in 2021-22..2025-26, 38 of 60 play-in team-games and 824 of
+# 844 playoff team-games listed 15 players or fewer (in 2025-26's play-in
+# GSW, LAC, PHX, POR, CHA and ORL listed 15 and left out the two or three
+# two-way players their last regular-season box had listed). The other
+# play-in boxes listed theirs: inactive with INACTIVE_GLEAGUE_TWOWAY,
+# INACTIVE_INELIGIBLE_TO_PLAY, INACTIVE_COACH or no reason, or even active.
+# (2019-20 and 2020-21 let two-way players into the postseason: 16-17 a team.)
+TWO_WAY_INELIGIBLE = ("PlayIn", "Playoffs")
+
+
+def lists_inactives(payload: dict) -> bool:
+    """Does this cdn box list an INACTIVE player on either side? Every cdn box
+    of a regular-season or play-in game through 2025-26 does; no 2026-27 box
+    does (it lists the dressed players only). The test is per GAME: an
+    old-format side with nobody inactive (three 2025-26 team-games: BOS twice
+    in the regular season and CHA in the play-in, 15 dressed each, the
+    opponent listing its inactives as usual) is not the new format, and its
+    game is parsed exactly as before."""
+    g = payload.get("game") if isinstance(payload, dict) else None
+    if not isinstance(g, dict):
+        raise ValueError("cdn payload has no game object")
+    return any(p.get("status") == "INACTIVE"
+               for side in ("homeTeam", "awayTeam")
+               for p in ((g.get(side) or {}).get("players") or []))
+
+
+def report_reason(status, reason_cat, reason_raw) -> tuple[str, str]:
+    """(reason_code, reason_text) of a rebuilt inactive row whose player the
+    report names: the cdn code of his report category (REPORT_REASON_CODES)
+    and the report's own words after his status ('Out: Injury/Illness - Left
+    Ankle; Sprain'). A category the table does not map raises."""
+    if reason_cat not in REPORT_REASON_CODES:
+        raise ValueError(f"report reason category {reason_cat!r} has no cdn code: "
+                         f"map it in box.REPORT_REASON_CODES")
+    reason = _clean(reason_raw)
+    text = _clean(status) + (f": {reason}" if reason and reason != "-" else "")
+    return REPORT_REASON_CODES[reason_cat], text
+
+
+def _first_last(last_first: str) -> str:
+    """'Butler III, Jimmy' -> 'Jimmy Butler III' (a name for a player the
+    report names whom no roster or history spells)."""
+    last, sep, first = str(last_first).partition(",")
+    return _clean(f"{first} {last}") if sep else _clean(last_first)
+
+
+def _league_index(frames: list[pd.DataFrame]):
+    """An index of every (person_id, player_name) in `frames`, with no team
+    scoping: the second chance of a report row no roster of its game holds."""
+    from ..names import NameIndex
+    ix = NameIndex()
+    for f in frames:
+        for pid, name in zip(f["person_id"], f["player_name"]):
+            if isinstance(name, str) and name:
+                ix.add(name, int(pid))
+    return ix
+
+
+def _report_people(gid: str, listed: pd.DataFrame | None, rost: pd.DataFrame,
+                   part: pd.DataFrame, known: pd.DataFrame | None,
+                   roster_after: bool) -> pd.DataFrame:
+    """The game's report rows (REPORT_COLUMNS) with person_id (Int64, NA when
+    unresolved) and how ('team': livectx.resolve_names against the team's
+    roster and box players under every spelling, the serving rule; 'league':
+    an exact or alias match among every person `known`, the rosters and the
+    box, for an Out row of a roster taken after the game only)."""
+    cols = REPORT_COLUMNS + ["person_id", "how"]
+    if listed is None or len(listed) == 0:
+        return pd.DataFrame({c: pd.Series(dtype="Int64" if c == "person_id" else object)
+                             for c in cols})
+    missing = [c for c in REPORT_COLUMNS if c not in listed.columns]
+    if missing:
+        raise ValueError(f"{gid}: report rows lack {missing}")
+    from .. import livectx
+    teams_ = set(part["team"])
+    inj = listed.loc[listed["team"].isin(teams_), REPORT_COLUMNS].reset_index(drop=True)
+    cand = pd.concat([rost.loc[rost["team"].isin(teams_)], part[["person_id", "team", "player_name"]]],
+                     ignore_index=True).drop_duplicates(["person_id", "team"])
+    res = livectx.resolve_names(inj.assign(game_id=gid), cand.assign(game_id=gid), known)
+    res["how"] = [("team" if p == p else None) for p in res["person_id"]]
+    todo = res["person_id"].isna() & (res["status"] == "Out")
+    if roster_after and todo.any():
+        frames = [rost, part[["person_id", "player_name"]]]
+        if known is not None and len(known):
+            frames.append(known)
+        ix = _league_index(frames)
+        for i in res.index[todo]:
+            m = ix.resolve_last_first(res.at[i, "player_raw"])
+            if m.value is not None and m.how in ("exact", "alias"):
+                res.at[i, "person_id"], res.at[i, "how"] = float(m.value), "league"
+    res["person_id"] = res["person_id"].astype("Int64")
+    return res[cols]
+
+
+def rebuild_inactives(part: pd.DataFrame, roster: pd.DataFrame, listed: pd.DataFrame | None = None,
+                      known: pd.DataFrame | None = None, roster_after: bool = False,
+                      elsewhere: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
+    """A box that lists no inactive player (lists_inactives is False) with its
+    inactive rows rebuilt: the ONE definition the bot ingests by.
+
+    part          parse_cdn rows of one such game
+    roster        the roster at game time (state.roster_for_game: the cdn
+                  playerIndex the bot pulled; person_id, team, name or
+                  player_name, and two_way, which only a play-in or playoff
+                  game reads and then requires), every team
+    listed        the game's rows of the last injury report before tip
+                  (horizons.game_states player rows, REPORT_COLUMNS), None
+                  when there is no report
+    known         (person_id, player_name): every spelling of every person
+                  the report might name (seed names, the season's
+                  partitions, the roster snapshots)
+    roster_after  the roster was taken after the game's ET date (the
+                  backlog: a first run ingests every game since the opener
+                  with that day's roster)
+    elsewhere     (person_id, team): every box listing dated between the
+                  roster's date and the game's date, both included (any game
+                  the state or the run holds; rebuilt rows are no evidence)
+
+    Every player on a team's roster who is not in the box (either side) gets a
+    row: status 'inactive', no seconds, no start, the cdn reason code of his
+    report listing for that team (report_reason) or UNLISTED, source
+    ROSTER_MINUS_BOX, jersey '' (the snapshot carries none). Unless a box in
+    `elsewhere` lists him for another team and the team's report does not
+    list him: then the roster is stale for him (he joined after the game, or
+    left before it) and he gets no row. A box is the stronger evidence: no
+    2025-26 player was listed by two teams on one date, and with a season-end
+    roster this is what put a traded player down as absent for his future
+    team on nights he was playing for his old one (p_play 0.96 -> 0.18). With a roster
+    taken AFTER the game, a player the team's report lists Out who is neither
+    in the box nor on its roster was on the team at tip and has left since:
+    he gets a row too (resolved team-scoped first, then among every known
+    person by an exact or alias match only), and a player the report places on
+    one team is never rebuilt for the other. With a roster taken on or before
+    the game's date the roster is the authority: a report name it does not
+    hold (2025-26 boxes left out a few injured players their report listed,
+    e.g. Finney-Smith and Tate for HOU on opening night) adds nothing. In a
+    play-in or playoff game (TWO_WAY_INELIGIBLE) a two-way player on the
+    team's roster cannot play and gets no row, whatever the report says of
+    him; one the box lists keeps his box row like everyone else.
+
+    Returns (rows, info): the game's rows, each team's box rows followed by its
+    rebuilt rows (check_participation holds), and per team the counts
+    rebuilt / listed / unlisted / left_since / elsewhere (roster players not
+    rebuilt because a box put them on another team) / ineligible (roster
+    two-way players a play-in or playoff game leaves out) plus the report rows
+    that resolved to nobody ('unresolved', player_raw)."""
+    ids = part["game_id"].unique()
+    if len(ids) != 1:
+        raise ValueError(f"rebuild_inactives takes one game's rows, got {list(ids)[:3]}")
+    gid = str(ids[0])
+    if (part["status"] == "inactive").any():
+        raise ValueError(f"{gid}: the box lists inactive players: it is the old format, "
+                         f"never rebuilt (lists_inactives)")
+    sides = part.drop_duplicates("team").set_index("team")["is_home"]
+    if len(sides) != 2:
+        raise ValueError(f"{gid}: expected two teams, got {sorted(sides.index)}")
+    names = roster["name"] if "name" in roster.columns else roster["player_name"]
+    rost = pd.DataFrame({"person_id": roster["person_id"].astype("int64").to_numpy(),
+                         "team": roster["team"].astype(str).to_numpy(),
+                         "player_name": names.astype(str).to_numpy()})
+    two_ways: set = set()
+    if season_type_of(gid) in TWO_WAY_INELIGIBLE:
+        # A null would read as "not two-way" in silence, and that player
+        # would come back as an inactive row the training listing lacks.
+        if "two_way" not in roster.columns or roster["two_way"].isna().any():
+            raise ValueError(f"{gid}: a {season_type_of(gid)} game needs every roster row's two_way "
+                             f"flag (two-way players cannot play in it)")
+        two_ways = set(rost.loc[roster["two_way"].astype(bool).to_numpy(), "person_id"])
+    dup = rost.loc[rost["person_id"].duplicated(), "person_id"]
+    if len(dup):
+        raise ValueError(f"the roster lists {sorted(set(dup))[:5]} twice")
+    absent = sorted(set(sides.index) - set(rost["team"]))
+    if absent:
+        raise ValueError(f"{gid}: the roster has nobody for {absent}: its inactive list cannot "
+                         f"be rebuilt")
+    season = part["season"].iloc[0]
+    in_box = set(part["person_id"].astype("int64"))
+    rep = _report_people(gid, listed, rost, part, known, roster_after)
+    listing: dict[tuple[str, int], object] = {}
+    for r in rep[rep["person_id"].notna()].itertuples():
+        listing.setdefault((r.team, int(r.person_id)), r)
+    name_of = dict(zip(rost["person_id"], rost["player_name"]))
+    if known is not None and len(known):
+        for pid, n in zip(known["person_id"], known["player_name"]):
+            if isinstance(n, str) and n:
+                name_of.setdefault(int(pid), n)
+
+    claimed: dict[int, set] = {}
+    for team, pid in listing:
+        claimed.setdefault(pid, set()).add(team)
+    out, info = [], {"unresolved": sorted(set(rep.loc[rep["person_id"].isna(), "player_raw"]))}
+    for team in sorted(sides.index, key=lambda t: not sides[t]):       # home side first, like parse_cdn
+        on_roster = set(rost.loc[rost["team"] == team, "person_id"])
+        mine = on_roster - in_box
+        ineligible = mine & two_ways                  # none in a regular-season game
+        mine -= ineligible
+        if elsewhere is not None and len(elsewhere):
+            away = set(elsewhere.loc[elsewhere["team"] != team, "person_id"].astype("int64"))
+            stale = {p for p in mine if p in away and (team, p) not in listing}
+            mine -= stale
+        else:
+            stale = set()
+        left = set()
+        if roster_after:
+            # The report (titled before tip) places him on the other team of
+            # this game: he was theirs then, whatever the later roster says.
+            mine = {p for p in mine if claimed.get(p, {team}) == {team}}
+            left = {p for (t, p), r in listing.items()
+                    if t == team and r.status == "Out" and claimed[p] == {team}
+                    and p not in in_box and p not in on_roster}
+        rows = []
+        for pid in sorted(mine | left):
+            hit = listing.get((team, pid))
+            code, text = (report_reason(hit.status, hit.reason_cat, hit.reason_raw)
+                          if hit is not None else (UNLISTED, ""))
+            name = name_of.get(pid) or (_first_last(hit.player_raw) if hit is not None else "")
+            rows.append((season, gid, team, bool(sides[team]), int(pid), _clean(name), "",
+                         "inactive", False, 0, code, text,
+                         absence_kind("inactive", code, text, "cdn"), ROSTER_MINUS_BOX))
+        info[team] = {"rebuilt": len(rows), "listed": sum(r[10] != UNLISTED for r in rows),
+                      "unlisted": sum(r[10] == UNLISTED for r in rows), "left_since": len(left),
+                      "elsewhere": len(stale), "ineligible": len(ineligible)}
+        out.append(part[part["team"] == team])
+        if rows:
+            out.append(_frame(rows))
+    df = pd.concat(out, ignore_index=True)
+    check_participation(df)
+    return df, info
+
+
 # ── Invariants ───────────────────────────────────────────────────────────────
 def check_participation(df: pd.DataFrame, ot: int | None = None) -> None:
     """Raise ValueError (with the game id) on any broken invariant:
@@ -569,6 +856,8 @@ def check_participation(df: pd.DataFrame, ot: int | None = None) -> None:
         np_ = g[g["status"] != "played"]
         if (np_["played_seconds"] != 0).any() or np_["starter"].any():
             raise ValueError(f"{gid}: a non-player has seconds or a starter flag")
+        if ((g["source"] == ROSTER_MINUS_BOX) & (g["status"] != "inactive")).any():
+            raise ValueError(f"{gid}: a rebuilt row ({ROSTER_MINUS_BOX}) that is not inactive")
         if (g.loc[g["status"] == "played", "reason_code"] != "").any():
             raise ValueError(f"{gid}: a player who played carries a reason code")
         for team, t in g.groupby("team"):
@@ -625,12 +914,14 @@ def check_table(part: pd.DataFrame, games: pd.DataFrame, season: str | None = No
     if season is not None and ((part["season"] != season).any() or (games["season"] != season).any()):
         raise ValueError(f"rows from another season in the {season} table")
     g = games.set_index("game_id")
+    # A rebuilt inactive row (ROSTER_MINUS_BOX) belongs to a cdn game.
+    row_source = part["source"].where(part["source"] != ROSTER_MINUS_BOX, "cdn")
     checks = [
         (~part["status"].isin(STATUSES), "unknown status"),
         (~part["source"].isin(SOURCES), "unknown source"),
         (~part["absence_kind"].isin(ABSENCE_KINDS), "unknown absence_kind"),
         (part["season"] != part["game_id"].map(g["season"]), "row season differs from its game"),
-        (part["source"] != part["game_id"].map(g["source"]), "row source differs from its game"),
+        (row_source != part["game_id"].map(g["source"]), "row source differs from its game"),
         (part["played_seconds"] < 0, "negative seconds"),
     ]
     played = part["status"] == "played"
@@ -642,6 +933,8 @@ def check_table(part: pd.DataFrame, games: pd.DataFrame, season: str | None = No
          "a non-player has seconds or a starter flag"),
         (played & (part["reason_code"] != ""), "a player who played carries a reason code"),
         (played != (part["absence_kind"] == ""), "absence_kind must be '' exactly for players"),
+        ((part["source"] == ROSTER_MINUS_BOX) & (part["status"] != "inactive"),
+         f"a rebuilt row ({ROSTER_MINUS_BOX}) that is not inactive"),
         (part["starter"] & (part["played_seconds"] <= 0), "a starter with no playing time"),
     ]
     for mask, what in checks:

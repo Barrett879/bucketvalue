@@ -1,7 +1,13 @@
 """Failure classification: each case below looked like 'no data' somewhere."""
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from bucketlib import http as H
+
+REPO = Path(__file__).resolve().parent.parent
 
 AKAMAI = b"<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY>... errors.edgesuite.net/18.d6</BODY></HTML>"
 S3 = b"<?xml version='1.0'?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"
@@ -51,3 +57,15 @@ def test_measure_type_must_be_explicit():
 def test_result_sets_keeps_columns_on_empty():
     rs = H.result_sets({"resultSets": [{"name": "X", "headers": ["A", "B"], "rowSet": []}]})
     assert list(rs["X"].columns) == ["A", "B"] and rs["X"].empty
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the CoreFoundation load is macOS only")
+def test_a_fresh_interpreter_imports_the_client():
+    """macOS 27: curl_cffi's extension needs CoreFoundation loaded first, and
+    nothing before bucketlib.http did that ("symbol not found in flat
+    namespace '_CFRelease'" unless pandas happened to be imported first).
+    A fresh interpreter that imports nothing else must import the client."""
+    code = "import sys; sys.path.insert(0, sys.argv[1]); import bucketlib.http; print('ok')"
+    r = subprocess.run([sys.executable, "-c", code, str(REPO)], capture_output=True, text=True,
+                       timeout=180, cwd=str(REPO))
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-800:]

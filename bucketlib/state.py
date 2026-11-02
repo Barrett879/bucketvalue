@@ -17,6 +17,7 @@ through build_seed and write_override):
   state/seed/{events,team_games,priors,schedule_dates,names}_v1.parquet
   state/seed/manifest_v1.json
   state/season/{season}/{pg,tg,part,games,odds}_{YYYY-MM-DD}.parquet
+  state/season/{season}/roster_{YYYY-MM-DD}.parquet   (roster_snapshot_path)
   state/season/{season}/override/{pg,tg,part,games}_{game_id}.parquet
   state/current/{schedule,roster,injury_players,injury_teams}_v1.parquet
   state/serve/{YYYY-MM-DD}/{features,projections}_v1.parquet
@@ -122,6 +123,55 @@ def odds_path(date) -> Path:
 
 def override_dir(season: str) -> Path:
     return season_dir(season) / "override"
+
+
+# ── Roster snapshots (what a box no longer says: who was on the team) ───────
+ROSTER_SNAPSHOT_COLS = ["person_id", "team", "two_way", "name"]
+SNAPSHOT_PREFIX = "roster"
+
+
+def roster_snapshot_path(date) -> Path:
+    """The roster the bot pulled (cdn playerIndex, ROSTER_SNAPSHOT_COLS) on one
+    ET date: state/season/{season}/roster_{YYYY-MM-DD}.parquet. The one place
+    the path is built: step_roster writes it (if_changed) on every run whose
+    pull succeeds, dated by the run's own ET date; roster_for_game reads it.
+    Since the 2026-27 cdn box lists only the players who dressed, this is what
+    says who else was on the team (sources.box.rebuild_inactives)."""
+    d = as_date(date)
+    return season_dir(season_for_date(d)) / f"{SNAPSHOT_PREFIX}_{d.isoformat()}.parquet"
+
+
+def roster_snapshot_dates(season: str) -> list[dt.date]:
+    """The ET dates of `season`'s roster snapshots, oldest first."""
+    n = len(SNAPSHOT_PREFIX) + 1
+    return [dt.date.fromisoformat(p.stem[n:]) for p in _partition_files(season_dir(season),
+                                                                         SNAPSHOT_PREFIX)]
+
+
+@dataclass
+class RosterAt:
+    """The snapshot a game's inactive list is rebuilt from: its rows, its ET
+    date, and whether it was taken AFTER the game's date (the backlog)."""
+    roster: pd.DataFrame
+    date: dt.date
+    after: bool
+
+
+def roster_for_game(season: str, game_date, first_day=None) -> RosterAt | None:
+    """The roster snapshot of `season` for a game on ET `game_date`: the latest
+    dated on or before it, else the earliest dated after it (after=True: the
+    backlog, a first run ingesting every game since the opener with that day's
+    roster). A snapshot dated before `first_day` (the season's first state
+    game day) holds camp rosters and is never used. None when no snapshot
+    qualifies."""
+    d = as_date(game_date)
+    lo = as_date(first_day) if first_day is not None else None
+    dates = [x for x in roster_snapshot_dates(season) if lo is None or x >= lo]
+    before = [x for x in dates if x <= d]
+    pick = max(before) if before else (min(dates) if dates else None)
+    if pick is None:
+        return None
+    return RosterAt(C.read_parquet(roster_snapshot_path(pick)), pick, pick > d)
 
 
 def as_date(d) -> dt.date:
@@ -274,6 +324,45 @@ def season_partitions(season: str) -> dict[str, pd.DataFrame]:
         frames = [f for f in (bot, over[key]) if len(f)]
         out[key] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return out
+
+
+def known_names(season: str) -> pd.DataFrame:
+    """(person_id, player_name): every spelling committed state holds, for
+    anyone: the seed's names (when committed), `season`'s partitions
+    (participation and stat lines, overrides included) and every roster
+    snapshot of the season. What a report name resolves against when no
+    roster of its game holds the player (sources.box.rebuild_inactives)."""
+    frames = [C.read_parquet(SEED_DIR / SEED_FILES["names"])]
+    parts = season_partitions(season)
+    frames += [parts[k] for k in ("participation", "player_games")]
+    for d in roster_snapshot_dates(season):
+        frames.append(C.read_parquet(roster_snapshot_path(d)).rename(columns={"name": "player_name"}))
+    frames = [f[["person_id", "player_name"]] for f in frames if f is not None and len(f)]
+    if not frames:
+        return pd.DataFrame({"person_id": pd.Series(dtype="int64"), "player_name": pd.Series(dtype=object)})
+    out = pd.concat(frames, ignore_index=True).dropna()
+    return out.astype({"person_id": "int64"}).drop_duplicates(ignore_index=True)
+
+
+LISTING_COLS = ["person_id", "team", "et_date"]
+
+
+def box_listings(season: str) -> pd.DataFrame:
+    """(person_id, team, et_date): every player a box score listed for a team
+    in `season`'s partitions (overrides included), whatever his status. The
+    rebuilt inactive rows (sources.box.ROSTER_MINUS_BOX) are inference, not
+    listings, and are left out. What says a roster snapshot is stale for a
+    player (sources.box.rebuild_inactives' `elsewhere`)."""
+    from .sources.box import ROSTER_MINUS_BOX
+    parts = season_partitions(season)
+    part, games = parts["participation"], parts["games"]
+    if part.empty or games.empty:
+        return pd.DataFrame({"person_id": pd.Series(dtype="int64"), "team": pd.Series(dtype=object),
+                             "et_date": pd.Series(dtype=object)})
+    part = part[part["source"] != ROSTER_MINUS_BOX]
+    out = part[["game_id", "person_id", "team"]].merge(games[["game_id", "et_date"]], on="game_id",
+                                                       validate="many_to_one")
+    return out[LISTING_COLS].astype({"person_id": "int64"}).reset_index(drop=True)
 
 
 def ingested_ids(season: str) -> set[str]:

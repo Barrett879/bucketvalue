@@ -219,6 +219,65 @@ def test_names_carry_every_spelling(state_dir):
     assert set(names.loc[names["person_id"] == 1, "player_name"]) == {"Player 1", "P. One"}
 
 
+def _snapshot(date: str, pids, team: str = "BOS") -> pd.DataFrame:
+    """A roster snapshot in the bot's shape (state.ROSTER_SNAPSHOT_COLS),
+    written where step_roster writes it."""
+    df = pd.DataFrame({"person_id": list(pids), "team": team, "two_way": False,
+                       "name": [f"Player {p}" for p in pids]})[S.ROSTER_SNAPSHOT_COLS]
+    C.write_parquet(df, S.roster_snapshot_path(date))
+    return df
+
+
+def test_roster_snapshots_are_dated_files_of_the_dates_season(state_dir):
+    assert S.roster_snapshot_path("2026-11-02") == \
+        S.STATE_DIR / "season" / "2026-27" / "roster_2026-11-02.parquet"
+    assert S.roster_snapshot_path(dt.date(2027, 1, 5)).parent == S.season_dir("2026-27")
+    with pytest.raises(TypeError, match="ET date"):
+        S.roster_snapshot_path(dt.datetime(2026, 11, 2, 1, 0))
+    assert not S.roster_snapshot_path("2026-11-02").parent.exists()    # creates nothing
+    assert S.roster_snapshot_dates("2026-27") == []
+    _snapshot("2026-11-02", [1])
+    _snapshot("2026-10-25", [1])
+    # Other files in the season directory are not snapshots.
+    C.write_parquet(pd.DataFrame({"game_id": ["x"]}), S.odds_path("2026-10-26"))
+    _write(_game("0022600001", "2026-10-21", season="2026-27"), "2026-10-21", season="2026-27")
+    (S.season_dir("2026-27") / ".roster_2026-10-27.parquet.tmp9").write_bytes(b"partial")
+    assert S.roster_snapshot_dates("2026-27") == [dt.date(2026, 10, 25), dt.date(2026, 11, 2)]
+    assert S.ingested_ids("2026-27") == {"0022600001"}      # a snapshot is no partition
+
+
+def test_a_game_reads_the_latest_snapshot_on_or_before_its_date_else_the_earliest_after(state_dir):
+    camp = _snapshot("2026-10-10", range(1, 22))           # 21: a camp roster
+    a = _snapshot("2026-10-21", [1, 2])
+    b = _snapshot("2026-10-25", [1, 3])
+    first = dt.date(2026, 10, 20)
+    for game, snap, want in (("2026-10-21", a, False), ("2026-10-24", a, False),
+                             ("2026-10-25", b, False), ("2026-11-30", b, False)):
+        got = S.roster_for_game("2026-27", game, first)
+        pd.testing.assert_frame_equal(got.roster, snap)
+        assert got.after is want and got.date <= dt.date.fromisoformat(game)
+    # Before every in-season snapshot: the earliest after (the backlog), never camp.
+    got = S.roster_for_game("2026-27", "2026-10-20", first)
+    assert got.after and got.date == dt.date(2026, 10, 21)
+    pd.testing.assert_frame_equal(got.roster, a)
+    # Without the first game day the camp snapshot would be read.
+    pd.testing.assert_frame_equal(S.roster_for_game("2026-27", "2026-10-20").roster, camp)
+    assert S.roster_for_game("2027-28", "2027-10-20", "2027-10-19") is None
+
+
+def test_known_names_are_every_spelling_the_state_holds(state_dir):
+    S.build_seed(SEASON)
+    g = _game("0022500001", "2025-10-21")
+    g["pg"].loc[0, "player_name"] = "P. One"
+    _write(g, "2025-10-21")
+    _snapshot("2025-10-22", [1, 9])
+    got = S.known_names(SEASON)
+    pairs = set(map(tuple, got[["person_id", "player_name"]].to_numpy()))
+    seed = set(map(tuple, S.load_seed(SEASON).names[["person_id", "player_name"]].to_numpy()))
+    assert seed <= pairs and {(1, "P. One"), (1, "Player 1"), (9, "Player 9"), (2, "Player 2")} <= pairs
+    assert not got.duplicated().any() and got["person_id"].dtype == "int64"
+
+
 def test_dates_are_et_dates_never_datetimes():
     assert S.as_date("2026-10-20") == dt.date(2026, 10, 20)
     assert S.serve_dir(dt.date(2026, 10, 20)).name == "2026-10-20"

@@ -152,3 +152,111 @@ Found by the build 1 verifiers and the cross-module fix pass that followed.
 - **Committed-first rendering** (spec section 4, render committed projections
   first and upgrade): the page computes the live frame before drawing; the
   live layer's timeouts were cut to 4 s and fetches run in parallel instead.
+
+## Open after the 2026-11-02 rehearsal: the 2026-27 box lists actives only
+
+The live rehearsal (92 final games) found that a 2026-27 cdn box lists only the
+players who dressed (docs/data_notes.md). The bot now rebuilds each such box's
+inactive list from its roster snapshots minus the box (docs/serving_design.md
+section 9). What remains approximate, measured, and what no test could see:
+
+- **The backlog approximation.** The first run has no snapshot older than its
+  own day, so it ingests every game since the opener with that day's roster
+  (the earliest snapshot after each game): a first run on 2026-11-02 rebuilds
+  the games of 10-20..11-01 from the 11-02 roster, 1 to 13 days younger than
+  the game, and a first run a week later the games through 11-08, 1 to 20
+  days younger. A player who joined a team after a game gets an
+  inactive row for it; one who left before the snapshot without being on the
+  report gets none. An outage does the mirror image (the latest snapshot
+  before the game is days old). **No snapshot is committed yet**: the repo's
+  state/ holds only the seed, the daily workflow is dispatch-only until the
+  deploy, and both 2026-11-02 rehearsals wrote to scratch copies. A day's
+  roster cannot be pulled later, so every day before the first committed run
+  adds a day to the backlog: the 13-day row below is the bound only for a run
+  committed on 2026-11-02, and until one is, the bound drifts toward the
+  season-end row (20 and 27 days: a first run on 11-09 or 11-16). Decision
+  for Barrett: start the committed runs now, before the deploy (a dispatch
+  run of the workflow commits the backlog's partitions and the day's
+  state/season/2026-27/roster_{date}.parquet; runs after it keep the
+  snapshots daily). Measured on 2025-26 (scratchpad
+  scripts stale_rows.py and stale_features.py of the 2026-11-02 session, and
+  stale_rows_days.py for 20 and 27 days): every state box stripped of its
+  INACTIVE players, rebuilt by the production code (box.rebuild_inactives
+  through the bot's step_finals) from a stale roster, against the truth:
+
+  | roster used for every game | wrongly added rows | missed rows | exact team-games |
+  |---|---|---|---|
+  | 13 days after the game (a first run committed on 2026-11-02) | 727 of 11,099 true (6.6%), 0.29 per team-game, max 6; 0.16-0.20 a team-game Oct-Dec, 0.85 in February (trade deadline) | 87 (0.8%), max 4 | 76.4% |
+  | 20 days after (a first run on 2026-11-09) | 940 (8.5%), 0.38 per team-game, max 6; 0.20-0.26 Oct-Dec | 120 (1.1%), max 4 | 70.4% |
+  | 27 days after (a first run on 2026-11-16) | 1,138 (10.3%), 0.46 per team-game, max 6; 0.27-0.32 Oct-Dec | 148 (1.3%), max 4 | 65.3% |
+  | the season's last day (the worst case) | 2,317 (20.9%), 0.94 per team-game, max 7 | 459 (4.1%), max 4 | 37.9% |
+
+  Before the box-evidence rule (a box dated between the snapshot and the game
+  that lists a roster player for another team keeps him off) the wrongly added
+  rows were 1,097 and 5,435 (13 days, season end). Effect through the serve
+  path and the shipped models (history features of the stale rebuild in place
+  of the training table's, context and lines unchanged; 2025-11-15, 12-18,
+  01-14, 02-19, 04-10; measured for 13 days and the season end only): 13 days
+  stale, the largest p_play shift is 0.08 on the three dates before the trade
+  deadline (team expected minutes moved by at most 1.8 against the
+  true-history projection) and 0.41 / 0.31 on 02-19 / 04-10 (a player signed
+  days before, rebuilt absent for the games before he joined; team expected
+  minutes moved by at most 9.0); season-end roster, 0.11-0.22 on the first
+  four dates and 0.42 on 04-10 (team expected minutes moved by 0.8 to 9.6
+  depending on the date). Without the box-evidence rule the season-end case
+  reached 0.77 (MEM 1629111: 0.96 to 0.18, rebuilt absent for his future
+  team on the nights he played for MEM) and team expected minutes moved by
+  44.6. The features that move are the availability ones only: events_s,
+  miss_streak, played_rate_l10, games_since_return, last_absence_len,
+  events_with_team, team_changed. Nothing in the bot's sources says when a
+  player joined a team, and a re-ingest later would read the same roster
+  (snapshots exist only from the first committed run on), so the rest stays:
+  the sooner the first committed run, the smaller the backlog. A final game's
+  partitions are never rewritten.
+- **Tests built on cached last-season payloads could not see a format change
+  in this season's.** Every box fixture, the serve-parity replay and the
+  2026-10-09 opening-night rehearsal ran on 2025-26 payloads; only a live run
+  met a 2026-27 box. A real one is now a fixture
+  (tests/fixtures/box/cdn_0022600005.json), and every rebuilt game is a log
+  line naming its snapshot and report. The same blind spot holds for any
+  source: refresh fixtures from the live season after its first week.
+- **Next season's training needs inactive rows for 2026-27.** The local
+  backfill (scripts/build_participation.py) parses the same cdn boxes and will
+  build a 2026-27 participation table without inactive rows; the 2027-28 seed
+  and any model retrained on 2026-27 would then learn from a history that
+  hides every injured player. Use the bot's rebuilt partitions, or V3
+  BoxScoreSummaryV3 `inactives` if it still lists them for 2026-27 (unchecked).
+  Decision for Barrett, before the seed rebuild.
+- **The training listing is not exactly the roster.** 2025-26 boxes left out
+  a few rostered players (86 of 13,993 t_15 report rows resolve to nobody in
+  their game's listing; 112 team-player-games fall inside a stint). A rebuild
+  from the playerIndex gives those players rows training never had. Small, and
+  in the direction of the truth.
+- **Two-way players after the regular season.** A two-way contract cannot
+  play in the play-in or the playoffs, and the training listing mostly leaves
+  those players out of such boxes, but not always (2021-22..2025-26: 38 of 60
+  play-in team-games and 824 of 844 playoff team-games listed 15 or fewer;
+  the other play-in boxes listed theirs inactive, as
+  INACTIVE_GLEAGUE_TWOWAY, INACTIVE_INELIGIBLE_TO_PLAY, INACTIVE_COACH or with
+  no reason, or even active). The rebuild follows the majority
+  (box.TWO_WAY_INELIGIBLE: in a play-in or playoff game the snapshot's
+  two-way players get no row; a two-way the box lists keeps his box row).
+  Measured on 2025-26's six play-in boxes (each team's last regular-season
+  listing as the roster, two-way meaning listed INACTIVE_GLEAGUE_TWOWAY by his
+  team at least once that season; scratchpad script playin_measure.py):
+  without the rule 23 rows wrongly added (5 or 6 in each of four games, every
+  one a two-way player), none missed; with it none added and 5 missed, all in
+  0052500111 (MIA at CHA), whose box listed its five two-way players
+  inactive. No projection reads a play-in game: the rows reach next season's
+  events_with_team and any retrain on the bot's 2026-27 partitions. The
+  measurements above give a play-in game its own listing as the roster, so
+  they cannot see this.
+- **Rebuilt reasons** are informational (no feature reads them): with a roster
+  equal to the listing, 90.9% of rebuilt rows are named on the t_15 report and
+  98.6% of those carry the box's own code (the rest mostly INACTIVE_COACH filed
+  as an injury, and injuries filed under the concussion protocol).
+- **Snapshots** are one file per ET date a run pulled a good roster (about
+  14 KB each, every day of the year the bot runs), rewritten within the day
+  when the roster changes, so a late-night run's snapshot can postdate a game of
+  the same date. One dated before the season's first state game day (camp
+  rosters) is never used.

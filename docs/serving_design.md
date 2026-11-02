@@ -255,3 +255,106 @@ fixed by area. What changed in the contract:
   and a re-paste can never replace a full-game line with a period line; adding
   lines mints a NEW token, so a shared link is read-only for everyone else; the
   record refuses mark-out-adjusted rows and rows without a model version.
+
+## 9. Amendments after the 2026-11-02 rehearsal (the 2026-27 box lists actives only)
+
+A live rehearsal of the bot (2026-11-02, 92 final games) found a source format
+change no test could see (every fixture and the parity replay are 2025-26
+payloads): the 2026-27 cdn liveData box lists only the players who dressed, so
+the bot's participation had no inactive rows (played 2,079 / dnp 414 /
+inactive 0), every injured player looked like a player with no 2026-27
+history (Butler, Porzingis, Moody, Ingram, Beal ... at events_s 0 and p_play
+0.55-0.74 on teams yet to file), and team expected minutes reached 301-303 of
+240. Evidence and counts: docs/data_notes.md (cdn.nba.com). What changed in the
+contract:
+
+- **state**: `state/season/{season}/roster_{YYYY-MM-DD}.parquet`
+  (`state.ROSTER_SNAPSHOT_COLS`: person_id, team, two_way, name), the roster the
+  bot pulled, dated by the run's own ET date (never `--date`), written by
+  step_roster with if_changed on every good pull and never from the committed
+  copy. `state.roster_snapshot_path` is the one path; `roster_snapshot_dates`,
+  `roster_for_game(season, game_date, first_day) -> RosterAt(roster, date,
+  after)` (the latest snapshot on or before the game's ET date, else the
+  earliest after it, `after=True`; snapshots dated before the season's first
+  state game day are camp rosters and never used) and `known_names(season)`
+  (every spelling the state holds) read them. They are no partition kind:
+  `season_partitions` and `ingested_ids` ignore them.
+- **participation partitions** may hold REBUILT inactive rows: source
+  `box.ROSTER_MINUS_BOX` ("roster_minus_box"), status inactive, no start, 0
+  seconds, jersey '', reason_code the cdn code of the player's report category
+  (`box.REPORT_REASON_CODES`, every `injury.REASON_CATS`) or `box.UNLISTED`
+  ("INACTIVE_UNLISTED", absence_kind unknown), reason_text the report's
+  "Status: reason". `box.SOURCES` includes it; check_participation and
+  check_table require such a row to be inactive and count it under its game's
+  cdn source. No feature reads source or reasons: the rebuilt rows are the
+  same events training has.
+- **The rule** (`box.lists_inactives`, `box.rebuild_inactives`, one
+  definition): a box listing no INACTIVE player on EITHER side is the new
+  format (one inactive row anywhere is the old format and is parsed exactly as
+  before); every player on a team's roster at game time not in the box (either
+  side) gets a rebuilt row, his reason from the last real report before the t_15
+  horizon (`daily_update.REBUILD_HORIZON`, through horizons.report_at /
+  report_tables / game_states and livectx.resolve_names, the training
+  snapshots' own functions). Only with a snapshot taken AFTER the game (the
+  backlog) does the report add players: one the team's report listed Out who is
+  on neither its roster nor the box left since and gets a row (resolved
+  team-scoped, then by exact or alias name among every known person), and the
+  report's team wins over the later roster's. A box outranks a snapshot: a
+  roster player whom another team's box lists between the snapshot's date and
+  the game's (both included; committed partitions plus every box of the run,
+  `state.box_listings`, rebuilt rows excluded) is not rebuilt unless his own
+  team's report lists him. Step 3 therefore parses every box of the run before
+  it rebuilds any (`Rebuild.boxes`). In a play-in or playoff game
+  (`box.TWO_WAY_INELIGIBLE`) the snapshot's two-way players get no row: they
+  cannot play, and the training listing mostly left them out (2025-26's play-in:
+  23 rows that would otherwise have been added, 5 missed in the one game that
+  listed its two-way players; docs/known_issues.md). The snapshot's `two_way`
+  flag is required there: a missing or null one makes the rebuild raise (the
+  game is RED, not ingested, retried next run), never "not two-way". The
+  info per team gains `ineligible`, and the log line says "N two-way left
+  out".
+- **Bot, step 3**: a new-format box with no usable snapshot is NOT ingested
+  (RED, retried next run; a dry run warns): written without its inactive rows it
+  would stay wrong for good, since a final game is never re-fetched. No report,
+  a PDF that does not parse or a blocked report host leaves the reasons
+  INACTIVE_UNLISTED and is never a failure (blocked: one WARN, no more fetches
+  that run). Every report slot is asked once per run (`daily_update.OncePerSlot`)
+  of one in-memory store shared with step 4 (`daily_update.report_store`): the
+  store alone re-probes an absent slot under 48 hours old every time it is
+  asked, so without the wrapper a morning run fetched the shared slots of last
+  night's games once per game (240 fetches for 130 slots on two games of one
+  night, tests/test_daily_update.py). One log line per rebuilt game names the
+  snapshot (and whether it is the backlog case) and the report.
+- **Roster-size guard**: a team over MAX_TEAM_ROWS (18) is RED today and a
+  warning tomorrow only until the day after the regular season's first game
+  day. In season it is checked against ESPN's roster (`espn.team_roster`,
+  reachable from Actions): the same players is an info line, a difference a
+  WARN naming the players only one source lists, ESPN unreadable a WARN; never
+  RED and nothing dropped (LAC listed 19 on 2026-11-02, and so did ESPN).
+- **bucketlib.http** loads CoreFoundation (darwin only) before curl_cffi: on
+  macOS 27 a fresh interpreter could not import the client otherwise.
+- **Parity proof extended** (tests/test_serve_parity.py): every 2025-26 box
+  stripped of its INACTIVE players and rebuilt from a roster equal to its
+  listing gives every player his original status (1,235 games), and the serve
+  path on bot partitions rebuilt that way equals the training table bit for bit
+  (2025-10-26, 2025-11-05; the same partitions without the rebuilt rows do
+  not). The backlog approximation (a stale roster) is measured, not hidden:
+  docs/known_issues.md.
+- **Verified live** (a second rehearsal, 2026-11-02 07:19 UTC, the fixed bot
+  on a fresh copy of the repo): green in 82 s; 724 inactive rows rebuilt over
+  the 92 games, all from the 2026-11-02 snapshot (the backlog), every game with
+  a report; team expected minutes (sum of p_play x minutes) median 242.1, max
+  267.7, against 261.4 and 303.2 before (teams yet to file: mean 242.0, was
+  284.6); Butler, Porzingis, Moody, Ingram, Beal, Strus, Jordan Miller and
+  Konan Niederhauser at events_s 6-7 and p_play 0.09-0.15 (were 0 and
+  0.42-0.74); LAC's 19 an info line, ESPN listing the same 19. That
+  rehearsal wrote to a scratch copy: no snapshot is committed yet, so the
+  backlog of the first committed run grows by a day each day until then
+  (13 days stale if it is on 2026-11-02; docs/known_issues.md).
+- **Not done, needs a decision**: (1) commit roster snapshots from now on,
+  before the deploy (a dispatch run of the workflow), so the backlog stops
+  growing. (2) The 2026-27 participation table the local backfill builds from
+  the same cdn boxes (scripts/build_participation.py) has no inactive rows
+  either, so the 2027-28 seed and any retrain on 2026-27 need an inactive
+  source: the bot's rebuilt partitions, or V3 BoxScoreSummaryV3 `inactives` if
+  it still lists them.

@@ -387,6 +387,8 @@ def test_absence_kind_separates_coach_decisions_from_unavailable_players():
     ("dnp", "NWT", "LEAGUE_SUSPENSION", "v3", "unavailable"),
     ("dnp", "", "", "v3", "unknown"),
     ("inactive", "INACTIVE", "", "v3", "unknown"),
+    # A rebuilt inactive row no report names: no reason known (like cdn's empty one).
+    ("inactive", "INACTIVE_UNLISTED", "", "cdn", "unknown"),
 ])
 def test_absence_kind_mapping(status, code, text, source, kind):
     assert B.absence_kind(status, code, text, source) == kind
@@ -1094,3 +1096,282 @@ def test_cdn_invariant_failure_falls_back_to_v3_for_a_past_season_only(monkeypat
     monkeypatch.setattr(B, "_is_live_game", lambda gid: True)
     with pytest.raises(ValueError):
         B.load_game("0022600001")
+
+
+# ── The 2026-27 format: actives only, inactive rows rebuilt ──────────────────
+# Real payloads only: the 2025-26 fixture boxes with their INACTIVE players
+# stripped (what a 2026-27 box looks like), the real 2026-27 box of GSW at LAL
+# (0022600005, 2026-10-21), playerIndex.json as pulled on 2026-11-02 (GSW,
+# LAL, LAC rows), and for each game the last report before its t_15 horizon
+# as published (Injury-Report_*.pdf beside them).
+REPORTS_T15 = {"0022500001": "Injury-Report_2025-10-21_06PM.pdf",
+               "0022500147": "Injury-Report_2025-11-01_09PM.pdf",
+               "0022600005": "Injury-Report_2026-10-21_09_30PM.pdf"}
+NEW_FORMAT = "0022600005"
+
+
+def _strip_inactive(payload: dict) -> dict:
+    """The same box in the 2026-27 format: its INACTIVE players removed."""
+    p = copy.deepcopy(payload)
+    for side in ("homeTeam", "awayTeam"):
+        p["game"][side]["players"] = [x for x in _players(p, side) if x["status"] != "INACTIVE"]
+    return p
+
+
+def _report_rows(gid: str, meta: dict) -> pd.DataFrame:
+    """The game's rows of its real t_15 report, through the functions the
+    training snapshots and the bot use (horizons.report_tables, game_states)."""
+    from bucketlib import horizons as HZ
+    from bucketlib.sources import injury as INJ
+    rep = INJ.parse_report((FX / REPORTS_T15[gid]).read_bytes())
+    g = {"game_id": gid, "game_date": dt.date.fromisoformat(meta["et_date"]), "away": meta["away"],
+         "home": meta["home"], "tip_utc": meta["tip_utc"]}
+    kept, team_rows = HZ.report_tables(rep, pd.DataFrame([g]))
+    rows, _ = HZ.game_states(g, {"game_id": gid}, kept, team_rows, rep.meta["report_ts_et"])
+    return pd.DataFrame(rows)
+
+
+def _roster_2026_11_02() -> pd.DataFrame:
+    from bucketlib.sources import cdn as CDN
+    return CDN.parse_player_index(fx("playerIndex_2026-11-02_GSW_LAL_LAC.json"))
+
+
+def test_every_old_format_box_lists_inactives_and_the_2026_27_box_none():
+    for f in sorted(FX.glob("cdn_*.json")):
+        p = fx(f.name)
+        assert B.lists_inactives(p) == (f.stem != f"cdn_{NEW_FORMAT}"), f.name
+    p = cdn(NEW_FORMAT)
+    assert {x["status"] for s in ("homeTeam", "awayTeam") for x in _players(p, s)} == {"ACTIVE"}
+    assert not B.lists_inactives(_strip_inactive(cdn("0022500001")))
+    # One INACTIVE row on one side is the old format (three 2025-26 team-games,
+    # BOS twice and CHA in the play-in, had none, listing 15, while the other
+    # side listed some).
+    p = _strip_inactive(cdn("0022500001"))
+    _players(p, "homeTeam").append(next(x for x in _players(cdn("0022500001"), "homeTeam")
+                                        if x["status"] == "INACTIVE"))
+    assert B.lists_inactives(p)
+
+
+def test_every_report_category_has_a_cdn_reason_code():
+    from bucketlib.sources import injury as INJ
+    assert set(B.REPORT_REASON_CODES) == set(INJ.REASON_CATS)
+    for code in B.REPORT_REASON_CODES.values():
+        assert code == "" or code.startswith("INACTIVE_")
+        assert B.absence_kind("inactive", code, "", "cdn") in ("unavailable", "coach", "unknown")
+    assert B.report_reason("Out", "g_league_two_way", "G League - Two-Way") == \
+        ("INACTIVE_GLEAGUE_TWOWAY", "Out: G League - Two-Way")
+    assert B.report_reason("Available", "unspecified", "-") == ("", "Available")
+    with pytest.raises(ValueError, match="no cdn code"):
+        B.report_reason("Out", "a_new_category", "x")
+
+
+@pytest.mark.parametrize("gid", ["0022500001", "0022500147"])
+def test_a_stripped_2025_26_box_rebuilds_its_own_inactive_list(gid):
+    """(a) A real 2025-26 box with its INACTIVE players stripped, rebuilt
+    from a roster equal to what the original box listed for each team and
+    the game's real t_15 report: every player's row equals the original, and
+    the reason codes differ only for the players the report does not name."""
+    orig, meta = B.parse_cdn(cdn(gid), gid)
+    part, _ = B.parse_cdn(_strip_inactive(cdn(gid)), gid)
+    assert not (part["status"] == "inactive").any() and len(part) < len(orig)
+    listed = _report_rows(gid, meta)
+    got, info = B.rebuild_inactives(part, orig[["person_id", "team", "player_name"]], listed)
+    a, b = orig.set_index("person_id").sort_index(), got.set_index("person_id").sort_index()
+    assert list(a.index) == list(b.index)
+    for c in ("team", "is_home", "status", "starter", "played_seconds"):
+        assert (a[c] == b[c]).all(), c
+    # The box's own rows are untouched; the rebuilt ones are its inactive list.
+    pd.testing.assert_frame_equal(got[got["source"] == "cdn"].reset_index(drop=True),
+                                  part.reset_index(drop=True))
+    rebuilt = b[b["source"] == B.ROSTER_MINUS_BOX]
+    assert set(rebuilt.index) == set(a.index[a["status"] == "inactive"])
+    named = {pid for pid in rebuilt.index if rebuilt.loc[pid, "reason_code"] != B.UNLISTED}
+    for pid in named:
+        assert rebuilt.loc[pid, "reason_code"] == a.loc[pid, "reason_code"], pid
+        assert rebuilt.loc[pid, "reason_text"].startswith("Out: ")
+    unnamed = set(rebuilt.index) - named
+    assert unnamed, "every inactive player was on the report: the UNLISTED path is untested here"
+    lastnames = {n.split(",")[0].strip().lower() for n in listed["player_raw"]}
+    for pid in unnamed:
+        assert a.loc[pid, "player_name"].split()[-1].lower() not in lastnames
+        assert rebuilt.loc[pid, "absence_kind"] == "unknown"
+    assert sum(info[t]["rebuilt"] for t in (meta["home"], meta["away"])) == len(rebuilt)
+
+
+def test_the_2026_27_box_gets_exactly_its_rostered_players_not_in_the_box():
+    """(c) The real 2026-27 box of GSW at LAL lists 13 players a side; with
+    the 2026-11-02 roster (taken as the roster at game time) every rostered
+    player it does not list gets an inactive row, nobody else does, and each
+    named player carries the reason of the 9:30 PM ET report before tip."""
+    part, meta = B.parse_cdn(cdn(NEW_FORMAT), NEW_FORMAT)
+    roster = _roster_2026_11_02()
+    got, info = B.rebuild_inactives(part, roster, _report_rows(NEW_FORMAT, meta))
+    pd.testing.assert_frame_equal(got[got["source"] == "cdn"].reset_index(drop=True),
+                                  part.reset_index(drop=True))
+    rebuilt = got[got["source"] == B.ROSTER_MINUS_BOX]
+    for team in ("GSW", "LAL"):
+        want = set(roster.loc[roster["team"] == team, "person_id"]) - set(part.loc[part["team"] == team,
+                                                                                   "person_id"])
+        mine = rebuilt[rebuilt["team"] == team]
+        assert set(mine["person_id"]) == want and len(want) == 5, team
+        assert (mine["status"] == "inactive").all() and not mine["starter"].any()
+        assert (mine["played_seconds"] == 0).all() and (mine["is_home"] == (team == "LAL")).all()
+    r = rebuilt.set_index("player_name")["reason_code"].to_dict()
+    assert r == {"Jimmy Butler III": "INACTIVE_INJURY", "Moses Moody": "INACTIVE_INJURY",
+                 "Charles Bassey": "INACTIVE_INJURY", "Brandin Podziemski": "INACTIVE_INJURY",
+                 "Kristaps Porziņģis": "INACTIVE_NOT_WITH_TEAM",       # 'Porzingis, Kristaps'
+                 "Cameron Carr": "INACTIVE_INJURY", "Collin Sexton": "INACTIVE_INJURY",
+                 "Adou Thiero": "INACTIVE_INJURY",
+                 # Two-way players the report does not name.
+                 "Arthur Kaluma": B.UNLISTED, "Lawson Lovering": B.UNLISTED}
+    assert info["GSW"] == {"rebuilt": 5, "listed": 5, "unlisted": 0, "left_since": 0, "elsewhere": 0,
+                           "ineligible": 0}
+    assert info["LAL"] == {"rebuilt": 5, "listed": 3, "unlisted": 2, "left_since": 0, "elsewhere": 0,
+                           "ineligible": 0}
+    # No report: the same rows, every reason UNLISTED.
+    bare, _ = B.rebuild_inactives(part, roster, None)
+    assert list(bare["person_id"]) == list(got["person_id"])
+    assert set(bare.loc[bare["source"] == B.ROSTER_MINUS_BOX, "reason_code"]) == {B.UNLISTED}
+
+
+def test_a_roster_taken_after_the_game_trusts_the_report_for_who_left():
+    """A first run ingests the backlog with today's roster. A player the
+    team's report listed Out who is on neither the roster nor the box left
+    the team since: rebuilt for the team the report names, never for the
+    team the later roster puts him on. With a roster from the game's own
+    date the roster is the authority and the report adds nobody."""
+    part, meta = B.parse_cdn(cdn(NEW_FORMAT), NEW_FORMAT)
+    roster = _roster_2026_11_02()
+    listed = _report_rows(NEW_FORMAT, meta)
+    kp = 204001                                        # Porzingis: GSW, Out (Not With Team)
+    known = roster.loc[roster["person_id"] == kp, ["person_id", "name"]].rename(
+        columns={"name": "player_name"})
+    gone = roster[roster["person_id"] != kp]             # waived since: on no roster
+    on_date, _ = B.rebuild_inactives(part, gone, listed, known, roster_after=False)
+    assert kp not in set(on_date["person_id"])
+    later, info = B.rebuild_inactives(part, gone, listed, known, roster_after=True)
+    row = later.set_index("person_id").loc[kp]
+    assert (row["team"], row["reason_code"], row["status"]) == ("GSW", "INACTIVE_NOT_WITH_TEAM", "inactive")
+    assert info["GSW"]["left_since"] == 1 and row["player_name"] == "Kristaps Porziņģis"
+    # Traded to the other team of this game since: still GSW's row.
+    moved = roster.assign(team=roster["team"].mask(roster["person_id"] == kp, "LAL"))
+    later, _ = B.rebuild_inactives(part, moved, listed, known, roster_after=True)
+    assert later.set_index("person_id").loc[kp, "team"] == "GSW"
+    on_date, _ = B.rebuild_inactives(part, moved, listed, known, roster_after=False)
+    assert on_date.set_index("person_id").loc[kp, "team"] == "LAL"      # the roster's say
+    # A report name that resolves to nobody adds nothing and is reported.
+    stray = pd.concat([listed, listed.iloc[[0]].assign(player_raw="Nobody, Zz")], ignore_index=True)
+    _, info = B.rebuild_inactives(part, roster, stray, known, roster_after=True)
+    assert info["unresolved"] == ["Nobody, Zz"]
+
+
+def test_a_box_between_the_snapshot_and_the_game_outranks_the_snapshot():
+    """A roster player another team's box lists between the snapshot's date
+    and the game's (both included) was not on this team at the game (he joined
+    after, or left before): no row, unless the team's own report lists him
+    (the report is about this game)."""
+    part, meta = B.parse_cdn(cdn(NEW_FORMAT), NEW_FORMAT)
+    roster = _roster_2026_11_02()
+    listed = _report_rows(NEW_FORMAT, meta)
+    pid = roster.set_index("name")["person_id"]
+    lovering, sexton = int(pid["Lawson Lovering"]), int(pid["Collin Sexton"])    # unlisted / listed Out
+    seen = pd.DataFrame({"person_id": [lovering, sexton, int(pid["Adou Thiero"])],
+                         "team": ["SAC", "SAC", "LAL"]})                         # Thiero: his own team
+    got, info = B.rebuild_inactives(part, roster, listed, elsewhere=seen)
+    rebuilt = set(got.loc[got["source"] == B.ROSTER_MINUS_BOX, "person_id"])
+    assert lovering not in rebuilt and {sexton, int(pid["Adou Thiero"])} <= rebuilt
+    assert info["LAL"]["elsewhere"] == 1 and info["LAL"]["rebuilt"] == 4 and info["GSW"]["elsewhere"] == 0
+    same, _ = B.rebuild_inactives(part, roster, listed, elsewhere=seen.iloc[0:0])
+    assert lovering in set(same["person_id"])
+
+
+def test_rebuild_refuses_what_it_cannot_rebuild():
+    orig, _ = B.parse_cdn(cdn("0022500001"), "0022500001")
+    roster = orig[["person_id", "team", "player_name"]]
+    with pytest.raises(ValueError, match="old format"):
+        B.rebuild_inactives(orig, roster)                 # (d) a box that lists inactives
+    part, _ = B.parse_cdn(_strip_inactive(cdn("0022500001")), "0022500001")
+    with pytest.raises(ValueError, match=r"nobody for \['OKC'\]"):
+        B.rebuild_inactives(part, roster[roster["team"] != "OKC"])
+    with pytest.raises(ValueError, match="twice"):
+        B.rebuild_inactives(part, pd.concat([roster, roster.iloc[[0]]]))
+
+
+def test_a_rebuilt_row_is_always_inactive():
+    part, _ = B.parse_cdn(_strip_inactive(cdn("0022500001")), "0022500001")
+    orig, meta = B.parse_cdn(cdn("0022500001"), "0022500001")
+    got, _ = B.rebuild_inactives(part, orig[["person_id", "team", "player_name"]])
+    B.check_table(got, pd.DataFrame([meta], columns=B.META_COLUMNS), "2025-26")   # a cdn game's table
+    bad = got.copy()
+    i = bad.index[bad["source"] == B.ROSTER_MINUS_BOX][0]
+    bad.loc[i, ["status", "absence_kind"]] = ["dnp", "unknown"]
+    with pytest.raises(ValueError, match="not inactive"):
+        B.check_participation(bad)
+    with pytest.raises(ValueError, match="not inactive"):
+        B.check_table(bad, pd.DataFrame([meta], columns=B.META_COLUMNS), "2025-26")
+
+
+# Two-way contracts cannot play after the regular season. Real 2025-26 pairs of
+# boxes of the same two teams: their last regular-season game (2026-04-12, 18
+# listed a side) and their next game against each other, in the play-in or
+# the playoffs (15 a side), which left out each team's three two-way
+# players, every one of them listed
+# INACTIVE_GLEAGUE_TWOWAY by his team in 4 to 43 of its 2025-26 boxes (the
+# flag a playerIndex of the day carries).
+POSTSEASON = {   # postseason game: (the two teams' last regular-season game, its two-way players)
+    "0052500131": ("0022501199", {                     # play-in, GSW at LAC, 2026-04-15
+        1642502: "Malevy Leons", 1631466: "Nate Williams", 1643018: "LJ Cryer",
+        1641807: "Norchad Omier", 1642951: "Sean Pedulla", 1631102: "TyTy Washington Jr."}),
+    "0042500141": ("0022501196", {                     # playoffs, PHX at OKC, 2026-04-19
+        1642886: "Koby Brea", 1643047: "CJ Huntley", 1630587: "Isaiah Livers",
+        1642382: "Branden Carlson", 1642964: "Brooks Barnhizer", 1642362: "Payton Sandfort"}),
+}
+
+
+def _cached_box(gid: str) -> dict:
+    """A 2025-26 cdn box as the cache holds it (the {fetched_at, data} envelope)."""
+    return cache.read_json(FX / f"cdnfull_{gid}.json.gz")["data"]
+
+
+@pytest.mark.parametrize("gid", list(POSTSEASON))
+def test_a_postseason_rebuild_leaves_the_two_way_players_out(gid):
+    """A play-in and a playoff box, INACTIVE players stripped, rebuilt from
+    what the same two teams listed in their last regular-season game (the
+    roster three and seven days before) with the two-way players flagged:
+    every player's status equals the original box, the three two-way players
+    of each team get no row, and the same roster without the flags gives each
+    of them a row the box never had (what the rebuild did before)."""
+    last_rs, two_ways = POSTSEASON[gid]
+    orig, meta = B.parse_cdn(_cached_box(gid), gid)
+    part, _ = B.parse_cdn(_strip_inactive(_cached_box(gid)), gid)
+    rs, _ = B.parse_cdn(_cached_box(last_rs), last_rs)
+    assert {p: n for p, n in zip(rs["person_id"], rs["player_name"]) if p in two_ways} == two_ways
+    assert set(rs["person_id"]) - set(orig["person_id"]) == set(two_ways)    # what the box left out
+    roster = rs[["person_id", "team", "player_name"]].assign(two_way=rs["person_id"].isin(set(two_ways)))
+    teams = (meta["home"], meta["away"])
+    got, info = B.rebuild_inactives(part, roster)
+    a, b = orig.set_index("person_id").sort_index(), got.set_index("person_id").sort_index()
+    assert list(a.index) == list(b.index)
+    for c in ("team", "is_home", "status", "starter", "played_seconds"):
+        assert (a[c] == b[c]).all(), c
+    assert set(b.index[b["source"] == B.ROSTER_MINUS_BOX]) == set(a.index[a["status"] == "inactive"])
+    assert [info[t]["ineligible"] for t in teams] == [3, 3]
+    bare, info = B.rebuild_inactives(part, roster.assign(two_way=False))
+    assert set(bare["person_id"]) - set(orig["person_id"]) == set(two_ways)
+    assert [info[t]["ineligible"] for t in teams] == [0, 0]
+    # A regular-season game reads no flag: the same roster rebuilds that box's
+    # own inactive list, its inactive two-way player included.
+    rs_part, _ = B.parse_cdn(_strip_inactive(_cached_box(last_rs)), last_rs)
+    again, info = B.rebuild_inactives(rs_part, roster)
+    tw_out = set(rs.loc[rs["status"] == "inactive", "person_id"]) & set(two_ways)
+    assert tw_out and set(again["person_id"]) == set(rs["person_id"])
+    assert tw_out <= set(again.loc[again["source"] == B.ROSTER_MINUS_BOX, "person_id"])
+    assert all(info[t]["ineligible"] == 0 for t in teams)
+    B.rebuild_inactives(rs_part, roster.drop(columns="two_way"))       # not needed there
+    # Where it is read the flag is required: a missing or null one would bring
+    # the two-way players back in silence.
+    with pytest.raises(ValueError, match="two_way flag"):
+        B.rebuild_inactives(part, roster.drop(columns="two_way"))
+    with pytest.raises(ValueError, match="two_way flag"):
+        B.rebuild_inactives(part, roster.assign(two_way=roster["two_way"].astype("boolean")
+                                                .mask(roster.index == roster.index[0])))

@@ -27,11 +27,26 @@ of the classes below, and callers decide what each class means for them.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from urllib.parse import urlparse
 
-from curl_cffi import requests as cr
+if sys.platform == "darwin":
+    # macOS 27: curl_cffi's _wrapper.abi3.so looks CoreFoundation up in the
+    # flat namespace and does not load it itself, so in a fresh interpreter
+    # `from bucketlib import http` raised ImportError "symbol not found in
+    # flat namespace '_CFRelease'" unless something (pandas) had loaded the
+    # framework first. Load it, globally, before curl_cffi. Linux never runs
+    # this branch.
+    import ctypes
+    try:
+        ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+                    mode=ctypes.RTLD_GLOBAL)
+    except OSError:      # no such framework: let curl_cffi's import say what is wrong
+        pass
+
+from curl_cffi import requests as cr  # noqa: E402
 
 from .cache import logger
 

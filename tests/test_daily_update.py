@@ -17,6 +17,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -687,6 +688,7 @@ def test_the_bot_writes_only_under_state(tmp_path, monkeypatch, network, capsys)
     written = sorted(str(p.relative_to(state)) for p in state.rglob("*.parquet"))
     assert written == ["current/roster_v1.parquet", "current/schedule_v1.parquet",
                        "season/2026-27/odds_2026-10-20.parquet",
+                       "season/2026-27/roster_2026-10-19.parquet",    # the run's ET date
                        "serve/2026-10-20/features_v1.parquet"]
     feats = C.read_parquet(state / "serve" / "2026-10-20" / "features_v1.parquet")
     assert len(feats) and set(feats["game_id"]) <= {"0022600001", "0022600002", "0022600003"}
@@ -940,3 +942,490 @@ def test_the_probe_covers_every_source_the_bot_reads():
         assert want in urls, want
     for prefix in (cdn.BOX_URL.split("{")[0], INJ.BASE_URL, espn.SITE + "scoreboard"):
         assert any(u.startswith(prefix) for u in urls), prefix
+
+
+# ── Roster snapshots: who was on the team, which a 2026-27 box no longer says ─
+def test_step_roster_commits_a_snapshot_dated_by_the_runs_own_et_date(tmp_path, monkeypatch, network):
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(cdn, "MIN_ROSTER", 1)
+    _pin(du, monkeypatch, dt.datetime(2026, 11, 2, 0, 44, tzinfo=ET))   # 05:44 UTC
+    du.step_roster(True)                                                 # a dry run writes nothing
+    assert not S.roster_snapshot_path("2026-11-02").exists()
+    r = du.step_roster(False)
+    snap = S.roster_snapshot_path("2026-11-02")
+    got = C.read_parquet(snap)
+    assert list(got.columns) == S.ROSTER_SNAPSHOT_COLS == ["person_id", "team", "two_way", "name"]
+    pd.testing.assert_frame_equal(got, r[S.ROSTER_SNAPSHOT_COLS].reset_index(drop=True))
+    before = snap.read_bytes()
+    du.step_roster(False)
+    assert snap.read_bytes() == before                                   # if_changed: no new blob
+    # A failed pull the next day leaves no snapshot dated that day.
+    _pin(du, monkeypatch, dt.datetime(2026, 11, 3, 9, 17, tzinfo=ET))
+
+    def down(url, **kw):
+        raise H.BadPayload(url, "test: truncated JSON")
+    monkeypatch.setattr(H, "fetch", down)
+    assert du.step_roster(False) is not None and du.RED
+    assert S.roster_snapshot_dates("2026-27") == [dt.date(2026, 11, 2)]
+
+
+# ── Finals in the 2026-27 format: the inactive list rebuilt ──────────────────
+NEW_GID = "0022600005"                              # GSW at LAL, 2026-10-21, 10:00 PM ET
+NEW_PDF = "Injury-Report_2026-10-21_09_30PM.pdf"     # the last report before its t_15 horizon
+
+
+def _new_box() -> dict:
+    return json.loads((FIX / "box" / f"cdn_{NEW_GID}.json").read_text())
+
+
+def _new_sched() -> pd.DataFrame:
+    """The cdn.parse_schedule row of the game (the real schedule's values)."""
+    return pd.DataFrame([{"game_id": NEW_GID, "season": "2026-27", "game_type": "RS",
+                          "status": "final", "game_date": dt.date(2026, 10, 21),
+                          "tip_utc": pd.Timestamp("2026-10-22 02:00", tz="UTC"),
+                          "home": "LAL", "away": "GSW"}])
+
+
+def _player_index() -> dict:
+    """playerIndex.json as pulled on 2026-11-02, GSW, LAL and LAC rows."""
+    return json.loads((FIX / "box" / "playerIndex_2026-11-02_GSW_LAL_LAC.json").read_text())
+
+
+@pytest.fixture
+def new_bot(tmp_path, monkeypatch):
+    """The bot with its state in a tmp dir, the real 2026-27 box, and an
+    in-memory report store whose host has only the real 9:30 PM ET report
+    (`du.fetched` lists every URL it was asked for). `du.snapshot(date)`
+    commits a roster snapshot dated `date` through step_roster itself."""
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(S, "SEED_DIR", tmp_path / "state" / "seed")
+    monkeypatch.setattr(cdn, "MIN_ROSTER", 1)
+    payload, pdf = _new_box(), (FIX / "box" / NEW_PDF).read_bytes()
+    du.fetched, du.host = [], {"down": None}
+
+    def fetcher(url):
+        du.fetched.append(url)
+        if du.host["down"] is not None:
+            raise du.host["down"]
+        if url == INJ.BASE_URL + NEW_PDF:
+            return pdf
+        raise H.Absent(url, "test: not published")
+    monkeypatch.setattr(du, "REPORTS", INJ.ReportStore(fetcher=fetcher, persist=False))
+    monkeypatch.setattr(du, "cdn_box", lambda gid: payload)
+
+    def snapshot(date: dt.date):
+        monkeypatch.setattr(H, "fetch", lambda url, **kw: _player_index())
+        _pin(du, monkeypatch, dt.datetime.combine(date, dt.time(9, 17), tzinfo=ET))
+        du.step_roster(False)
+    du.snapshot = snapshot
+    du.RED.clear()
+    return du
+
+
+def _rebuilt_part(du) -> pd.DataFrame:
+    return C.read_parquet(S.season_dir("2026-27") / "part_2026-10-21.parquet")
+
+
+def test_c_the_bot_rebuilds_a_2026_27_box_from_the_roster_and_the_report(new_bot, capsys):
+    """(c) through the bot's own step 3: the real 2026-27 box (13 players a
+    side, nobody inactive) with the roster snapshot committed on the game's
+    date gets an inactive row for exactly each rostered player it does not
+    list, reasons from the 9:30 PM ET report, each slot fetched once, and a
+    line that says which snapshot and which report."""
+    du = new_bot
+    du.snapshot(dt.date(2026, 10, 21))
+    capsys.readouterr()
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=False)
+    out = capsys.readouterr().out
+    assert du.RED == [] and S.ingested_ids("2026-27") == {NEW_GID}
+    part = _rebuilt_part(du)
+    box_rows, _ = box.parse_cdn(_new_box(), NEW_GID)
+    roster = cdn.parse_player_index(_player_index())
+    rebuilt = part[part["source"] == box.ROSTER_MINUS_BOX]
+    for team in ("GSW", "LAL"):
+        want = set(roster.loc[roster["team"] == team, "person_id"]) - set(
+            box_rows.loc[box_rows["team"] == team, "person_id"])
+        assert set(rebuilt.loc[rebuilt["team"] == team, "person_id"]) == want and len(want) == 5
+    assert (rebuilt["status"] == "inactive").all()
+    assert (rebuilt["season"] == "2026-27").all() and (rebuilt["season_type"] == "RS").all()
+    # The box's own rows are written exactly as before.
+    mine = part[part["source"] == "cdn"].drop(columns=["season_type"])
+    want = box_rows.sort_values(["game_id", "person_id"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(mine.reset_index(drop=True), want)
+    assert dict(zip(rebuilt["person_id"], rebuilt["reason_code"]))[202710] == "INACTIVE_INJURY"  # Butler
+    line = next(x for x in out.splitlines() if x.startswith(f"finals: {NEW_GID}"))
+    assert "10 rebuilt from the 2026-10-21 roster (the latest snapshot on or before the game)" in line
+    assert "reasons from the 2026-10-21 21:30 ET report" in line
+    assert "GSW 5 (5 listed, 0 unlisted); LAL 5 (3 listed, 2 unlisted)" in line
+    assert len(du.fetched) == len(set(du.fetched)) and INJ.BASE_URL + NEW_PDF in du.fetched
+    # The pull it was rebuilt from is history the next build reads: Butler is
+    # an inactive event of GSW's, not a player with no 2026-27 history.
+    parts = S.season_partitions("2026-27")["participation"]
+    assert parts.set_index("person_id").loc[202710, ["team", "status"]].tolist() == ["GSW", "inactive"]
+
+
+def test_c_the_backlog_reads_the_earliest_snapshot_after_the_game(new_bot, capsys):
+    du = new_bot
+    du.snapshot(dt.date(2026, 11, 2))                  # the first run: today's roster only
+    capsys.readouterr()
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=False)
+    out = capsys.readouterr().out
+    assert du.RED == [] and S.ingested_ids("2026-27") == {NEW_GID}
+    assert "10 rebuilt from the 2026-11-02 roster (the earliest snapshot after the game: the backlog)" in out
+    assert len(_rebuilt_part(du).query("source == 'roster_minus_box'")) == 10
+
+
+def test_no_report_means_unlisted_reasons_never_a_failure(new_bot, capsys):
+    du = new_bot
+    du.snapshot(dt.date(2026, 10, 21))
+    du.host["down"] = H.Absent(INJ.BASE_URL, "test: nothing published")
+    capsys.readouterr()
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=False)
+    out = capsys.readouterr().out
+    rebuilt = _rebuilt_part(du).query("source == 'roster_minus_box'")
+    assert du.RED == [] and len(rebuilt) == 10 and set(rebuilt["reason_code"]) == {box.UNLISTED}
+    assert "reasons from no report titled before 2026-10-21 21:45 ET" in out
+    # One game walks each slot of its 30 hours once; that two games of one
+    # night share theirs: test_two_games_of_one_night_ask_each_report_slot_once.
+    assert len(du.fetched) == len(set(du.fetched))
+
+
+def test_a_blocked_report_host_is_a_warning_and_the_game_is_still_ingested(new_bot, capsys):
+    du = new_bot
+    du.snapshot(dt.date(2026, 10, 21))
+    du.host["down"] = H.Blocked(INJ.BASE_URL, "test: Akamai 403")
+    capsys.readouterr()
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=False)
+    out = capsys.readouterr().out
+    assert du.RED == [] and S.ingested_ids("2026-27") == {NEW_GID}
+    assert "WARN finals: the injury report host is blocked" in out
+    assert set(_rebuilt_part(du).query("source == 'roster_minus_box'")["reason_code"]) == {box.UNLISTED}
+
+
+def test_a_2026_27_box_with_no_roster_snapshot_is_not_ingested(new_bot, capsys):
+    """Ingested without its inactive rows the game would stay wrong for good
+    (a final game is never re-fetched): RED, not written, retried next run.
+    A dry run only warns."""
+    du = new_bot
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=True)
+    assert du.RED == [] and "WARN finals (dry run): box score of 0022600005 lists no inactive" \
+        in capsys.readouterr().out
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=False)
+    assert S.ingested_ids("2026-27") == set()
+    assert any(r.startswith(f"box score of {NEW_GID} lists no inactive player and there is no roster "
+                            f"snapshot") and "not ingested (retried next run)" in r for r in du.RED)
+    assert du.fetched == []                               # nothing asked of the report host
+    du.RED.clear()
+    du.snapshot(dt.date(2026, 11, 2))                    # the next run has one
+    du.step_finals(_new_sched(), dt.date(2026, 11, 2), dry=False)
+    assert du.RED == [] and S.ingested_ids("2026-27") == {NEW_GID}
+
+
+def test_d_a_box_that_lists_inactives_is_ingested_exactly_as_before(finals_bot, monkeypatch):
+    """(d) The old format never touches a snapshot or the report host, and
+    its participation partition is parse_cdn's rows as they always were."""
+    du = finals_bot
+
+    def never(*a, **k):
+        raise AssertionError("an old-format box read a snapshot or a report")
+    monkeypatch.setattr(S, "roster_for_game", never)
+    monkeypatch.setattr(du, "report_store", never)
+    monkeypatch.setattr(box, "rebuild_inactives", never)
+    good = _box(GOOD)
+    assert box.lists_inactives(good)
+    du.boxes = {GOOD: good}
+    du.step_finals(pd.DataFrame([_sched_row(good)]), dt.date(2019, 12, 31), dry=False)
+    assert du.RED == []
+    d = _sched_row(good)["game_date"]
+    got = C.read_parquet(S.season_dir("2019-20") / f"part_{d.isoformat()}.parquet")
+    want = box.parse_cdn(good, GOOD)[0].assign(season="2019-20", season_type="RS")
+    want = want.sort_values(["game_id", "person_id"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(got, want)
+    assert set(got["source"]) == {"cdn"} and (got["status"] == "inactive").sum() == 7
+
+
+def test_one_fetch_per_slot():
+    """The backlog's games share report slots: the store is asked once per
+    slot, whatever it answered (a report, absent, a PDF that does not parse)."""
+    du = _daily_update()
+    asked = []
+
+    class Store:
+        def get(self, slot):
+            asked.append(slot.filename)
+            if slot.filename.startswith("bad"):
+                raise ValueError("does not parse")
+            return None if slot.filename.startswith("none") else f"report {slot.filename}"
+    get = du.OncePerSlot(Store())
+    from types import SimpleNamespace as NS
+    for name in ("a.pdf", "none.pdf", "bad.pdf") * 3:
+        if name.startswith("bad"):
+            with pytest.raises(ValueError, match="does not parse"):
+                get(NS(filename=name))
+        else:
+            assert get(NS(filename=name)) == (None if name.startswith("none") else "report a.pdf")
+    assert asked == ["a.pdf", "none.pdf", "bad.pdf"]
+
+
+# ── The roster-size guard in season: ESPN, never RED ─────────────────────────
+OPENER_GAME = {"game_id": "0022600001", "season": "2026-27", "game_type": "RS", "status": "final",
+          "game_date": dt.date(2026, 10, 20), "tip_utc": pd.Timestamp("2026-10-20 19:00", tz="UTC"),
+          "home": "DET", "away": "BOS"}
+LAC_GAME = {"game_id": "0022600171", "season": "2026-27", "game_type": "RS", "status": "scheduled",
+            "game_date": dt.date(2026, 11, 2), "tip_utc": pd.Timestamp("2026-11-03 03:00", tz="UTC"),
+            "home": "LAC", "away": "TOR"}
+
+
+def _espn_lac() -> dict:
+    """ESPN's LAC roster as pulled on 2026-11-02 (the fields parse_roster reads)."""
+    return json.loads((FIX / "box" / "espn_roster_LAC_2026-11-02.json").read_text())
+
+
+@pytest.fixture
+def guard(monkeypatch):
+    """The bot, the real playerIndex rows of 2026-11-02 (LAC 19) and ESPN's
+    roster endpoint answered by `du.espn` (a payload or an exception);
+    `du.espn_calls` counts the fetches."""
+    du = _daily_update()
+    du.espn, du.espn_calls = _espn_lac(), []
+
+    def fetch(url, **kw):
+        assert url.startswith(espn.SITE + "teams/") and url.endswith("/roster"), url
+        du.espn_calls.append(url)
+        if isinstance(du.espn, Exception):
+            raise du.espn
+        return du.espn
+    monkeypatch.setattr(H, "fetch", fetch)
+    du.RED.clear()
+    du.roster = cdn.parse_player_index(_player_index())
+    du.sched = pd.DataFrame([OPENER_GAME, LAC_GAME])
+    return du
+
+
+def test_an_oversized_roster_on_opening_day_is_still_red(guard, capsys):
+    du = guard
+    big = du.oversized(pd.DataFrame([LAC_GAME]), du.roster)
+    assert big == {"LAC": 19}
+    du.check_big_rosters(dt.date(2026, 10, 20), dt.date(2026, 10, 20), du.sched, du.roster, big)
+    assert len(du.RED) == 1 and "more than 18 players for LAC 19 (camp rosters not cut yet?)" in du.RED[0]
+    assert du.espn_calls == []
+    du.RED.clear()
+    du.check_big_rosters(dt.date(2026, 10, 21), dt.date(2026, 10, 20), du.sched, du.roster, big)
+    assert du.RED == [] and "WARN projections 2026-10-21: the roster pull lists more than 18" \
+        in capsys.readouterr().out
+
+
+def test_in_season_19_that_espn_agrees_with_is_an_info_line(guard, capsys):
+    """LAC listed 19 on 2026-11-02 and so did ESPN (a hardship signing): an
+    info line, not RED, nothing dropped, and one ESPN fetch per team a run."""
+    du = guard
+    before = du.roster.copy()
+    for d in (dt.date(2026, 11, 2), dt.date(2026, 11, 3)):            # today and tomorrow
+        du.check_big_rosters(d, dt.date(2026, 11, 2), du.sched, du.roster, {"LAC": 19})
+    out = capsys.readouterr().out
+    assert du.RED == [] and "WARN" not in out
+    assert "projections 2026-11-02: LAC has 19 players in the roster pull (more than 18); ESPN's " \
+           "roster lists the same 19: projected as listed" in out
+    assert len(du.espn_calls) == 1
+    pd.testing.assert_frame_equal(du.roster, before)
+    # The day after opening day is already in season.
+    du.check_big_rosters(dt.date(2026, 10, 21), dt.date(2026, 10, 21), du.sched, du.roster, {"LAC": 19})
+    assert du.RED == []
+
+
+def test_in_season_disagreement_with_espn_is_a_warning_naming_the_players(guard, capsys):
+    du = guard
+    p = _espn_lac()
+    p["athletes"] = [a for a in p["athletes"] if a["fullName"] != "Kobe Sanders"]
+    du.espn = p
+    du.check_big_rosters(dt.date(2026, 11, 2), dt.date(2026, 11, 2), du.sched, du.roster, {"LAC": 19})
+    out = capsys.readouterr().out
+    assert du.RED == []
+    assert "WARN projections 2026-11-02: LAC has 19 players in the roster pull (more than 18), ESPN's " \
+           "18: only the playerIndex lists Kobe Sanders; only ESPN lists nobody. Projected as the " \
+           "playerIndex lists them (nothing dropped)" in out
+    # ESPN lists one the playerIndex does not.
+    du.ESPN_ROSTERS.clear()
+    du.espn = _espn_lac()
+    one_less = du.roster[du.roster["name"] != "Brook Lopez"]
+    du.check_big_rosters(dt.date(2026, 11, 2), dt.date(2026, 11, 2), du.sched, one_less, {"LAC": 18})
+    assert "only the playerIndex lists nobody; only ESPN lists Brook Lopez" in capsys.readouterr().out
+    assert du.RED == []
+
+
+def test_in_season_without_espn_is_a_warning(guard, capsys):
+    du = guard
+    du.espn = H.Blocked(espn.SITE, "test: ESPN down")
+    du.check_big_rosters(dt.date(2026, 11, 2), dt.date(2026, 11, 2), du.sched, du.roster, {"LAC": 19})
+    out = capsys.readouterr().out
+    assert du.RED == [] and "WARN projections 2026-11-02: LAC has 19 players in the roster pull (more " \
+        "than 18), and ESPN's roster could not be read to check them (Blocked)" in out
+
+
+def test_the_projections_step_runs_the_in_season_guard(bot, sched, report, monkeypatch, capsys):
+    """Through step_projections: with the season's first game day months
+    behind, a 21-row team is no camp roster: no RED (here ESPN is down, a
+    warning) and the slate is still published."""
+    big = pd.DataFrame({"person_id": range(1, 22), "team": "DET", "name": "x", "two_way": False})
+    monkeypatch.setattr(H, "fetch", lambda url, **kw: (_ for _ in ()).throw(H.Blocked(url, "test")))
+    opener = pd.DataFrame([{**OPENER_GAME, "game_id": "0022500001", "season": "2025-26",
+                            "game_date": dt.date(2025, 10, 21),
+                            "tip_utc": pd.Timestamp("2025-10-21 23:30", tz="UTC")}])
+    full = pd.concat([opener, sched], ignore_index=True)
+    bot.clock[0] = MORNING.astimezone(UTC)
+    bot.step_projections(full, big, report, {DATE: odds(sched)}, DATE, False)
+    assert bot.RED == [] and "WARN projections 2026-03-12: DET has 21 players in the roster pull" \
+        in capsys.readouterr().out
+    assert C.read_parquet(P.projections_path(DATE)) is not None
+
+
+def test_a_later_box_in_the_backlog_keeps_a_player_off_his_future_team(tmp_path, monkeypatch, capsys):
+    """The backlog with a later roster: a player now on HOU whom DAL's box of
+    2025-11-01 lists was not HOU's on 2025-10-21, so HOU's rebuilt list of
+    that night leaves him out, while a run without that box cannot know.
+    Real boxes (two 2025-26 fixture boxes, INACTIVE players stripped), their
+    real t_15 reports, and a snapshot of what the boxes listed with one DAL
+    player moved to HOU."""
+    import copy
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(S, "SEED_DIR", tmp_path / "state" / "seed")
+    fixtures = {"0022500001": "Injury-Report_2025-10-21_06PM.pdf",       # HOU at OKC, 10-21
+                "0022500147": "Injury-Report_2025-11-01_09PM.pdf"}       # DAL at DET, 11-01
+    orig = {g: C.read_json(FIX / "box" / f"cdnfull_{g}.json.gz")["data"] for g in fixtures}  # as cached
+
+    def stripped(gid):
+        p = copy.deepcopy(orig[gid])
+        for side in ("homeTeam", "awayTeam"):
+            p["game"][side]["players"] = [x for x in p["game"][side]["players"] if x["status"] != "INACTIVE"]
+        return p
+    monkeypatch.setattr(du, "cdn_box", stripped)
+    pdfs = {INJ.BASE_URL + f: (FIX / "box" / f).read_bytes() for f in fixtures.values()}
+
+    def fetcher(url):
+        if url in pdfs:
+            return pdfs[url]
+        raise H.Absent(url, "test: not published")
+    monkeypatch.setattr(du, "REPORTS", INJ.ReportStore(fetcher=fetcher, persist=False))
+    listing = pd.concat([box.parse_cdn(orig[g], g)[0] for g in fixtures], ignore_index=True)
+    dal = listing[(listing["team"] == "DAL") & (listing["status"] == "played")].iloc[0]
+    moved = listing.assign(team=listing["team"].mask(listing["person_id"] == dal["person_id"], "HOU"))
+    snap = pd.DataFrame({"person_id": moved["person_id"], "team": moved["team"], "two_way": False,
+                         "name": moved["player_name"]})[S.ROSTER_SNAPSHOT_COLS]
+    C.write_parquet(snap.reset_index(drop=True), S.roster_snapshot_path("2025-11-02"))
+    sched = pd.DataFrame([{**_sched_row(orig[g]), "season": "2025-26"} for g in fixtures])
+
+    def hou_rebuilt():
+        part = S.season_partitions("2025-26")["participation"]
+        return set(part.loc[(part["game_id"] == "0022500001") & (part["team"] == "HOU")
+                            & (part["source"] == box.ROSTER_MINUS_BOX), "person_id"])
+    du.RED.clear()
+    du.step_finals(sched, dt.date(2025, 11, 2), dry=False)
+    assert du.RED == [] and S.ingested_ids("2025-26") == set(fixtures)
+    assert int(dal["person_id"]) not in hou_rebuilt()
+    out = capsys.readouterr().out
+    assert "HOU 2 (2 listed, 0 unlisted, 1 on the roster kept off: another team's box lists them " \
+           "between the snapshot and the game)" in out
+    # Without DAL's box (not yet ingested, not in the run) nothing says so.
+    shutil.rmtree(S.season_dir("2025-26"))
+    C.write_parquet(snap.reset_index(drop=True), S.roster_snapshot_path("2025-11-02"))
+    du.step_finals(sched[sched["game_id"] == "0022500001"], dt.date(2025, 11, 2), dry=False)
+    assert int(dal["person_id"]) in hou_rebuilt()
+
+
+# ── One night of two games: every report slot asked once; the play-in ───────
+PI_NIGHT = ("0052500101", "0052500131")        # ORL at PHI 7:30 PM ET, GSW at LAC 10 PM ET, 2026-04-15
+PI_ROSTER = "0022501199"                       # GSW at LAC 2026-04-12: their last regular-season game
+PI_TWO_WAYS = {                                 # each listed INACTIVE_GLEAGUE_TWOWAY by his team in 2025-26
+    "ORL": {1630658: "Colin Castleton", 1631457: "Alex Morales"},              # dressed (in the box)
+    "GSW": {1642502: "Malevy Leons", 1631466: "Nate Williams", 1643018: "LJ Cryer"},
+    "LAC": {1641807: "Norchad Omier", 1642951: "Sean Pedulla", 1631102: "TyTy Washington Jr."}}
+PI_MORNING = dt.datetime(2026, 4, 16, 9, 17, tzinfo=ET)
+
+
+@pytest.fixture
+def play_in_night(tmp_path, monkeypatch):
+    """The bot the morning after the two play-in games of 2026-04-15: real
+    2025-26 boxes with their INACTIVE players stripped (the 2026-27 format), a
+    snapshot dated 2026-04-15 of what ORL and PHI listed that night and what
+    GSW and LAC listed on 2026-04-12 (the two-way players flagged, as a
+    playerIndex of the day flags them), and a report host that has nothing
+    (`du.fetched`: every URL asked). The bot's clock and the report store's
+    read 2026-04-16 09:17 ET: every slot of both games' walks is under 48
+    hours old, so the store itself does not remember an absent one (a
+    morning run after a night's games)."""
+    du = _daily_update()
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(S, "SEED_DIR", tmp_path / "state" / "seed")
+    full = {g: C.read_json(FIX / "box" / f"cdnfull_{g}.json.gz")["data"] for g in (*PI_NIGHT, PI_ROSTER)}
+
+    def stripped(gid):
+        p = json.loads(json.dumps(full[gid]))
+        for side in ("homeTeam", "awayTeam"):
+            p["game"][side]["players"] = [x for x in p["game"][side]["players"] if x["status"] != "INACTIVE"]
+        return p
+    monkeypatch.setattr(du, "cdn_box", stripped)
+    du.fetched = []
+
+    def fetcher(url):
+        du.fetched.append(url)
+        raise H.Absent(url, "test: not published")
+    monkeypatch.setattr(du, "REPORTS", INJ.ReportStore(fetcher=fetcher, persist=False))
+    _pin(du, monkeypatch, PI_MORNING)
+    monkeypatch.setattr(INJ, "now_utc", lambda: PI_MORNING.astimezone(UTC))
+    monkeypatch.setattr(INJ, "now_et", lambda: PI_MORNING)
+    orl_phi = box.parse_cdn(full[PI_NIGHT[0]], PI_NIGHT[0])[0]
+    gsw_lac = box.parse_cdn(full[PI_ROSTER], PI_ROSTER)[0]
+    rows = pd.concat([orl_phi, gsw_lac], ignore_index=True)
+    flagged = {p for team in PI_TWO_WAYS.values() for p in team}
+    snap = pd.DataFrame({"person_id": rows["person_id"], "team": rows["team"],
+                         "two_way": rows["person_id"].isin(flagged), "name": rows["player_name"]})
+    C.write_parquet(snap[S.ROSTER_SNAPSHOT_COLS].reset_index(drop=True), S.roster_snapshot_path("2026-04-15"))
+    du.sched = pd.DataFrame([{**_sched_row(full[g]), "season": "2025-26", "game_type": "PI"}
+                             for g in PI_NIGHT])
+    du.truth = pd.concat([box.parse_cdn(full[g], g)[0] for g in PI_NIGHT], ignore_index=True)
+    du.RED.clear()
+    return du
+
+
+def test_two_games_of_one_night_ask_each_report_slot_once(play_in_night):
+    """The two games' report walks (30 hours back from each t_15 cutoff)
+    share most of their slots; with nothing published the store re-probes a
+    slot under 48 hours old every time it is asked, so only the bot's
+    once-per-slot getter keeps the second game from fetching the first one's
+    slots again."""
+    from bucketlib import horizons as HZ
+    du = play_in_night
+    walks = []
+    for g in du.sched.itertuples():
+        seen = []
+        HZ.report_at(HZ.cutoff_for(du.REBUILD_HORIZON, g.tip_utc.to_pydatetime()),
+                     lambda slot: seen.append(slot.url))
+        walks.append(set(seen))
+    assert walks[0] & walks[1] and walks[0] != walks[1]          # the slots both games ask about
+    du.step_finals(du.sched, PI_MORNING.date(), dry=False)
+    assert du.RED == [] and S.ingested_ids("2025-26") == set(PI_NIGHT)
+    assert len(du.fetched) == len(set(du.fetched)) and set(du.fetched) == walks[0] | walks[1]
+
+
+def test_a_play_in_box_is_rebuilt_without_its_two_way_players(play_in_night, capsys):
+    """Through the bot's step 3: GSW's and LAC's 2026-04-12 rosters hold three
+    two-way players each whom their play-in box (15 a side) does not list;
+    they get no row, so every player's status is the original box's. ORL's
+    two dressed two-way players keep their box rows."""
+    du = play_in_night
+    du.step_finals(du.sched, PI_MORNING.date(), dry=False)
+    out = capsys.readouterr().out
+    assert du.RED == []
+    part = C.read_parquet(S.season_dir("2025-26") / "part_2026-04-15.parquet")
+    a = part.set_index(["game_id", "person_id"]).sort_index()
+    b = du.truth.set_index(["game_id", "person_id"]).sort_index()
+    assert list(a.index) == list(b.index) and (a["status"] == b["status"]).all()
+    assert ((a["source"] == box.ROSTER_MINUS_BOX) == (b["status"] == "inactive")).all()
+    orl = part[part["person_id"].isin(set(PI_TWO_WAYS["ORL"]))]
+    assert set(orl["source"]) == {"cdn"} and set(orl["status"]) == {"dnp"}
+    assert "GSW 3 (0 listed, 3 unlisted, 3 two-way left out (ineligible after the regular season)); " \
+           "LAC 2 (0 listed, 2 unlisted, 3 two-way left out (ineligible after the regular season))" in out
+    assert "ORL 1 (0 listed, 1 unlisted); PHI 2 (0 listed, 2 unlisted)" in out

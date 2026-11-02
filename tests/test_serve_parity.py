@@ -548,3 +548,181 @@ def test_committed_seed_names_are_every_spelling():
     seed = S.load_seed()
     assert len(seed.names) > 1500
     _assert_names_are_every_spelling(seed)
+
+
+# ── The 2026-27 box format: actives only, the inactive list rebuilt ──────────
+# A 2026-27 cdn box lists only the players who dressed. Simulated here on the
+# real 2025-26 boxes by stripping their INACTIVE players; the bot rebuilds
+# them from a roster snapshot minus the box (sources.box.rebuild_inactives).
+# With a snapshot equal to what each original box listed, the rebuilt history
+# must serve exactly the training features: the rebuild is the old list.
+REBUILD_DATES = {"first week (HOU's first game after the uningestable one)": HOU_DATE,
+                 "third week": "2025-11-05"}
+REBUILD_THROUGH = max(REBUILD_DATES.values())
+
+
+def _stripped(payload: dict) -> dict:
+    """The same box in the 2026-27 format: its INACTIVE players removed."""
+    out = {**payload, "game": dict(payload["game"])}
+    for side in ("homeTeam", "awayTeam"):
+        t = dict(out["game"][side])
+        t["players"] = [p for p in t["players"] if p["status"] != "INACTIVE"]
+        out["game"][side] = t
+    return out
+
+
+def _listing_snapshots(t, through: dt.date) -> None:
+    """One roster snapshot per ET date through `through`, written where
+    step_roster writes them: every player the ORIGINAL boxes of that date
+    listed, under the team they listed him for."""
+    part, games = t["participation"], t["participation_games"]
+    state = games[games["season_type"].isin(["Regular Season", "PlayIn"])]
+    for d, ids in state.groupby("et_date")["game_id"]:
+        if dt.date.fromisoformat(d) > through:
+            continue
+        rows = part.loc[part["game_id"].isin(set(ids)), ["person_id", "team", "player_name"]]
+        snap = pd.DataFrame({"person_id": rows["person_id"].astype("int64"), "team": rows["team"],
+                             "two_way": False, "name": rows["player_name"]})[S.ROSTER_SNAPSHOT_COLS]
+        C.write_parquet(snap.reset_index(drop=True), S.roster_snapshot_path(d))
+
+
+@pytest.fixture(scope="module")
+def bot_rebuilt(tmp_path_factory, season_tables, seed_dir):
+    """(state root, RED, log): the bot's step_finals over every final state
+    game through REBUILD_THROUGH, each cached box stripped of its INACTIVE
+    players, with the listing snapshots, the cached report PDFs read offline
+    (an offline store fetches nothing and writes nothing), then the override
+    and the logs' counts exactly as bot_fixed and bot_corrected do."""
+    from bucketlib.sources import injury as INJ
+    root = tmp_path_factory.mktemp("bot_rebuilt")
+    du = _daily_update()
+
+    def season_dir(season):
+        p = root / "season" / season
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    sched = season_tables["schedule"]
+    bot_sched = sched.assign(game_date=sched["game_date"].dt.date)
+    last = dt.date.fromisoformat(REBUILD_THROUGH)
+    import contextlib
+    import io
+    log = io.StringIO()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(du, "cdn_box", lambda gid: _stripped(_cached_cdn_box(gid)))
+        mp.setattr(du, "season_dir", season_dir)
+        mp.setattr(du, "REPORTS", INJ.ReportStore(offline=True))
+        mp.setattr(S, "STATE_DIR", root)
+        mp.setattr(S, "SEED_DIR", seed_dir)
+        _listing_snapshots(season_tables, last)
+        du.RED.clear()
+        with contextlib.redirect_stdout(log):
+            du.step_finals(bot_sched, last, dry=False)
+        red = list(du.RED)
+        S.write_override(SEASON, S.override_from_backfill(SEASON, UNINGESTABLE))
+    _with_logs_counts(root, season_tables)
+    return root, red, log.getvalue()
+
+
+@pytest.fixture(scope="module")
+def rebuild_train_rows():
+    days = [pd.Timestamp(d) for d in REBUILD_DATES.values()]
+    return pd.read_parquet(TRAIN, filters=[("game_date", "in", days)])
+
+
+def test_b_the_bot_rebuilt_every_stripped_box(bot_rebuilt, season_tables):
+    root, red, log = bot_rebuilt
+    assert red and all(UNINGESTABLE in r for r in red), red            # only the known one
+    games = season_tables["participation_games"]
+    state = games[games["season_type"].isin(["Regular Season", "PlayIn"])
+                  & (games["et_date"] <= REBUILD_THROUGH)]
+    lines = [x for x in log.splitlines() if "the box lists no inactive player" in x]
+    assert len(lines) == len(state) - 1 and all("(the latest snapshot on or before the game)" in x
+                                                for x in lines)
+    assert sum("no report" in x for x in lines) == 0, "a game had no cached t_15 report"
+    rebuilt = pd.concat([pd.read_parquet(f) for f in (root / "season" / SEASON).glob("part_*.parquet")])
+    truth = season_tables["participation"]
+    truth = truth[truth["game_id"].isin(set(rebuilt["game_id"]))]
+    a = rebuilt.set_index(["game_id", "person_id"]).sort_index()
+    b = truth.set_index(["game_id", "person_id"]).sort_index()
+    assert list(a.index) == list(b.index)
+    assert (a["status"] == b["status"]).all() and (a["team"] == b["team"]).all()
+    bot = a.index.get_level_values("game_id") != UNINGESTABLE         # the override is the backfill's
+    assert ((a.loc[bot, "source"] == "roster_minus_box") == (b.loc[bot, "status"] == "inactive")).all()
+
+
+@pytest.mark.parametrize("label", list(REBUILD_DATES))
+def test_b_rebuilt_partitions_serve_the_training_features_bit_for_bit(label, season_tables, seed_dir,
+                                                                     bot_rebuilt, rebuild_train_rows):
+    """(b) The serve path on partitions the bot rebuilt from stripped boxes:
+    every history feature equals the training table bit for bit."""
+    date = REBUILD_DATES[label]
+    served, hist = _serve(bot_rebuilt[0], seed_dir, date, season_tables)
+    trained = rebuild_train_rows[rebuild_train_rows["game_date"] == pd.Timestamp(date)]
+    assert len(trained) > 50
+    _assert_bit_identical(trained, served, f"rebuilt, {label} {date}")
+    cur = hist.events[hist.events["season"] == SEASON]
+    assert (cur["status"] == "inactive").sum() > 100           # the rebuilt rows are history
+
+
+def test_b_without_the_rebuild_the_availability_history_breaks(tmp_path_factory, season_tables, seed_dir,
+                                                               bot_rebuilt, rebuild_train_rows):
+    """The same partitions with the rebuilt rows taken out (what the bot
+    wrote before the rebuild existed) move the availability features: the
+    bit-for-bit test above is not vacuous."""
+    root = _copy(bot_rebuilt[0], tmp_path_factory.mktemp("bot_unrebuilt"))
+    for f in sorted((root / "season" / SEASON).glob("part_*.parquet")):
+        df = pd.read_parquet(f)
+        C.write_parquet(df[df["source"] != "roster_minus_box"].reset_index(drop=True), f)
+    date = REBUILD_DATES["third week"]
+    served, _ = _serve(root, seed_dir, date, season_tables)
+    trained = rebuild_train_rows[rebuild_train_rows["game_date"] == pd.Timestamp(date)]
+    bad = set(_differing(trained, served, "unrebuilt"))
+    assert {"events_s", "miss_streak", "played_rate_l10", "events_with_team"} <= bad, sorted(bad)
+
+
+def test_a_every_stripped_2025_26_box_rebuilds_its_own_inactive_list(season_tables):
+    """(a) over the whole cached season: every state box with its INACTIVE
+    players stripped, a roster equal to what it listed, and its rows of the
+    t_15 report (the backfill's horizon snapshot of the same production rule:
+    horizons.report_at + game_states): every player's status equals the
+    original. A listed player carries his report category's cdn code; the
+    codes differ from the box's own only where the report gives another
+    reason than the box or does not name him."""
+    from bucketlib.sources import injury as INJ
+    hz = pd.read_parquet(C.CACHE_DIR / f"injury_horizons_{SEASON}_v1.parquet")
+    hz = hz[hz["horizon"] == "t_15"]
+    by_game = dict(tuple(hz.groupby("game_id")))
+    games = season_tables["participation_games"]
+    ids = sorted(games.loc[games["season_type"].isin(["Regular Season", "PlayIn"])
+                           & (games["source"] == "cdn"), "game_id"])
+    assert len(ids) > 1200
+    n_rows = n_listed = n_same = 0
+    for gid in ids:
+        orig, _ = box.parse_cdn(_cached_cdn_box(gid), gid)
+        part, _ = box.parse_cdn(_stripped(_cached_cdn_box(gid)), gid)
+        listed = by_game.get(gid)
+        # A listing carries no contract type: nobody is flagged two-way, so a
+        # play-in box that listed its two-way players gets them back (the
+        # two-way rule is tested on its own in tests/test_box.py).
+        roster = orig[["person_id", "team", "player_name"]].assign(two_way=False)
+        got, _ = box.rebuild_inactives(part, roster, listed)
+        a, b = orig.set_index("person_id").sort_index(), got.set_index("person_id").sort_index()
+        assert list(a.index) == list(b.index), gid
+        assert (a["status"] == b["status"]).all() and (a["team"] == b["team"]).all(), gid
+        r = b[b["source"] == box.ROSTER_MINUS_BOX]
+        assert set(r.index) == set(a.index[a["status"] == "inactive"]), gid
+        n_rows += len(r)
+        named = r[r["reason_code"] != box.UNLISTED]
+        n_listed += len(named)
+        n_same += int((named["reason_code"] == a.loc[named.index, "reason_code"]).sum())
+        if listed is not None:
+            cats = set(listed["reason_cat"])
+            assert set(named["reason_code"]) <= {box.REPORT_REASON_CODES[c] for c in cats}, gid
+    # Measured 2026-11-02 over 1,235 games: 11,099 rebuilt rows, 10,092 named
+    # on the t_15 report (90.9%), the code equal to the box's own on 9,947 of
+    # them (98.6%; the rest mostly INACTIVE_COACH filed as an injury, 44, and
+    # injuries filed under the concussion protocol, 27).
+    assert n_rows > 11000 and n_listed / n_rows > 0.88 and n_same / n_listed > 0.98, \
+        (n_rows, n_listed, n_same)
+    assert set(INJ.REASON_CATS) == set(box.REPORT_REASON_CODES)
