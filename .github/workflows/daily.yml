@@ -2,13 +2,24 @@
 # box scores, the injury report, pregame odds) and publishes projections, then
 # commits ONLY state/. docs/serving_design.md section 4.
 #
-# Manual runs only for now. The schedule below is written and commented out:
-# enable at the deploy STOP, AFTER the repo is public (36 runs a day of 6-10
-# minutes would spend a private repo's free Actions minutes within days).
-# The go-live order and checks: .github/runbook_opening_night.md.
-# Dense off-minute crons (:17 and :47, 13:00-06:47 UTC = 9 AM to 2:47 AM EDT,
-# 8 AM to 1:47 AM EST); the cadence logic lives in Python, which derives the
-# ET date every run (cron starts were measured hours late on DiamondValue).
+# PRIVATE-REPO SCHEDULE, on since 2026-11-02 (Barrett's call): four runs a
+# day at 02:17, 15:17, 20:17 and 23:17 UTC = 9:17 PM, 10:17 AM, 3:17 PM and
+# 6:17 PM EST (an hour later in ET under EDT, from 2027-03-14). At 6-10
+# minutes a run that is about 25-40 Actions minutes a day, inside a private
+# repo's free 2,000 a month. Its job before launch: commit a roster snapshot
+# every day (a 2026-27 box lists active players only, and a day's roster
+# cannot be pulled later: docs/known_issues.md) and ingest every final. A game
+# freezes on the last run before its tip minus 5 minutes, up to about 3 hours
+# before tip (expect frozen_on_old_report warnings), and a late cron start
+# moves that earlier still.
+#
+# FULL SCHEDULE, for the deploy STOP once the repo is public (36 runs a day of
+# 6-10 minutes would spend a private repo's free minutes within a week): swap
+# the private cron for the two commented ones below. Dense off-minute crons
+# (:17 and :47, 13:00-06:47 UTC = 9 AM to 2:47 AM EDT, 8 AM to 1:47 AM EST);
+# the cadence logic lives in Python, which derives the ET date every run
+# (cron starts were measured hours late on DiamondValue). The go-live order
+# and checks: docs/runbook_opening_night.md.
 #
 # Runs that never start send no failure email: the last step pings a
 # dead-man's switch (the BV_HEALTHCHECK_URL secret, healthchecks.io style),
@@ -24,9 +35,12 @@ on:
         description: "PAST ET date to replay as today (YYYY-MM-DD). Leave EMPTY for live runs: a future date is refused, and a plain run projects tomorrow anyway"
         required: false
         default: ""
-  # schedule:
-  #   - cron: "17,47 13-23 * * *"
-  #   - cron: "17,47 0-6 * * *"
+  schedule:
+    # Private-repo schedule: four runs a day (see the header).
+    - cron: "17 2,15,20,23 * * *"
+    # Full schedule, once the repo is public (replaces the line above):
+    # - cron: "17,47 13-23 * * *"
+    # - cron: "17,47 0-6 * * *"
 permissions:
   contents: write
 concurrency:

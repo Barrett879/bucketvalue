@@ -16,6 +16,11 @@ Facts this is built on (checked 2026-10-09 against the live cdn schedule):
   than 18 roster rows RED today and a warning tomorrow (`MAX_TEAM_ROWS`).
 - 36 runs a day of 6-10 minutes is about 300 runner-minutes a day: a private
   repo spends its free Actions minutes within days. Public first, then cron.
+- Since 2026-11-02 a private-repo schedule of four runs a day is on
+  (`daily.yml`: 10:17 AM, 3:17 PM, 6:17 PM and 9:17 PM EST, about 25-40
+  minutes a day), so the bot commits a roster snapshot every day before
+  launch (a 2026-27 box lists active players only: `docs/known_issues.md`).
+  The full schedule still waits for the public flip (step 5).
 
 ## 1. Before Oct 19 (once)
 
@@ -29,6 +34,10 @@ Facts this is built on (checked 2026-10-09 against the live cdn schedule):
 4. Dead-man's switch. Create a check on healthchecks.io (free tier is enough):
    - schedule type **Cron**, expression `17,47 13-23,0-6 * * *`, time zone
      **UTC** (the workflow's crons), grace time **3 hours**;
+   - while the private-repo schedule is still on, use the expression
+     `17 2,15,20,23 * * *` with a grace of **8 hours** instead (cron starts
+     run 2-7 hours late, and its runs are 3 to 11 hours apart), and switch
+     at step 5;
    - alerts by email, and phone/push if wanted;
    - copy its ping URL into the repo secret **`BV_HEALTHCHECK_URL`**
      (Settings, Secrets and variables, Actions).
@@ -37,8 +46,10 @@ Facts this is built on (checked 2026-10-09 against the live cdn schedule):
    run means runs stopped starting (GitHub dropped or delayed the crons,
    the workflow got disabled, or the workflow file is broken). Until the
    secret is set, each run prints a warning instead.
-5. Uncomment the `schedule:` block in `daily.yml` (only once the repo is
-   public) and push it.
+5. In `daily.yml`, replace the private-repo cron with the two commented
+   full-schedule crons (only once the repo is public) and push it. If the
+   healthcheck exists, switch it to `17,47 13-23,0-6 * * *` with a 3-hour
+   grace.
 
 ## 2. Oct 19, after the 5:00 PM ET cut-down
 

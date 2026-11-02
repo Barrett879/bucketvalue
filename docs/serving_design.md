@@ -143,9 +143,12 @@ Step 6 projections, for D in (today ET, tomorrow ET), state games only (RS, PI):
 history(season, before=D) -> history_features -> write features; then project
 with the bot's report and odds -> write projections, rows of games with
 tip <= now carried over from the existing file unchanged. Tomorrow is
-provisional. `if_changed=True` everywhere. `.github/workflows/daily.yml` ships
-with `workflow_dispatch` only: the cron block stays commented until the deploy
-STOP (a private repo spends Barrett's Actions minutes).
+provisional. `if_changed=True` everywhere. `.github/workflows/daily.yml` shipped
+with `workflow_dispatch` only (a private repo spends Barrett's Actions
+minutes). Since 2026-11-02 it runs on a private-repo schedule of four runs a
+day, so a roster snapshot is committed every day (section 9); the dense
+every-30-minutes crons stay commented until the deploy STOP, after the repo
+is public.
 
 ## 5. App
 

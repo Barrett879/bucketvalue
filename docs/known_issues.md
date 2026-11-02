@@ -168,17 +168,17 @@ section 9). What remains approximate, measured, and what no test could see:
   days younger. A player who joined a team after a game gets an
   inactive row for it; one who left before the snapshot without being on the
   report gets none. An outage does the mirror image (the latest snapshot
-  before the game is days old). **No snapshot is committed yet**: the repo's
-  state/ holds only the seed, the daily workflow is dispatch-only until the
-  deploy, and both 2026-11-02 rehearsals wrote to scratch copies. A day's
-  roster cannot be pulled later, so every day before the first committed run
-  adds a day to the backlog: the 13-day row below is the bound only for a run
-  committed on 2026-11-02, and until one is, the bound drifts toward the
-  season-end row (20 and 27 days: a first run on 11-09 or 11-16). Decision
-  for Barrett: start the committed runs now, before the deploy (a dispatch
-  run of the workflow commits the backlog's partitions and the day's
-  state/season/2026-27/roster_{date}.parquet; runs after it keep the
-  snapshots daily). Measured on 2025-26 (scratchpad
+  before the game is days old). A day's roster cannot be pulled later, so
+  every day before the first committed run adds a day to the backlog: the
+  13-day row below is the bound only for a run committed on 2026-11-02, and
+  a later first run drifts toward the season-end row (20 and 27 days: a
+  first run on 11-09 or 11-16). Barrett's decision on 2026-11-02: the
+  committed runs start before the deploy, on the private-repo schedule
+  (four runs a day, .github/workflows/daily.yml, pushed before dawn on
+  2026-11-02), so the first committed run is due at 10:17 AM ET that day
+  (cron starts run hours late; one that slips past midnight ET makes it
+  11-03 and 14 days). Check which date the first committed
+  state/season/2026-27/roster_{date}.parquet carries. Measured on 2025-26 (scratchpad
   scripts stale_rows.py and stale_features.py of the 2026-11-02 session, and
   stale_rows_days.py for 20 and 27 days): every state box stripped of its
   INACTIVE players, rebuilt by the production code (box.rebuild_inactives
