@@ -105,6 +105,12 @@ and the readers. A seed for a season other than `manifest["serves"]` raises
   names: pts reb ast fg3m stl blk tov ftm fta fgm fga fg3a oreb dreb pf, plus
   pra pr pa ra stocks fantasy. Raises `MissingFeatures` naming every registry
   feature absent from rows (never fills).
+- `cohere(pred, rows) -> DataFrame` (added 2026-11-03): predict's output with
+  each team-game's mu_min moved toward adding up (sum of p_play x mu_min toward
+  241.5 team minutes, part of the way when who plays is uncertain, the
+  heaviest players moved least, rows listed Out untouched) and the means
+  recomposed from it. `rows` must hold every roster row of each team-game.
+  docs/model_report.md, "Team minutes coherence".
 
 ### bucketlib/simprov.py
 - `player_input(row) -> dist.PlayerInput` (moved from scripts/prob_gate.py, which
@@ -118,7 +124,7 @@ and the readers. A seed for a season other than `manifest["serves"]` raises
 ### bucketlib/pipeline.py (phase 2)
 - `project(feature_rows, games, schedule, report, lines, models, now,
   marked_out=None, provisional=False) -> DataFrame`: apply_lines -> context_for
-  -> predict -> the projection frame (section 3).
+  -> predict -> cohere -> the projection frame (section 3).
 - `live_projections(date, now, marked_out=None) -> (DataFrame, Info)` for the
   app: committed features + live report + live odds; tipped games come from the
   committed projections untouched; falls back to the committed projections
@@ -134,7 +140,8 @@ means (E[stat | plays]): min (= mu_min), pts reb ast fg3m stl blk tov ftm fta
 fgm fga fg3a oreb dreb pf pra pr pa ra stocks fantasy
 simulator inputs: mu_min, rate_<s> for the 15 STATS
 props contract: games_prior (= career_games, played games before this one),
-provisional (bool, never missing), model_version
+provisional (bool, never missing), model_version (the registry's model_version
+plus "+tm1", the team-minutes step, since 2026-11-03)
 provenance: report_ts_et, home_line, total, computed_at (UTC), frozen (bool)
 
 ## 4. Bot (scripts/daily_update.py) and Actions

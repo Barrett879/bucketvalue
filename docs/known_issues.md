@@ -133,8 +133,18 @@ Found by the build 1 verifiers and the cross-module fix pass that followed.
 - **FTM near the cap.** Capping FTM at FTA prices elite shooters as 100%; on the
   test seasons rows the model implied at 92-97% shot 85-87%, so FTM runs 4.5-10%
   high there (baseline-served stat, tier unmeasured).
-- **Team minutes in 2024-25** sum 6.0 short of actual on the full roster
-  (docs/model_report.md, audit measurements); other seasons are +2.3 / +2.5.
+- ~~**Team minutes in 2024-25** sum 6.0 short of actual on the full roster
+  (docs/model_report.md, audit measurements); other seasons are +2.3 / +2.5.~~
+  ADDRESSED 2026-11-03 (models.cohere, docs/model_report.md "Team minutes
+  coherence"): the raw models still miss a team-game's sum (sd 12.2 minutes
+  out of sample), and the served rows are moved part of the way back (sd 4.7).
+  What remains: the availability side of a gap. A late scratch (Kelly Oubre
+  Jr., p_play 0.99 at 6 PM on 2026-11-02, did not play) leaves his teammates'
+  minutes short, and nothing before tip says so. The two scales were fitted on
+  predictions of models trained through 2022-23. After a retrain, regenerate
+  those with scripts/train_eval.py first: `scripts/fit_cohere.py --grid` reads
+  train_eval's own walk-forward predictions and cannot see the production
+  models (its docstring has the refit steps).
 - **Postponement codes unverified live.** cdn marks a postponement with
   postponedStatus "Y" or a PPD status text as far as the archives show; if a
   2026-27 postponement uses another code, that game keeps both teams

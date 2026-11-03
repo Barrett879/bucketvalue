@@ -769,3 +769,267 @@ def test_the_out_invariant_catches_both_skews_on_any_slate_size(real):
     assert len(few) < M.NULL_MIN_ROWS
     bad = M.null_skew(m, few)
     assert bad["feature"].tolist() == ["tm_out_max_min"] and bad["serve"].tolist() == [1.0]
+
+
+# ── Team minutes coherence (models.cohere) ───────────────────────────────────
+# A real game: ATL at IND on 2026-11-02, the bot's committed rows at 6:13 PM ET
+# (tests/fixtures/cohere, cut from state/serve/2026-11-02/projections_v1).
+# Indiana listed ten players Out; its seven others summed to 188 projected
+# team minutes. It played six of them, 34.5 to 44.7 minutes each.
+COHERE_FIX = REPO / "tests" / "fixtures" / "cohere" / "atl_ind_2026-11-02.parquet"
+IND_PLAYED = {"Jarace Walker": 44.7, "Braden Smith": 42.2, "Jalen Slawson": 40.6, "Jay Huff": 40.1,
+              "Kobe Brown": 37.8, "Quenton Jackson": 34.5}
+
+
+def _served(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(predict()-shaped output, the rows it scored) from a fixture frame of
+    p_play, mu_min, rate_<s>, inj_status (or inj_out) per (game_id, team)."""
+    stats = [c[len("rate_"):] for c in frame.columns if c.startswith("rate_")]
+    pred = frame[["p_play", "mu_min", *(f"rate_{s}" for s in stats)]].copy()
+    M._compose(pred, stats)
+    out = frame["inj_out"] if "inj_out" in frame else (frame["inj_status"] == "Out").astype(float)
+    return pred, frame[["game_id", "team", "person_id"]].assign(inj_out=out.to_numpy())
+
+
+PAD = 14   # a constructed team fills up to this many rows with players listed Out
+
+
+def _team(mu, p=None, out=None, team="AAA", game="g1", pad=PAD) -> pd.DataFrame:
+    """A constructed team: the players given, then rows listed Out (p_play 0,
+    10 minutes) up to `pad` rows, as a real roster carries its absences (a
+    side under COHERE_MIN_ROWS rows is left alone). Rates of 0.5 points and
+    0.2 of everything else a minute, so the means follow mu_min alone. The
+    `pad` column marks the filler."""
+    n = len(mu)
+    k = max(pad - n, 0)
+    f = pd.DataFrame({"game_id": game, "team": team, "person_id": np.arange(n + k) + 1000 * len(team),
+                      "p_play": np.r_[np.ones(n) if p is None else np.asarray(p, float), np.zeros(k)],
+                      "mu_min": np.r_[np.asarray(mu, float), np.full(k, 10.0)],
+                      "inj_out": np.r_[np.zeros(n) if out is None else np.asarray(out, float), np.ones(k)],
+                      "pad": np.r_[np.zeros(n, bool), np.ones(k, bool)]})
+    for s in CONTRACT_STATS:
+        f[f"rate_{s}"] = 0.5 if s == "pts" else 0.2
+    return f
+
+
+def _team_sum(pred: pd.DataFrame, rows: pd.DataFrame) -> pd.Series:
+    return (pred["p_play"] * pred["mu_min"]).groupby([rows["game_id"], rows["team"]]).sum()
+
+
+def test_cohere_gives_indiana_its_missing_minutes():
+    f = pd.read_parquet(COHERE_FIX)
+    pred, rows = _served(f)
+    after = M.cohere(pred, rows)
+    before_sum, after_sum = _team_sum(pred, rows), _team_sum(after, rows)
+    ind = ("0022600160", "IND")
+    assert 187 < before_sum[ind] < 189 and 233 < after_sum[ind] < M.TEAM_MINUTES
+    healthy = (rows["team"] == "IND") & rows["inj_out"].eq(0)
+    assert (after.loc[healthy, "mu_min"] > pred.loc[healthy, "mu_min"] + 5).all()
+    # Closer to what they played, every one of the six who did.
+    played = f["player_name"].map(IND_PLAYED)
+    err0 = (played - pred["mu_min"]).abs()[played.notna()]
+    err1 = (played - after["mu_min"]).abs()[played.notna()]
+    assert len(err0) == 6 and (err1 < err0).all() and err1.mean() < 0.6 * err0.mean()
+
+
+def test_cohere_serves_the_validated_numbers_on_a_real_game():
+    """The step docs/model_report.md validated, pinned on the fixture: any
+    change to its constants or its rule moves these (the relative tests below
+    would let a refit through; this one says it happened)."""
+    f = pd.read_parquet(COHERE_FIX)
+    pred, rows = _served(f)
+    out = M.cohere(pred, rows)
+    sums = (out["p_play"] * out["mu_min"]).groupby(rows["team"]).sum()
+    np.testing.assert_allclose(sums[["ATL", "IND"]].to_numpy(), [239.92939987059418, 236.3949023503905],
+                               rtol=0, atol=1e-9)
+    got = out.assign(name=f["player_name"].to_numpy()).set_index("name")
+    for name, mins, pts in (("Jarace Walker", 34.888212170869366, 17.599585812292542),
+                            ("Braden Smith", 30.619864100555382, 9.515628823896908),
+                            ("CJ McCollum", 29.71921895876544, 18.099614723316364),
+                            ("Corey Kispert", 14.870946394300628, 7.694465813015802),
+                            ("RayJ Dennis", 12.722884306271443, 5.07103180845935)):
+        np.testing.assert_allclose([got.loc[name, "mu_min"], got.loc[name, "pts"]], [mins, pts],
+                                   rtol=0, atol=1e-9, err_msg=name)
+
+
+def test_the_shipped_scales_are_the_validated_ones():
+    """docs/model_report.md and docs/cohere_tm1.csv validated exactly these. A
+    change is a refit (scripts/fit_cohere.py, a new report section), never an
+    edit that the relative tests would let through."""
+    assert (M.TEAM_MINUTES, M.COHERE_S0, M.COHERE_FULL, M.COHERE_CAP, M.COHERE_FLOOR,
+            M.COHERE_MIN_ROWS) == (241.5, 30.0, 20.0, 44.0, 1.0, 12)
+
+
+def test_out_rows_keep_their_minutes_whichever_way_the_team_moves():
+    """Short (the real fixture: ATL and IND both under) and over (a constructed
+    team 262 minutes deep, with two Out rows at p_play 0.004 and its filler)."""
+    over = _team([36, 34, 32, 30, 30, 28, 26, 24, 22, 30, 25], p=[1.0] * 9 + [0.004] * 2,
+                 out=[0.0] * 9 + [1.0] * 2, team="OVR")
+    for frame, n_out in ((pd.read_parquet(COHERE_FIX), 17), (over, 5)):
+        pred, rows = _served(frame)
+        after = M.cohere(pred, rows)
+        out = rows["inj_out"].eq(1.0).to_numpy()
+        moved = (after["mu_min"] - pred["mu_min"]).to_numpy()
+        assert out.sum() == n_out and (np.abs(moved[~out]) > 0.1).all()
+        np.testing.assert_array_equal(after.loc[out, "mu_min"], pred.loc[out, "mu_min"])
+        for c in ["p_play", *(c for c in pred.columns if c.startswith("rate_"))]:
+            np.testing.assert_array_equal(after[c], pred[c], err_msg=c)
+
+
+def test_cohere_recomposes_every_mean_from_the_new_minutes():
+    pred, rows = _served(pd.read_parquet(COHERE_FIX))
+    out = M.cohere(pred, rows)
+    for s in CONTRACT_STATS:
+        np.testing.assert_allclose(out[s], out["mu_min"] * out[f"rate_{s}"], rtol=1e-12, err_msg=s)
+    np.testing.assert_array_equal(out["pra"], out["pts"] + out["reb"] + out["ast"])
+    np.testing.assert_array_equal(out["stocks"], out["stl"] + out["blk"])
+    want = (out["pts"] + 1.2 * out["reb"] + 1.5 * out["ast"] + 3 * out["stl"] + 3 * out["blk"]
+            - out["tov"])
+    np.testing.assert_allclose(out["fantasy"], want, rtol=1e-12, atol=1e-12)
+    assert list(out.columns) == list(pred.columns) and out.index.equals(pred.index)
+
+
+def test_each_team_game_is_cohered_on_its_own_rows_in_any_order():
+    pred, rows = _served(pd.read_parquet(COHERE_FIX))
+    both = M.cohere(pred, rows)
+    ind = (rows["team"] == "IND").to_numpy()
+    alone = M.cohere(pred[ind], rows[ind])
+    pd.testing.assert_frame_equal(both[ind], alone, check_exact=True)
+    order = np.random.default_rng(0).permutation(len(pred))
+    shuffled = M.cohere(pred.iloc[order], rows.iloc[order])      # sums in another order: to rounding
+    pd.testing.assert_frame_equal(shuffled.sort_index(), both.sort_index(), rtol=1e-12, atol=1e-12)
+
+
+def test_a_team_in_two_games_is_cohered_per_game():
+    """The key is (game_id, team): the same club on two dates, as
+    scripts/fit_cohere.py and the mark-out gate pass whole seasons, is two
+    team-games, one short and one over here."""
+    g1 = _team([30.0] * 7, team="BOS", game="g1")          # 210 minutes
+    g2 = _team([36.0] * 8, team="BOS", game="g2")          # 288 minutes
+    pred, rows = _served(pd.concat([g1, g2], ignore_index=True))
+    both = M.cohere(pred, rows)
+    for g in ("g1", "g2"):
+        m = (rows["game_id"] == g).to_numpy()
+        pd.testing.assert_frame_equal(both[m], M.cohere(pred[m], rows[m]), check_exact=True)
+    s = _team_sum(both, rows)
+    assert abs(s[("g1", "BOS")] - M.TEAM_MINUTES) < 1e-9 and abs(s[("g2", "BOS")] - M.TEAM_MINUTES) < 1e-9
+
+
+def test_a_certain_lineup_adds_up_and_every_player_gains_the_same():
+    """Nobody's availability in doubt (p 1 or 0): the whole gap is minutes,
+    shared equally while no one is past COHERE_FULL."""
+    f = _team([18, 18, 17, 16, 16, 15, 14, 14, 12, 10, 9, 20], p=[1.0] * 9 + [0.0] * 3,
+              out=[0.0] * 9 + [1.0] * 3)
+    pred, rows = _served(f)
+    after = M.cohere(pred, rows)
+    gain = (after["mu_min"] - pred["mu_min"]).to_numpy()
+    assert abs(_team_sum(after, rows).iloc[0] - M.TEAM_MINUTES) < 1e-9
+    np.testing.assert_allclose(gain[:9], (M.TEAM_MINUTES - 140) / 9, rtol=1e-12)
+    np.testing.assert_array_equal(gain[9:], 0.0)
+
+
+def test_doubt_about_who_plays_moves_a_team_part_of_the_way_both_ways():
+    """Sure of everyone, a short team goes all the way to TEAM_MINUTES; in
+    much doubt it goes part of the way, short or over. Every player not Out
+    moves by the one shift (all here at one mu, so one weight), a doubtful
+    one exactly as far as a sure one."""
+    sure = _team([25.0] * 8, team="SUR")                               # 200 minutes, no doubt
+    unsure = _team([25.0] * 12, p=[1.0] * 4 + [0.5] * 8, team="UNS")   # 200 minutes, much doubt
+    deep = _team([35.0] * 12, p=[1.0] * 4 + [0.6] * 8, team="DEP")     # 308 minutes, much doubt
+    pred, rows = _served(pd.concat([sure, unsure, deep], ignore_index=True))
+    after = M.cohere(pred, rows)
+    s0, s1 = _team_sum(pred, rows), _team_sum(after, rows)
+    assert s0[("g1", "SUR")] == s0[("g1", "UNS")] == 200.0 and abs(s0[("g1", "DEP")] - 308.0) < 1e-9
+    assert abs(s1[("g1", "SUR")] - M.TEAM_MINUTES) < 1e-9
+    assert 205 < s1[("g1", "UNS")] < 230 and 255 < s1[("g1", "DEP")] < 295
+    move = (after["mu_min"] - pred["mu_min"]).to_numpy()
+    for team in ("UNS", "DEP"):
+        m = move[((rows["team"] == team) & rows["inj_out"].eq(0)).to_numpy()]
+        assert len(m) == 12 and abs(m[0]) > 0.5
+        np.testing.assert_allclose(m, m[0], rtol=1e-12)
+
+
+def test_heavier_players_move_less_both_ways():
+    short = _team([40, 36, 30, 20, 12, 8], team="SHT")                          # 146 minutes
+    over = _team([40, 36, 30, 30, 30, 30, 30, 30, 20, 12], team="OVR")          # 288 minutes
+    pred, rows = _served(pd.concat([short, over], ignore_index=True))
+    after = M.cohere(pred, rows)
+    move = (after["mu_min"] - pred["mu_min"]).to_numpy()
+    real = ~pd.concat([short, over], ignore_index=True)["pad"].to_numpy()
+    sht, ovr = real & (rows["team"] == "SHT").to_numpy(), real & (rows["team"] == "OVR").to_numpy()
+    # Rows run heaviest first; the three at or under COHERE_FULL move alike.
+    assert (np.diff(move[sht]) >= -1e-12).all() and move[sht][0] > 0
+    np.testing.assert_allclose(move[sht][3:], move[sht][-1], rtol=1e-12)
+    assert (np.diff(move[ovr]) <= 1e-12).all() and move[ovr][0] < 0
+    assert abs(_team_sum(after, rows)[("g1", "SHT")] - M.TEAM_MINUTES) < 1e-9
+
+
+def test_the_shift_tapers_for_heavier_players_before_any_cap():
+    """A modest gap and nobody near 44, short and over: a 36-minute player
+    moves a third as much as one at or under 20 (the documented weight
+    (44 - mu) / (44 - 20)), so the taper, not the cap, is what spares him."""
+    short = _team([36, 30, 24, 16, 16, 14, 12, 10, 10, 10, 6, 6], team="SHT")    # 190 minutes
+    over = _team([36, 30, 30, 30, 30, 28, 26, 24, 16, 12], team="OVR")          # 262 minutes
+    pred, rows = _served(pd.concat([short, over], ignore_index=True))
+    after = M.cohere(pred, rows)
+    assert after["mu_min"].max() < 39                                          # no cap anywhere
+    move = (after["mu_min"] - pred["mu_min"]).to_numpy()
+    for team, star, light in (("SHT", 0, 3), ("OVR", 0, 8)):
+        m = move[(rows["team"] == team).to_numpy()]
+        assert abs(m[star]) < 0.5 * abs(m[light]) and np.sign(m[star]) == np.sign(m[light]) != 0
+        np.testing.assert_allclose(m[star] / m[light], 1 / 3, rtol=1e-9)
+
+
+def test_the_floor_and_the_cap_bind_where_a_shift_would_cross_them():
+    """Far over and sure of everyone: the deepest bench would go below zero
+    and stops at min(mu, 1), the team still reaching TEAM_MINUTES. Five healthy
+    players far short: every one stops at 44, the team short of the target
+    rather than anyone pushed past it."""
+    deep = _team([36, 35, 34, 33, 32, 30, 30, 28, 26, 24, 22, 20, 18, 5, 3.5, 2, 0.6],
+                 team="DEP", pad=0)                                            # 379.1 minutes
+    five = _team([30, 28, 26, 24, 22], team="FIV")                             # 130, nine Out
+    pred, rows = _served(pd.concat([deep, five], ignore_index=True))
+    after = M.cohere(pred, rows)
+    d = (rows["team"] == "DEP").to_numpy()
+    np.testing.assert_array_equal(after.loc[d, "mu_min"].to_numpy()[-4:], [1.0, 1.0, 1.0, 0.6])
+    assert (after.loc[d, "mu_min"].to_numpy()[:-4] > 1.0).all()
+    assert abs(_team_sum(after, rows)[("g1", "DEP")] - M.TEAM_MINUTES) < 1e-9
+    healthy = ((rows["team"] == "FIV") & rows["inj_out"].eq(0)).to_numpy()
+    np.testing.assert_array_equal(after.loc[healthy, "mu_min"], 44.0)
+    assert _team_sum(after, rows)[("g1", "FIV")] == 220.0
+
+
+def test_a_side_under_the_training_minimum_is_left_as_predicted():
+    """Eleven rows is fewer than any training team-game had: a broken roster
+    pull, whose sum says nothing about minutes, so cohere leaves it alone; at
+    twelve it moves. The threshold is pipeline's MIN_TEAM_ROWS."""
+    from bucketlib import pipeline as P
+    assert M.COHERE_MIN_ROWS == P.MIN_TEAM_ROWS == 12
+    eleven = _team([30.0] * 6, team="ELV", pad=11)
+    twelve = _team([30.0] * 6, team="TWL", pad=12)
+    pred, rows = _served(pd.concat([eleven, twelve], ignore_index=True))
+    after = M.cohere(pred, rows)
+    e = (rows["team"] == "ELV").to_numpy()
+    pd.testing.assert_frame_equal(after[e], pred[e], check_exact=True)
+    assert (after.loc[~e & rows["inj_out"].eq(0).to_numpy(), "mu_min"] > 30.5).all()
+
+
+def test_a_team_that_already_adds_up_is_untouched():
+    f = _team([30, 30, 30, 30, 30, 30, 30, 31.5])          # exactly TEAM_MINUTES
+    pred, rows = _served(f)
+    assert _team_sum(pred, rows).iloc[0] == M.TEAM_MINUTES
+    pd.testing.assert_frame_equal(M.cohere(pred, rows), pred, check_exact=True)
+
+
+def test_cohere_refuses_rows_it_cannot_group_or_align():
+    pred, rows = _served(_team([30.0] * 8))
+    with pytest.raises(KeyError, match="inj_out"):
+        M.cohere(pred, rows.drop(columns=["inj_out"]))
+    with pytest.raises(ValueError, match="share one index"):
+        M.cohere(pred, rows.set_axis(rows.index + 100))
+    assert M.cohere(pred.iloc[:0], rows.iloc[:0]).empty
+
+
+def test_the_served_version_names_the_team_minutes_step():
+    m = M.Models(None, None, {}, {"model_version": "v1-2026-10-09"})
+    assert m.version == f"v1-2026-10-09+{M.COHERE_TAG}" == "v1-2026-10-09+tm1"

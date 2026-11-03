@@ -8,8 +8,10 @@ function (docs/serving_design.md sections 2-4 and the section 6 amendments).
 THE PATH. project() runs, in order: features.apply_lines (the lines block of
 the training builder) -> context.context_for (the training context function
 on one live report) -> models.check_nulls (the stratified null check; a raise
-is a train/serve skew, never an exemption) -> models.predict -> the section 3
-columns. Nothing here computes a feature.
+is a train/serve skew, never an exemption) -> models.predict -> models.cohere
+(each team-game's minutes moved toward adding up, so a team with ten players
+Out is not projected for 188 minutes) -> the section 3 columns. Nothing here
+computes a feature.
 
 THE FREEZE. A game is frozen from tip minus 5 minutes (horizons.TIP_FLOOR:
 from then on the live report is titled after the context cutoff). Its rows are
@@ -469,7 +471,11 @@ def project(feature_rows: pd.DataFrame, games: pd.DataFrame, schedule: pd.DataFr
                        f"hours before it), so this is no injury report: every status would be "
                        f"unknown and report_age_h null on every row, which training never had")
     M.check_nulls(models, ctx)
-    pred = M.predict(models, ctx)
+    # Every roster row of every lined game is here (a withheld game drops
+    # whole), so each team-game's minutes are cohered over its full roster; a
+    # side under MIN_TEAM_ROWS rows (short_games: a broken pull, RED in the
+    # bot) is left as predicted by cohere's own guard (COHERE_MIN_ROWS).
+    pred = M.cohere(M.predict(models, ctx), ctx)
 
     out = ctx[list(IDENTITY)].copy()
     out["p_play"] = pred["p_play"]

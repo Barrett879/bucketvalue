@@ -7,7 +7,9 @@ structure and hyperparameters), or with --production the shipped models/ (then
 every fold is in sample, and the output says so). On N_GAMES random regular
 season games per fold (seeded), the context is rebuilt at the gate horizon
 (d0_1100) from the archived injury horizons through livectx.build_context, the
-training context path, and models.predict scores it.
+training context path, and models.predict scores it, then models.cohere (the
+pipeline's team-minutes step; --raw leaves it out, which is how the v1
+measurements of 2026-10-09 in docs/gate_markout_v1.csv were taken).
 
   coherence   per team-game: full roster sum p_play x mu_min, and played-only
               sum mu_min (who played is postgame information: a coherence
@@ -20,9 +22,9 @@ training context path, and models.predict scores it.
               sum before and after, the absorbed share (teammates' gain over
               the star's loss), and the opponent's change (must be 0).
 
-    python scripts/gate_markout.py [--production] [--games 300] [--out docs/gate_markout_v1.csv]
+    python scripts/gate_markout.py [--production] [--raw] [--games 300] [--out docs/gate_markout_tm1.csv]
 
-Writes one row per (fold, measure) to the csv.
+Writes one row per (fold, measure) to the csv, with the step it scored.
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ from bucketlib import train as T  # noqa: E402
 FOLDS = {"validate": "2023-24", "test": "2024-25", "holdout": "2025-26"}
 HORIZON = "d0_1100"
 TABLE = C.CACHE_DIR / "train_table_full_v1.parquet"
-OUT = Path(__file__).resolve().parent.parent / "docs" / "gate_markout_v1.csv"
+OUT = Path(__file__).resolve().parent.parent / "docs" / "gate_markout_tm1.csv"
 OT_MINUTES = 25.0       # five players x five minutes per overtime period
 
 
@@ -65,8 +67,12 @@ def fold_inputs(season: str, gids) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataF
     return rows, L.resolve_names(ip, roster, names), it
 
 
-def expected(models: M.Models, ctx: pd.DataFrame) -> pd.DataFrame:
+def expected(models: M.Models, ctx: pd.DataFrame, raw: bool = False) -> pd.DataFrame:
+    """Per row: p_play, mu_min and p_play x mu_min as served (models.cohere
+    after predict, the pipeline's path) or, with raw, as predict alone."""
     p = M.predict(models, ctx)
+    if not raw:
+        p = M.cohere(p, ctx)
     return ctx[["game_id", "team", "person_id", "played", "min", "inj_out"]].assign(
         p_play=p["p_play"].to_numpy(), mu_min=p["mu_min"].to_numpy(),
         em=(p["p_play"] * p["mu_min"]).to_numpy())
@@ -87,7 +93,7 @@ def coherence(e: pd.DataFrame, ot: pd.DataFrame) -> dict:
             "played_only_minus_actual_rmse": float(np.sqrt(((g["played_only"] - g["actual"]) ** 2).mean()))}
 
 
-def markout(models: M.Models, rows, ip, it, e0: pd.DataFrame) -> dict:
+def markout(models: M.Models, rows, ip, it, e0: pd.DataFrame, raw: bool = False) -> dict:
     cand = e0[e0["inj_out"].eq(0)]
     stars = cand.loc[cand.groupby(["game_id", "team"])["em"].idxmax()]
     res = []
@@ -95,7 +101,7 @@ def markout(models: M.Models, rows, ip, it, e0: pd.DataFrame) -> dict:
         g = s.game_id
         c1 = L.build_context(rows[rows["game_id"] == g], ip[ip["game_id"] == g], it[it["game_id"] == g],
                              marked_out={int(s.person_id)})
-        e1 = expected(models, c1)
+        e1 = expected(models, c1, raw)
         b0, b1 = e0[e0["game_id"] == g], e1
         mine0, mine1 = b0[b0["team"] == s.team], b1[b1["team"] == s.team]
         star1 = float(mine1.loc[mine1["person_id"] == s.person_id, "em"].iloc[0])
@@ -122,6 +128,8 @@ def main() -> None:
     ap.add_argument("--production", action="store_true",
                     help="score with the shipped models/ (in sample for every fold)")
     ap.add_argument("--games", type=int, default=300)
+    ap.add_argument("--raw", action="store_true",
+                    help="score predict() alone, without models.cohere (the v1 measurements)")
     ap.add_argument("--out", default=str(OUT))
     args = ap.parse_args()
     t0 = time.time()
@@ -138,12 +146,13 @@ def main() -> None:
         gids = np.random.default_rng(0).choice(all_ids, min(args.games, len(all_ids)), replace=False)
         rows, ip, it = fold_inputs(season, gids)
         ctx = L.build_context(rows, ip, it)
-        e0 = expected(models, ctx)
+        e0 = expected(models, ctx, args.raw)
         ot = T.load_table("team_games", [season])
         ot = ot.loc[ot["game_id"].isin(set(gids)), ["game_id", "team", "ot_periods"]]
-        for measure, vals in (("coherence", coherence(e0, ot)), ("markout", markout(models, rows, ip, it, e0))):
+        for measure, vals in (("coherence", coherence(e0, ot)),
+                              ("markout", markout(models, rows, ip, it, e0, args.raw))):
             row = {"fold": fold, "season": season, "models": trained, "horizon": HORIZON, "measure": measure,
-                   **vals}
+                   "step": "predict" if args.raw else f"predict+cohere ({M.COHERE_TAG})", **vals}
             out.append(row)
             print({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()},
                   f"({time.time() - t0:.0f}s)", flush=True)

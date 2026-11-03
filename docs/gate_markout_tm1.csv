@@ -1,0 +1,13 @@
+fold,season,models,horizon,measure,step,team_games,full_roster_mean,played_only_mean,actual_mean,240_plus_25_EOT,full_minus_actual_mean,played_only_minus_actual_mean,played_only_minus_actual_rmse,star_expected_min_mean,star_p_play_after_mean,team_sum_before_mean,team_sum_after_mean,team_minutes_lost_mean,team_minutes_lost_p90,absorbed_share_mean,absorbed_share_p10,absorbed_share_median,opponent_change_max_abs
+validate,2023-24,production (in sample),d0_1100,coherence,predict,600,240.9259,239.6488,241.0833,241.0833,-0.1574,-1.4345,19.0004,,,,,,,,,,
+validate,2023-24,production (in sample),d0_1100,markout,predict,600,,,,,,,,33.9141,0.0049,240.9259,237.6750,3.2509,10.6498,0.9058,0.6759,0.8836,0.0000
+test,2024-25,production (in sample),d0_1100,coherence,predict,600,241.3015,240.0468,241.1667,241.1667,0.1348,-1.1198,19.6487,,,,,,,,,,
+test,2024-25,production (in sample),d0_1100,markout,predict,600,,,,,,,,33.1922,0.0045,241.3015,238.5603,2.7411,10.3091,0.9198,0.6842,0.8888,0.0000
+holdout,2025-26,production (in sample),d0_1100,coherence,predict,600,240.5158,241.4574,240.9998,241.0000,-0.4840,0.4576,20.1120,,,,,,,,,,
+holdout,2025-26,production (in sample),d0_1100,markout,predict,600,,,,,,,,32.5208,0.0047,240.5158,237.7755,2.7402,9.7617,0.9179,0.7023,0.8996,0.0000
+validate,2023-24,production (in sample),d0_1100,coherence,predict+cohere (tm1),600,241.3835,240.2572,241.0833,241.0833,0.3001,-0.8261,18.2907,,,,,,,,,,
+validate,2023-24,production (in sample),d0_1100,markout,predict+cohere (tm1),600,,,,,,,,33.9383,0.0049,241.3835,240.6041,0.7794,3.2736,0.9777,0.9050,0.9699,0.0000
+test,2024-25,production (in sample),d0_1100,coherence,predict+cohere (tm1),600,241.4615,240.4581,241.1667,241.1667,0.2949,-0.7086,19.0823,,,,,,,,,,
+test,2024-25,production (in sample),d0_1100,markout,predict+cohere (tm1),600,,,,,,,,33.2045,0.0045,241.4615,240.8842,0.5773,3.2589,0.9834,0.8989,0.9731,0.0000
+holdout,2025-26,production (in sample),d0_1100,coherence,predict+cohere (tm1),600,241.0879,242.1841,240.9998,241.0000,0.0881,1.1844,18.5090,,,,,,,,,,
+holdout,2025-26,production (in sample),d0_1100,markout,predict+cohere (tm1),600,,,,,,,,32.5586,0.0047,241.0879,240.3745,0.7134,3.3148,0.9790,0.8950,0.9719,0.0000

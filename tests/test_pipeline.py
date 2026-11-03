@@ -7,7 +7,7 @@ injury report of that day (12:00 PM ET), the production models (models/,
 verified by models.load). The lines are made up: historical lines are never
 committed. Every check runs production code; where a property is "the same
 as", the other side is production code too (context.context_for,
-models.predict).
+models.predict, models.cohere).
 """
 from __future__ import annotations
 
@@ -110,13 +110,14 @@ def test_project_frame_has_the_contract_columns_and_dtypes(base, feats):
     assert set(P.MEANS) == {"min", *M.STATS, *M.COMPOSED}
 
 
-def test_project_is_apply_lines_then_context_then_predict(base, feats, games, sched, report, mdl,
-                                                          names):
-    """The frame's numbers are models.predict on context.context_for of
-    features.apply_lines: the production path, nothing recomputed."""
+def test_project_is_apply_lines_then_context_then_predict_then_cohere(base, feats, games, sched,
+                                                                      report, mdl, names):
+    """The frame's numbers are models.cohere of models.predict on
+    context.context_for of features.apply_lines: the production path, nothing
+    recomputed."""
     rows = F.apply_lines(feats, made_up_lines(games))
     ctx = X.context_for(rows, games, sched, report, MORNING, names)
-    pred = M.predict(mdl, ctx)
+    pred = M.cohere(M.predict(mdl, ctx), ctx)
     want = pd.concat([ctx[["game_id", "person_id", "career_games", *X.DISPLAY_COLS, "home_line",
                            "total"]], pred], axis=1).set_index(["game_id", "person_id"]).sort_index()
     got = base.set_index(["game_id", "person_id"]).sort_index()
@@ -135,6 +136,27 @@ def test_project_is_apply_lines_then_context_then_predict(base, feats, games, sc
     # Unknown is never healthy: Denver had not submitted at noon.
     den = X.display_status(base[base["team"] == "DEN"])
     assert (den["status"] == X.NOT_FILED).all()
+
+
+def test_every_team_game_of_the_slate_adds_up_closer_than_predict_alone(base, feats, games, sched,
+                                                                         report, mdl, names):
+    """models.cohere on the real 2026-03-12 slate: each team's p-weighted
+    minutes end nearer TEAM_MINUTES than the raw models left them (never
+    past it), and the frame is that step applied once, not twice."""
+    ctx = X.context_for(F.apply_lines(feats, made_up_lines(games)), games, sched, report, MORNING,
+                        names)
+    raw = M.predict(mdl, ctx)
+    key = [ctx["game_id"], ctx["team"]]
+    before = (raw["p_play"] * raw["mu_min"]).groupby(key).sum()
+    got = base.set_index(["game_id", "person_id"])
+    served = got.loc[list(zip(ctx["game_id"], ctx["person_id"]))]
+    after = pd.Series((served["p_play"] * served["mu_min"]).to_numpy(), index=ctx.index).groupby(key).sum()
+    assert len(before) == 18
+    gap0, gap1 = (before - M.TEAM_MINUTES), (after - M.TEAM_MINUTES)
+    assert (gap1.abs() <= gap0.abs() + 1e-9).all() and (np.sign(gap1) * np.sign(gap0) >= 0).all()
+    assert gap1.abs().mean() < 0.5 * gap0.abs().mean()
+    twice = M.cohere(M.cohere(raw, ctx), ctx)
+    assert not np.allclose(twice["mu_min"], served["mu_min"].to_numpy())
 
 
 def test_report_time_only_on_games_the_report_was_in_reach_for(feats, games, sched, report, mdl,

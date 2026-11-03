@@ -162,8 +162,10 @@ class Models:
 
     @property
     def version(self) -> str:
-        """Stamped on every projection row (props contract: model_version)."""
-        return self.registry["model_version"]
+        """Stamped on every projection row (props contract: model_version):
+        the registry's model_version plus the serving step's tag (COHERE_TAG),
+        so a row says which team-minutes step made its numbers too."""
+        return f"{self.registry['model_version']}+{COHERE_TAG}"
 
     def estimators(self) -> dict:
         return {"availability": self.availability, "minutes": self.minutes,
@@ -510,9 +512,112 @@ def predict(models: Models, rows: pd.DataFrame) -> pd.DataFrame:
         out[f"rate_{s}"] = models.rates[s].predict(X)
     for s, parts in RATE_CEILINGS:
         out[f"rate_{s}"] = np.minimum.reduce([out[f"rate_{s}"], *(out[f"rate_{p}"] for p in parts)])
+    _compose(out, stats)
+    return pd.DataFrame(out, index=rows.index)[output_columns(stats)]
+
+
+def _compose(out, stats: list[str]) -> None:
+    """The E[stat | plays] means from mu_min and the (capped) rates, then the
+    combos and Fantasy as sums of those means, written into `out` (a dict of
+    arrays or a frame). The one composition: predict() builds the means with
+    it and cohere() rebuilds them after moving mu_min."""
     for s in stats:
         out[s] = out["mu_min"] * out[f"rate_{s}"]
     for c, parts in T.COMBOS.items():
         out[c] = sum(out[p] for p in parts)
     out["fantasy"] = sum(w * out[s] for s, w in T.FANTASY_W.items())
-    return pd.DataFrame(out, index=rows.index)[output_columns(stats)]
+
+
+# ── Team minutes coherence ───────────────────────────────────────────────────
+# A team-game's minutes add up: over its roster, the sum of p_play x E[MIN |
+# plays] is E[team minutes], 240 plus 25 per overtime period. The models are
+# fit row by row and miss that sum with an sd of 12.2 minutes (out of sample,
+# 2023-24 and 2024-25), from 148 to 304; Indiana on 2026-11-02, ten players
+# Out, summed to 188. cohere() moves every team-game part of the way back
+# (docs/model_report.md, "Team minutes coherence").
+TEAM_MINUTES = 241.5    # 240 + 25 x E[OT periods]: 241.56 over 2018-19..2022-23
+COHERE_S0 = 30.0        # the blend's scale in minutes  } both fitted on 2023-24
+COHERE_FULL = 20.0      # full shift up to this mu      } only (validate fold)
+COHERE_CAP = 44.0       # no shift at all from here; never above max(this, mu)
+COHERE_FLOOR = 1.0      # a shift never lowers E[MIN | plays] below min(this, mu)
+COHERE_SPAN = 200.0     # the shift is searched in [-SPAN, SPAN] minutes
+COHERE_ITERS = 64       # bisection steps: 400 / 2^64 minutes, exact in practice
+COHERE_TAG = "tm1"      # the serving step's version, in Models.version
+# Fewer rows than any training team-game had (pipeline.MIN_TEAM_ROWS, the same
+# number, which tests pin together): a broken roster pull, whose sum says
+# nothing about minutes. Such a team-game is left as predicted.
+COHERE_MIN_ROWS = 12
+
+
+def cohere(pred: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
+    """predict() output with each team-game's minutes moved toward coherence.
+
+    `rows` are the rows predict() scored (same index), and must hold EVERY
+    roster row of each team-game (game_id, team) in it: a partial roster has a
+    different sum. A team-game with fewer than COHERE_MIN_ROWS rows is a
+    broken roster pull (the bot flags it RED and still commits what it wrote)
+    and is left exactly as predicted, rather than handing the missing
+    players' minutes to the few rows present. Per team-game:
+      S       sum of p_play x mu_min, the team minutes the rows imply
+      sd      sqrt(sum p (1 - p) mu^2), how much the uncertainty about who
+              plays spreads that sum
+      lam     COHERE_S0^2 / (COHERE_S0^2 + sd^2)
+      target  S + lam x (TEAM_MINUTES - S)
+    Each row not listed Out (inj_out) moves by w x shift, with one shift per
+    team-game solved so the p-weighted sum hits the target, and
+      w = clip((CAP - mu) / (CAP - FULL), 0, 1)
+    (the full shift up to FULL minutes, tapering to none at CAP), the result
+    clipped to [min(mu, FLOOR), max(mu, CAP)]. A row listed Out (a visitor's
+    mark-out included) keeps its mu_min: an absence does not absorb its own
+    minutes. The stat means, combos and Fantasy are recomposed from the new
+    mu_min and the unchanged rates (_compose); p_play is untouched.
+
+    Why part of the way: a gap is partly availability (players with a low
+    p_play who play anyway, or the reverse) and partly E[MIN | plays]. The
+    share that is minutes falls as availability gets less certain (2023-24:
+    0.92 at sd under 11, 0.38 at sd 27 and over; 2025-26, measured only, 0.96
+    and 0.41), and lam follows it; with every player certain in or out, sd is
+    0 and the whole gap is minutes. Moving the
+    whole gap everywhere in proportion to mu made minutes worse than not
+    moving at all (2023-24 RMSE +0.03%). Why equal and tapered: an equal shift
+    beat a proportional one, and an untapered one overshot the heaviest
+    players (projected over 34: residual +0.37, shift +0.56 on short teams),
+    whose minutes give least; the taper took their RMSE from +0.15% to -0.17%.
+    """
+    if len(pred) == 0:
+        return pred
+    if not pred.index.equals(rows.index):
+        raise ValueError("cohere: pred and rows must share one index (predict's output and its rows)")
+    absent = [c for c in ("game_id", "team", "inj_out") if c not in rows.columns]
+    if absent:
+        raise KeyError(f"cohere needs {absent} on the rows (the team-game key and the Out flag)")
+    grp = rows.groupby(["game_id", "team"], sort=False).ngroup().to_numpy()
+    n = int(grp.max()) + 1
+    p = pred["p_play"].to_numpy(dtype=float)
+    mu = pred["mu_min"].to_numpy(dtype=float)
+    move = rows["inj_out"].to_numpy(dtype=float) != 1.0
+
+    def by_team(w):
+        return np.bincount(grp, weights=w, minlength=n)
+
+    S = by_team(p * mu)
+    lam = COHERE_S0 ** 2 / (COHERE_S0 ** 2 + by_team(p * (1 - p) * mu ** 2))
+    target = S + lam * (TEAM_MINUTES - S)
+    lo, hi = np.minimum(mu, COHERE_FLOOR), np.maximum(mu, COHERE_CAP)
+    # w is 0 on a row listed Out, so clip(mu + 0, lo, hi) keeps it exactly.
+    w = np.where(move, np.clip((COHERE_CAP - mu) / (COHERE_CAP - COHERE_FULL), 0.0, 1.0), 0.0)
+    a, b = np.full(n, -COHERE_SPAN), np.full(n, COHERE_SPAN)
+    for _ in range(COHERE_ITERS):
+        m = (a + b) / 2
+        short = by_team(p * np.clip(mu + w * m[grp], lo, hi)) < target
+        a, b = np.where(short, m, a), np.where(short, b, m)
+    # Nothing that can move (every row Out or capped, or no weight), nothing
+    # to do, or a broken roster pull: the rows stay exactly as predicted, not
+    # moved by the bisection's last bit.
+    idle = ((by_team(p * w) <= 0) | (np.abs(target - S) < 1e-9)
+            | (by_team(np.ones(len(mu))) < COHERE_MIN_ROWS))
+    shift = np.where(idle, 0.0, (a + b) / 2)
+    out = pred.copy()
+    out["mu_min"] = np.clip(mu + w * shift[grp], lo, hi)
+    _compose(out, [c[len("rate_"):] for c in pred.columns if c.startswith("rate_")])
+    return out
