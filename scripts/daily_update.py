@@ -10,11 +10,10 @@ from inputs days old. A plain run on the evening before already projects
 tomorrow (provisional).
 
 Sources: cdn.nba.com (schedule, liveData box scores, playerIndex.json), the
-ak-static injury PDFs, and ESPN. The 2026-10-09 Actions probe (docs/probes/)
-reached the cdn schedule and box scores, the PDFs and ESPN; playerIndex.json
-sits on the same host and path as the schedule but was not in that probe
-(scripts/probe_hosts.py lists it now: rerun the probe before going live).
-stats.nba.com is never called (it hangs from Azure).
+ak-static injury PDFs, and ESPN, every one reached from Actions by the probes
+of 2026-10-09 and 2026-10-11 (docs/probes/; playerIndex in the second) and
+read by the scheduled bot since 2026-11-02. stats.nba.com is never called (it
+hangs from Azure).
 
 Every write goes under state/, through bucketlib.state's paths (one writer
 per path; docs/serving_design.md section 1). Nothing under cache/ is written:
@@ -444,8 +443,9 @@ def step_finals(sched: pd.DataFrame, today: dt.date, dry: bool) -> None:
                 print(f"WARN finals: {e} (the schedule says Final; retried next run)")
             else:
                 red(f"box score of final game {gid} is still not final {_hours(age)} after tip: {e}. "
-                    f"If it stays stuck, commit an override locally: "
-                    f"scripts/build_serving_seed.py --override {gid}")
+                    f"If it stays stuck, read 'A stuck game' in docs/runbook.md section 4 before "
+                    f"any scripts/build_serving_seed.py --override {gid}: a 2026-27 override "
+                    f"must carry the game's inactive rows")
             continue
         except Exception as e:  # noqa: BLE001 - one strange payload must never throw away the night
             red(f"parse failed for {gid}: {type(e).__name__}: {e}")

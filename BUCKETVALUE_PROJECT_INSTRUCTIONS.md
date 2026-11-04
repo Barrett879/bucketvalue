@@ -229,7 +229,7 @@ percentiles. Targets that fail ship a labelled baseline.
   from the cdn liveData box score (one call per game: every counting stat, status,
   starter, seconds, Final flag); stats.nba.com is used for the backfill and slow data
   (playerindex, bio). Fallbacks in order: cdn from Actions; Barrett's Mac as the single
-  writer (docs/runbook_opening_night.md section 5, `scripts/commit_state.sh --local`);
+  writer (docs/runbook.md section 5, `scripts/commit_state.sh --local`);
   a visible "data through" stamp. (ESPN summary box scores were dropped from this list
   on 2026-10-09: no parser exists, and the Mac fallback covers the same outage.)
 - **State**: player state keyed by PLAYER (season and team boundary rules written once,

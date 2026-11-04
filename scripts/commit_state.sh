@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Commit and push the bot's state/ and NOTHING else. The one implementation
 # of the bot's commit, used by .github/workflows/daily.yml (the "Commit state/
-# only" step) and by the local single-writer fallback in
-# .github/runbook_opening_night.md.
+# only" step) and by the local single-writer fallback in docs/runbook.md
+# section 5.
 #
 #   scripts/commit_state.sh [--local] [BRANCH]
 #

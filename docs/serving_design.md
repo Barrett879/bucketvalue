@@ -146,11 +146,12 @@ provenance: report_ts_et, home_line, total, computed_at (UTC), frozen (bool)
 
 ## 4. Bot (scripts/daily_update.py) and Actions
 
-Step 6 projections, for D in (today ET, tomorrow ET), state games only (RS, PI):
+Step 6 projections, for D in (today ET, tomorrow ET), regular-season games only
+(pipeline.PROJECTED_TYPES; play-in games are state games, never projected):
 history(season, before=D) -> history_features -> write features; then project
-with the bot's report and odds -> write projections, rows of games with
-tip <= now carried over from the existing file unchanged. Tomorrow is
-provisional. `if_changed=True` everywhere. `.github/workflows/daily.yml` shipped
+with the bot's report and odds -> write projections, rows of games past tip
+minus 5 minutes (pipeline.FREEZE_LEAD) carried over from the existing file
+unchanged. Tomorrow is provisional. `if_changed=True` everywhere. `.github/workflows/daily.yml` shipped
 with `workflow_dispatch` only (a private repo spends Barrett's Actions
 minutes). Since 2026-11-02 it runs on a private-repo schedule of four runs a
 day, so a roster snapshot is committed every day (section 9); the dense
