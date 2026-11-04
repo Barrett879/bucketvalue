@@ -15,40 +15,41 @@ Done:
   ESPN's team-roster endpoint is read since 2026-11-02 by the in-season roster
   check. It sits on the probed host (site.api.espn.com) but was in no probe;
   a failure there is a WARN only.
-- **The bot commits from Actions on a private-repo cron of four runs a day**
-  (since 2026-11-02; bot commits 8ece28a, ebc144b, 8f8a126). Each ET day with
-  at least one run that pulls a good roster and commits saves that day's roster
-  snapshot, which a 2026-27 box needs because it lists active players only
-  (`docs/known_issues.md`).
-- **`tests.yml` is green on GitHub since dad9bb9.** That is from Barrett's
-  screenshot of the Actions tab, and daily.yml's identical Tests step passed
-  before bot commits 8ece28a and 8f8a126.
+- **The bot commits from Actions.** It ran on a private-repo cron of four runs
+  a day from 2026-11-02 (bot commits 8ece28a, ebc144b, 8f8a126, 0693e13,
+  9a1f01a), and on the full every-30-minutes cron since 2026-11-04. Each ET day
+  with at least one run that pulls a good roster and commits saves that day's
+  roster snapshot, which a 2026-27 box needs because it lists active players
+  only (`docs/known_issues.md`).
+- **The repo is public** since 2026-11-04 (Barrett's call). Its Actions runs
+  can be read without a token: `https://api.github.com/repos/Barrett879/bucketvalue/actions/runs`.
+- **`tests.yml` is green on GitHub** since dad9bb9, through 055d752 and
+  6d32676 (Actions runs 6 to 8).
 - **The team-minutes step** (models.cohere, a model_version ending in "+tm1")
   is in every projection computed since 055d752.
 
 Not done, in the order of sections 1 and 3:
 - **The healthcheck** (`BV_HEALTHCHECK_URL`) is not set.
-- **The repo is private.**
 - **No app is deployed.**
-- **The full cron is still commented out in `daily.yml`.**
 
-GitHub starts cron runs late and sometimes not at all. On 2026-11-02, 2 of the
-4 slots committed. On 2026-11-03 no bot commit landed between 04:01 and 21:04
-UTC; Barrett's 055d752 at 09:18 UTC was the only commit. So the bot's first
-commit of that ET day came at 4:04 PM. `scripts/daily_update.py` cites 2 to 7
+GitHub starts cron runs late and sometimes not at all. On the private cron,
+2026-11-02 to 11-04, it started 5 runs from 10 slots, all successful, each
+created 42 minutes to 2 hours 50 minutes after the nearest earlier slot. On 2026-11-03 no bot commit
+landed between 04:01 and 21:04 UTC (Barrett's 055d752 at 09:18 UTC was the
+only commit), so the bot's first commit of that ET day came at 4:04 PM. `scripts/daily_update.py` cites 2 to 7
 hours of lag measured on DiamondValue. The first line of the Bot step's log
 (`BucketValue daily update: ET date D, run at ...`) gives each run's real start.
 
-## 1. Now, while the repo is private: the dead-man's switch
+## 1. The dead-man's switch
 
-A missed slot alerts nobody today, and a day without a good run loses that
-day's roster snapshot for good. Set the switch before anything else:
+A missed slot alerts nobody until this exists, and a day without a good run
+loses that day's roster snapshot for good:
 
 1. On healthchecks.io (the free tier is enough), create a check with schedule
-   type **Cron**, expression **`17 2,15,20,23 * * *`**, time zone **UTC**, and a
-   grace time of **8 hours**. That is the private cron in `daily.yml`. Its runs
-   are 3 to 13 hours apart (9:17 PM to 10:17 AM EST is 13), and starts run hours
-   late.
+   type **Cron**, expression **`17,47 13-23,0-6 * * *`**, time zone **UTC**, and
+   a grace time of **3 hours**. That is the full cron in `daily.yml`, on since
+   2026-11-04. If the repo goes private again, it is `17 2,15,20,23 * * *` with
+   an 8-hour grace instead (section 6): those runs are 3 to 13 hours apart.
 2. Turn on alerts by email, and phone or push if wanted.
 3. Copy the check's ping URL into the repo secret **`BV_HEALTHCHECK_URL`**
    (Settings, Secrets and variables, Actions).
@@ -116,8 +117,8 @@ site should not show games frozen hours before tip.
    - **What the render tests cover:** `tests/test_pages_smoke.py` renders the
      newest committed slates and every game page from a checkout; the workflow
      reruns it before each commit.
-3. **Flip the repo public** (Barrett).
-4. **Swap the cron.** In `daily.yml`, replace the line
+3. **Flip the repo public** (Barrett). Done 2026-11-04.
+4. **Swap the cron** (done 2026-11-04). In `daily.yml`, replace the line
    `- cron: "17 2,15,20,23 * * *"` with the two commented full-schedule lines
    (`17,47 13-23 * * *` and `17,47 0-6 * * *`), push, then **dispatch one run by
    hand** (Actions, daily-update, Run workflow, date input EMPTY).
@@ -126,10 +127,10 @@ site should not show games frozen hours before tip.
    - **The date input:** never type a date to "run tomorrow early". A future
      date is refused (exit 2), and a plain run already projects tomorrow as
      provisional.
-5. **Switch the healthcheck in the same sitting**: expression
-   `17,47 13-23,0-6 * * *`, grace **3 hours**. The full expression on the
-   private cron alarms within hours, and an 8-hour grace on a 30-minute cron
-   hides an outage.
+5. **Switch the healthcheck in the same sitting**, if it was set on the private
+   cron: expression `17,47 13-23,0-6 * * *`, grace **3 hours**. The full
+   expression on the private cron alarms within hours, and an 8-hour grace on a
+   30-minute cron hides an outage.
 6. **Deploy on Streamlit Community Cloud** (Barrett's account):
    - **Settings:** repository `Barrett879/bucketvalue`, branch `main`, main file
      `app.py` (About and Game come from `pages/`).

@@ -155,8 +155,9 @@ Found by the build 1 verifiers and the cross-module fix pass that followed.
   Actions; stats.nba.com still hangs there, as expected.
 - **Dead-man's switch needs a secret.** daily.yml pings `BV_HEALTHCHECK_URL`
   after every run and only warns until the secret exists. A healthchecks.io
-  check with the private cron and an 8-hour grace now, the full cron and a
-  3-hour grace after the swap (docs/runbook.md sections 1 and 3).
+  check with the full cron and a 3-hour grace, on since 2026-11-04; the private
+  cron and an 8-hour grace if the repo goes private again (docs/runbook.md
+  sections 1 and 6).
 - **Props thresholds are unmeasured guesses** until a real NBA paste exists:
   the period-board heuristics (0.6 ratio with a 2.0 floor, 0.55 median, 3
   players) and the 20-minute "bench role" void-risk note.

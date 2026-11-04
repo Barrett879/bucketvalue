@@ -153,10 +153,10 @@ with the bot's report and odds -> write projections, rows of games past tip
 minus 5 minutes (pipeline.FREEZE_LEAD) carried over from the existing file
 unchanged. Tomorrow is provisional. `if_changed=True` everywhere. `.github/workflows/daily.yml` shipped
 with `workflow_dispatch` only (a private repo spends Barrett's Actions
-minutes). Since 2026-11-02 it runs on a private-repo schedule of four runs a
-day, so a roster snapshot is committed every day (section 9); the dense
-every-30-minutes crons stay commented until the deploy STOP, after the repo
-is public.
+minutes). From 2026-11-02 it ran on a private-repo schedule of four runs a
+day, so a roster snapshot is committed every day (section 9); since
+2026-11-04, when the repo went public, it runs the dense every-30-minutes
+crons.
 
 ## 5. App
 
