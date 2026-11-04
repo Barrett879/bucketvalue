@@ -1655,8 +1655,50 @@ def test_the_socket_guard_is_known_to_fire(socket_guard):
 
 
 # ── Defect 5: memory on the shared process ──────────────────────────────────
-def test_the_paste_cap_is_sized_to_a_real_feed():
-    assert props.MAX_PASTE_CHARS <= 8_000_000
+def _realistic_feed(n: int, feed: dict) -> dict:
+    """The constructed feed scaled to `n` projections shaped like a real one:
+    27 attributes and 8 relationships, about 1 KB each. The first real NBA
+    paste (2026-11-04) was refused at the old 8M cap, because the fixture's
+    ~300-byte projections had made a full slate look four times smaller."""
+    proto = feed["data"][0]
+    out = []
+    for i in range(n):
+        a = dict(proto["attributes"])
+        a.update({"adjusted_odds": None, "board_time": "2026-10-20T10:00:00-04:00",
+                  "custom_image": None, "end_time": None, "flash_sale_line_score": None,
+                  "game_id": f"nba_game_{i % 14}", "hr_20": True, "in_game": False,
+                  "is_live": False, "is_promo": False, "projection_type": "Single Stat",
+                  "rank": i, "refundable": True, "stat_display_name": a["stat_type"],
+                  "today": True, "trending_count": 1234, "updated_at": "2026-10-20T16:30:00-04:00",
+                  "line_movement": None, "event_type": "team", "group_key": f"g{i}",
+                  "tv_channel": "ESPN"})
+        r = dict(proto["relationships"])
+        r.update({k: {"data": {"type": k, "id": "1"}}
+                  for k in ("duration", "projection_type", "stat_average", "stat_type", "game")})
+        r["score"] = {"data": None}
+        out.append({"type": "projection", "id": str(100_000 + i), "attributes": a, "relationships": r})
+    return {**feed, "data": out}
+
+
+def test_a_full_slate_feed_is_read_not_refused(feed_text):
+    """6,000 lines, pretty-printed as a browser's JSON viewer copies them."""
+    pretty = json.dumps(_realistic_feed(6000, json.loads(feed_text)), indent=2)
+    assert 11_000_000 < len(pretty) < props.MAX_PASTE_CHARS
+    got = props.parse_any(pretty)
+    assert not got.attrs["too_large"] and len(got) == 6000
+
+
+def test_the_paste_caps_still_bound_a_shared_process():
+    """The 2026-11-04 measurement (props.py, paste-box limits): at these caps a
+    hostile paste costs seconds and tens of MB, never the old 536 MB."""
+    assert props.MAX_PASTE_CHARS <= 32_000_000
+    assert props.MAX_JSON_CONTAINERS <= 400_000 and props.MAX_JSON_COMMAS <= 2_500_000
+
+
+def test_a_flat_json_array_is_refused_before_it_is_built():
+    start = time.time()
+    got = props.parse_any("[" + "1," * 3_000_000 + "1]")
+    assert got.empty and got.attrs["too_large"] and time.time() - start < 1.0
 
 
 def test_board_text_stops_reading_at_its_line_cap(monkeypatch):

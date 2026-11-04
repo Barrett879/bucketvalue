@@ -104,14 +104,23 @@ FEED_URL = ("https://api.prizepicks.com/projections?"
 # ── Paste-box limits. Each bounds work an anonymous visitor can cause ────────
 # MEASURED (audit 2026-10-09): at a 20 MB cap one paste of short lines took
 # peak memory from 116 to 536 MB, because every line became a Python string at
-# once. A full feed is ~1-4 MB, so 8 MB keeps 2x headroom; the board parser now
-# reads lines lazily and stops at MAX_TEXT_LINES; and JSON is refused BEFORE it
-# is built when it holds more objects and arrays than any feed could (a
-# 3,000-row feed has ~60k), since `[{},{},...]` costs ~64 bytes per two chars.
-MAX_PASTE_CHARS = 8_000_000
-MAX_JSON_CONTAINERS = 400_000
+# once. The board parser now reads lines lazily and stops at MAX_TEXT_LINES,
+# and JSON is refused BEFORE it is built when it holds more objects and arrays
+# than any feed could, since `[{},{},...]` costs ~64 bytes per two chars.
+# RESIZED 2026-11-04, on the first real NBA paste (Barrett's, refused as too
+# large at the old 8M cap). The old cap assumed a feed of ~1-4 MB from the
+# constructed fixture's ~300-byte projections; a real one carries ~25
+# attributes and 8 relationships, ~1 KB. A full slate of 6,000 lines is then
+# 6.4M characters compact and 11.5M as a browser pretty-prints it. MEASURED at
+# the new caps: 6,000 realistic lines parse in 0.4 s at a 38 MB peak; a hostile
+# 32M-character paste of short lines takes 1.3 s and 33 MB; a hostile flat JSON
+# array is refused by MAX_JSON_COMMAS before json builds it (unbounded at 32M
+# it took 7.3 s and 143 MB). A realistic line has ~43 commas and ~18 objects.
+MAX_PASTE_CHARS = 32_000_000
+MAX_JSON_CONTAINERS = 400_000     # ~22,000 realistic lines
+MAX_JSON_COMMAS = 2_500_000       # ~58,000 realistic lines; a flat array stays small
 MAX_TEXT_LINES = 150_000          # a square is 5-12 lines; 10,000 squares fit
-MAX_ROWS_PER_PASTE = 10_000       # an NBA slate with ladders is ~3,000
+MAX_ROWS_PER_PASTE = 30_000       # a full slate with every alt line is ~6,000-10,000
 MAX_LINE_VALUE = 1000.0           # Fantasy and PRA lines are under 100
 MAX_NAME_LEN = 80
 MAX_LABEL_LEN = 80
@@ -751,9 +760,10 @@ def parse_any(text) -> pd.DataFrame:
     if not t:
         return _frame([], attrs)
     if t[0] in "{[":
-        if t.count("{") + t.count("[") > MAX_JSON_CONTAINERS:
+        if t.count("{") + t.count("[") > MAX_JSON_CONTAINERS or t.count(",") > MAX_JSON_COMMAS:
             # Counted in C before json builds a single object: a paste of
-            # `[{},{},...]` at the size cap would otherwise allocate millions.
+            # `[{},{},...]` or `[1,1,...]` at the size cap would otherwise
+            # allocate millions.
             attrs["too_large"] = True
             return _frame([], attrs)
         try:
@@ -1253,7 +1263,7 @@ def lines_for_date(lines: pd.DataFrame | None, date) -> pd.DataFrame:
 # visitor's board (audit 2026-10-09).
 BOARD_TTL_S = 18 * 3600
 BOARD_MAX = 200
-BOARD_MAX_ROWS = 5_000
+BOARD_MAX_ROWS = 12_000         # a full slate, one line per player and stat, is ~5,000
 BOARD_TOTAL_ROWS = 100_000
 # MEASURED (audit 2026-10-09): ~1.1 KB per stored row with hostile 70-character
 # labels, so the old 200,000-row cap let the store hold ~227 MB. The store now
