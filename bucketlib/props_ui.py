@@ -30,7 +30,7 @@ import streamlit as st
 
 from . import props, simprov
 from .cache import logger
-from .util import SENTINEL, esc
+from .util import SENTINEL, esc, fmt_tip, to_et
 
 PASTE_KEY = "bv_pp_paste"
 REPORT_KEY = "bv_pp_report"
@@ -88,6 +88,29 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" + ("" if n == 1 else "s")
 
 
+def paste_time_text(meta) -> str:
+    """'Last paste 7:05 PM ET, Thu Nov 5.' from meta['pasted_utc'] (when the
+    visitor's board was last written), or '' when unknown. Always with the
+    date: an 18-hour board can outlive the day it was pasted on, and lines
+    move, so the reader needs to see how old they are."""
+    t = (meta or {}).get("pasted_utc")
+    if t is None:
+        return ""
+    try:
+        et = to_et(t)
+    except (TypeError, ValueError):
+        return ""
+    return f"Last paste {fmt_tip(et)}, {_fmt_date(et)}."
+
+
+NO_LINES_SLATE = ("<b>No PrizePicks lines on this page.</b> Paste a board with "
+                  "<b>Update lines</b> in the top bar: the model's comparison and the "
+                  "biggest discrepancies appear here.")
+NO_LINES_GAME = ("<b>No PrizePicks lines on this page.</b> Paste a board with "
+                 "<b>Update lines</b> in the top bar: each player's lines open under his "
+                 "team, and the biggest discrepancies appear here.")
+
+
 # ── The token ────────────────────────────────────────────────────────────────
 def board_token() -> str | None:
     """This visitor's board token from ?board=, or None when absent, malformed
@@ -135,6 +158,8 @@ def board_view(token, date, provider, projections, roster=None, void_ids=()) -> 
         lines = props.lines_for_date(board, date)
         table, meta = props.compare(lines, provider, projections, roster)
         shown, hidden, thin, void = props.board_rows(table, void_ids)
+        info = props.board_info(token) if token else None
+        meta = {**meta, "pasted_utc": info.get("pasted_utc") if info else None}
     except Exception as e:  # noqa: BLE001
         logger.warning("board_view failed (%s: %s)", type(e).__name__, e)
         meta = {"posted": int(len(lines)), "error": True}
@@ -733,8 +758,9 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
                       ("n_refused", "not priced"), ("unprojected", "no projection")):
         if led[key]:
             parts.append(f"{led[key]} {word}")
+    when = paste_time_text(meta)
     out.append(f'<div class="bv-pp-ledger-note">{led["posted"]} lines pasted for this '
-               f'date: {", ".join(parts)}.</div>')
+               f'date: {", ".join(parts)}.{" " + esc(when) if when else ""}</div>')
     if meta.get("unmatched_names"):
         names = ", ".join(esc(x) for x in meta["unmatched_names"][:12])
         out.append(_note(f"<b>Not matched to a current roster:</b> {names}"

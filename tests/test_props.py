@@ -793,6 +793,25 @@ def test_two_visitors_boards_are_isolated():
     assert props.get_board(b).iloc[0]["name"] == "Stephen Curry", "get_board leaked a reference"
 
 
+def test_a_board_keeps_the_time_of_the_paste_that_made_it(monkeypatch):
+    """DiamondValue's "lines saved" stamp: each write is stamped from the wall
+    clock, a copy-on-write add carries the new time, and the old link keeps
+    its own. Shown in ET with the date, never as a bare time."""
+    import datetime as dt
+    t0 = dt.datetime(2026, 11, 6, 0, 5, tzinfo=dt.timezone.utc)      # 7:05 PM ET, Nov 5
+    monkeypatch.setattr(props, "_wall", lambda: t0)
+    a = props.new_board(pd.DataFrame([_line(line=27.5)]))
+    assert props.board_info(a)["pasted_utc"] == t0
+    t1 = t0 + dt.timedelta(minutes=50)
+    monkeypatch.setattr(props, "_wall", lambda: t1)
+    a2 = props.add_to_board(a, pd.DataFrame([_line(stat="Rebounds", line=12.5)]))
+    assert props.board_info(a2)["pasted_utc"] == t1
+    assert props.board_info(a)["pasted_utc"] == t0
+    assert props_ui.paste_time_text({"pasted_utc": t1}) == "Last paste 7:55 PM ET, Thu Nov 5."
+    for meta in (None, {}, {"pasted_utc": None}, {"pasted_utc": "not a time"}):
+        assert props_ui.paste_time_text(meta) == ""
+
+
 def test_an_unknown_or_expired_token_gets_a_new_board(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(props, "_clock", lambda: clock[0])

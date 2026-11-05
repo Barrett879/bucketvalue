@@ -84,6 +84,7 @@ from .cache import DATA_DIR, logger
 from .names import NameIndex
 from .names import normalize as normalize_name
 from .pmf import Pmf
+from .util import now_utc
 from .tables import STATE_TYPES
 from .util import UTC, now_utc, season_end_year, season_for_date, to_et
 
@@ -1324,6 +1325,10 @@ BOARD_COLUMNS = ("name", "team_code", "stat_type", "stat", "line", "direction",
                  "roster_name", "roster_team", "game_date", "game_id", "tip_utc")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 _clock = time.monotonic
+# The wall clock a board's paste time is read from (DiamondValue's "lines
+# saved" stamp): the TTL runs on the monotonic _clock, this is only shown.
+# A module binding, so a test pins it.
+_wall = now_utc
 # NOT DEFENDED, deliberately: a visitor who makes BOARD_MAX throwaway boards
 # pushes everyone else's out of this LRU. There is no identity on an anonymous
 # public process to ration by, and a global rate limit on new boards would let
@@ -1339,6 +1344,7 @@ class _Board:
     dropped: int = 0            # rows the BOARD_MAX_ROWS cap dropped on the last write
     period_held: dict = field(default_factory=dict)   # {game_date: lines} held back on
                                                       # the write that made this board
+    pasted_utc: object = None   # wall-clock UTC of that write: the last paste, shown
 
 
 _BOARDS: "OrderedDict[str, _Board]" = OrderedDict()
@@ -1379,7 +1385,7 @@ def _store_locked(token: str, lines: pd.DataFrame, now: float,
                   period_held: dict | None = None) -> None:
     stored, dropped = _cap(lines)
     _BOARDS[token] = _Board(stored, now, int(stored.memory_usage(deep=True).sum()), dropped,
-                            dict(period_held or {}))
+                            dict(period_held or {}), _wall())
     _BOARDS.move_to_end(token)
     _evict_locked(now)
 
@@ -1408,13 +1414,14 @@ def get_board(token) -> pd.DataFrame | None:
 
 
 def board_info(token) -> dict | None:
-    """{rows, nbytes, dropped, period_held, period_held_by_date} for
-    `token`'s board, or None. `dropped` is how many rows the BOARD_MAX_ROWS
+    """{rows, nbytes, dropped, period_held, period_held_by_date, pasted_utc}
+    for `token`'s board, or None. `dropped` is how many rows the BOARD_MAX_ROWS
     cap removed on the write that made this board, `period_held` how many
     pasted lines that write held back as suspected quarter or half lines
     against the board's full-game lines (collapse_alt_lines), per game date in
     `period_held_by_date`: counted, so the paste panel can say so instead of
-    changing the board in silence."""
+    changing the board in silence. `pasted_utc` is when that write happened
+    (the visitor's last paste, an aware UTC datetime), for the board to show."""
     if not valid_token(token):
         return None
     with _BOARDS_LOCK:
@@ -1423,7 +1430,7 @@ def board_info(token) -> dict | None:
             return None
         return {"rows": int(len(b.lines)), "nbytes": int(b.nbytes), "dropped": int(b.dropped),
                 "period_held": int(sum(b.period_held.values())),
-                "period_held_by_date": dict(b.period_held)}
+                "period_held_by_date": dict(b.period_held), "pasted_utc": b.pasted_utc}
 
 
 def add_to_board(token, lines: pd.DataFrame) -> str:

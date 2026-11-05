@@ -303,10 +303,12 @@ if board is not None:
             "<b>The comparison with your lines could not be built just now.</b> Your lines are "
             "still saved; try reloading the page."), unsafe_allow_html=True)
     elif sum(len(x) for x in mine):
+        when = props_ui.paste_time_text(board.meta)
         st.markdown(
             f'<div class="bv-note"><b>Your PrizePicks lines on this game:</b> '
-            f"{esc(props_ui.count_header(*mine))}. Open a player under his team to compare "
-            "the line with his median.</div>", unsafe_allow_html=True)
+            f"{esc(props_ui.count_header(*mine))}.{' ' + esc(when) if when else ''} Open a "
+            "player under his team to compare the line with his median.</div>",
+            unsafe_allow_html=True)
 
 positions = (dict(zip(ROSTER["person_id"].astype("int64"), ROSTER["position"].astype(str)))
              if ROSTER is not None and "position" in ROSTER.columns else {})
@@ -346,5 +348,8 @@ st.markdown(
 # DiamondValue's biggest-gaps strip for this game, at the bottom.
 if board is not None:
     props_ui.render_discrepancies(mine[0], f"{away} at {home}")
+elif ROSTER is not None and state == "upcoming":
+    # DiamondValue's empty-board prompt, while a paste can still land here.
+    st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_GAME}</div>', unsafe_allow_html=True)
 
 render_footer(FOOT_KEEP)

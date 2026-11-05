@@ -414,7 +414,7 @@ def test_the_injury_report_fact_claims_only_what_was_read(monkeypatch, tmp_path,
 
 # ── / and the board ──────────────────────────────────────────────────────────
 CARD = re.compile(r'<a class="bv-slate-card" href="([^"]*)".*?</a>', re.S)
-PILL = re.compile(r'<span class="bv-slate-lines"><b>(\d+)</b>')
+PILL = re.compile(r'<span class="bv-slate-lines"[^>]*><b>(\d+)</b>')
 
 
 def cards(at) -> dict[str, str]:
@@ -484,6 +484,33 @@ def test_biggest_discrepancies_close_both_pages_from_the_boards_own_rows(monkeyp
     # No board on the link: no section.
     assert "Biggest discrepancies" not in html(run("app.py", date=DATE))
     assert "Biggest discrepancies" not in html(game(away="PHI", home="DET"))
+
+
+def test_the_paste_time_the_empty_board_prompt_and_the_pill_title(monkeypatch, tmp_path, mdl):
+    """DiamondValue's "lines saved" stamp, its no-lines prompt and its pill
+    title. A board says when it was last pasted on the slate and the game
+    page; a page with no board says how to add one while a paste can still
+    land on it (a game not yet started) and says nothing once it cannot."""
+    w = H.install(monkeypatch, tmp_path, H.EVENING)     # PHI at DET live, DEN at SAS to come
+    monkeypatch.setattr(props, "_wall",
+                        lambda: dt.datetime(2026, 3, 12, 22, 5, tzinfo=dt.timezone.utc))
+    token = H.paste(w)
+    stamp = "Last paste 6:05 PM ET, Thu Mar 12."
+    slate = html(run("app.py", date=DATE, board=token))
+    assert stamp in slate and props_ui.NO_LINES_SLATE not in slate
+    pill = re.search(r'<span class="bv-slate-lines" title="(\d+) of your PrizePicks lines? '
+                     r'shown for this game" aria-label="[^"]+"><b>(\d+)</b>', slate)
+    assert pill is not None and pill.group(1) == pill.group(2)
+    page = html(game(away="DEN", home="SAS", board=token))
+    assert stamp in page and props_ui.NO_LINES_GAME not in page
+    assert props_ui.NO_LINES_SLATE in html(run("app.py", date=DATE))
+    assert props_ui.NO_LINES_GAME in html(game(away="DEN", home="SAS"))
+    assert props_ui.NO_LINES_GAME not in html(game(away="PHI", home="DET"))
+    # Both games under way: a paste cannot land on this date, so no prompt.
+    H.pin(monkeypatch, dt.datetime(2026, 3, 12, 21, 30, tzinfo=ET))
+    store._live_frame.clear()
+    late = html(run("app.py", date=DATE))
+    assert late.count('class="bv-slate-card"') == 2 and props_ui.NO_LINES_SLATE not in late
 
 
 def test_the_board_under_out_reads_the_marked_frame(monkeypatch, tmp_path, mdl):

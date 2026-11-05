@@ -263,5 +263,9 @@ elif TOKEN:
             f"<b>{n} PrizePicks lines saved for {view.strftime('%B %-d')}.</b> The model "
             "comparison appears here once projections are published for this date; your "
             "board stays attached to this link until then."), unsafe_allow_html=True)
+elif ROSTER is not None and FRAME is not None and len(FRAME) \
+        and any(s == "upcoming" for s in states.values()):
+    # DiamondValue's empty-board prompt: a paste could still land on this date.
+    st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_SLATE}</div>', unsafe_allow_html=True)
 
 render_footer(FOOT_KEEP)
