@@ -65,7 +65,10 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 13. **Bump the artifact filename version when SEMANTICS change**, not just schema.
 14. **The record is frozen at first sight** and stamped with the model version.
 15. **Rank by confidence, never by raw gap.** The gap is an argmax over the model's
-    own error and is not comparable across stats.
+    own error and is not comparable across stats. One display is exempt, by Barrett's
+    request (2026-11-05): "Biggest discrepancies" under the board, DiamondValue's strip.
+    It sorts the board's shown STANDARD lines by the raw gap, labels itself as such, offers
+    a stat-family filter, and never changes the board's own order (props_ui.discrepancies).
 16. **The board is at its ceiling.** DiamondValue measured that the posted line is a
     near-sufficient statistic for its projection (incremental R^2 0.0007). Present
     projections honestly; never sell the props comparison as an edge. Always report a

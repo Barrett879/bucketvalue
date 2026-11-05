@@ -252,6 +252,8 @@ if BOARD is not None:
     props_ui.render_board(BOARD.shown, BOARD.hidden, BOARD.thin, BOARD.void,
                           scope_label=view.strftime("%B %-d"), meta=BOARD.meta,
                           game_labels=_labels)
+    # DiamondValue's biggest-gaps strip, as its own section at the bottom.
+    props_ui.render_discrepancies(BOARD.shown, view.strftime("%B %-d"))
 elif TOKEN:
     board = props.get_board(TOKEN)
     todays = props.lines_for_date(board, view) if board is not None else None

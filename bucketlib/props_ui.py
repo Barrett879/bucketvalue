@@ -935,6 +935,188 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
     return n[0]
 
 
+# ── Biggest discrepancies (DiamondValue's biggest-gaps strip, 2026-11-05) ────
+# Barrett asked for DiamondValue's section at the bottom: the lines ranked by
+# the gap between our number and the posted line, in each stat's own units,
+# as chips with a bar for the size of the gap, then the rest on demand. It
+# reads the board's SHOWN rows only (a lean on an offered side, an informed
+# history, not void), so it never puts forward a line the board withholds,
+# and of those the STANDARD lines only: a Goblin sits below the market's own
+# number and a Demon above it on purpose, so their gap is mostly that offset
+# (the alt-line collapse keeps one only when no standard line was posted).
+# The board itself still ranks by measured reliability, and the section says
+# why: a big gap is as often our miss as the line's.
+DISCREPANCY_CHIPS = 6           # DiamondValue's strip
+DISCREPANCY_MIN_GAP = 0.005     # a gap that rounds to nothing is not a discrepancy
+DISCREPANCY_MORE = 50           # rows under "+N more"; the board lists every line
+DISCREPANCY_CSS = """
+<style>
+.bv-gap-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.35rem 0 0.6rem; }
+.bv-gap-chip { display: flex; flex-direction: column; gap: 0.15rem; min-width: 150px;
+    flex: 0 1 auto; padding: 0.5rem 0.7rem; background: var(--panel);
+    border: 1px solid var(--panel-line); border-left: 3px solid var(--panel-line);
+    border-radius: 10px; box-shadow: var(--shadow-card); }
+.bv-gap-chip.over { border-left-color: var(--value-good); }
+.bv-gap-chip.under { border-left-color: var(--value-bad); }
+.bv-gap-chip .gc-player { font-weight: 600; font-size: 0.9rem; color: var(--fg-1);
+    line-height: 1.15; }
+.bv-gap-chip .gc-stat { font-size: 0.62rem; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-5); }
+.bv-gap-chip .gc-nums { font-size: 0.82rem; color: var(--fg-2);
+    font-variant-numeric: tabular-nums; }
+.bv-gap-chip .gc-vs { color: var(--fg-5); font-size: 0.72rem; padding: 0 0.1rem; }
+.bv-gap-chip.over .gc-lean { color: var(--value-good); font-weight: 700; }
+.bv-gap-chip.under .gc-lean { color: var(--value-bad); font-weight: 700; }
+.bv-gap-chip .gc-bar { position: relative; height: 4px; border-radius: 999px;
+    background: var(--hairline); margin-top: 0.3rem; overflow: hidden; }
+.bv-gap-chip .gc-bar > i { position: absolute; left: 0; top: 0; bottom: 0; display: block;
+    border-radius: 999px; }
+.bv-gap-chip.over .gc-bar > i { background: var(--value-good); }
+.bv-gap-chip.under .gc-bar > i { background: var(--value-bad); }
+details.bv-gap-more > summary { cursor: pointer; color: var(--fg-4); font-size: 0.8rem;
+    font-weight: 600; margin: 0.1rem 0 0.4rem; }
+table.bv-gap-table { width: 100%; border-collapse: collapse; font-size: 0.8rem;
+    font-variant-numeric: tabular-nums; }
+table.bv-gap-table td, table.bv-gap-table th { padding: 0.25rem 0.4rem;
+    border-bottom: 1px solid var(--hairline); text-align: right; }
+table.bv-gap-table td.l, table.bv-gap-table th.l { text-align: left; }
+table.bv-gap-table th { color: var(--fg-5); font-weight: 600; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.04em; }
+table.bv-gap-table .diff.over, table.bv-gap-table .lean.over { color: var(--value-good); }
+table.bv-gap-table .diff.under, table.bv-gap-table .lean.under { color: var(--value-bad); }
+table.bv-gap-table .lean { font-weight: 700; }
+.bv-gap-chip.over .diff { color: var(--value-good); font-weight: 700; }
+.bv-gap-chip.under .diff { color: var(--value-bad); font-weight: 700; }
+.bv-gap-cap { color: var(--fg-5); font-size: 0.74rem; margin: 0.35rem 0 0.2rem; }
+.bv-gap-scroll { overflow-x: auto; }
+</style>
+"""
+
+
+def discrepancies(shown) -> pd.DataFrame:
+    """The board's shown STANDARD lines ranked by the absolute gap between
+    our number and the line (`gap`, in the stat's own units), largest first;
+    ties keep the board's own order. Gaps under DISCREPANCY_MIN_GAP, and
+    Goblin and Demon lines (set off the market on purpose), are left out."""
+    if shown is None or shown.empty or "gap" not in shown.columns:
+        return _empty()
+    t = shown.reset_index(drop=True)
+    g = pd.to_numeric(t["gap"], errors="coerce").abs()
+    keep = g >= DISCREPANCY_MIN_GAP
+    if "odds_type" in t.columns:
+        keep &= t["odds_type"].map(lambda o: str(o or "standard").strip().lower()) == "standard"
+    order = g[keep].sort_values(ascending=False, kind="mergesort").index
+    return t.loc[order].reset_index(drop=True)
+
+
+def _gap_chip(r, top: float) -> str:
+    cls = _lean_cls(r.get("lean"))
+    width = max(4, int(round(abs(float(r["gap"])) / top * 100))) if top > 0 else 4
+    return (f'<div class="bv-gap-chip {cls}">'
+            f'<span class="gc-player">{esc(r.get("player"))}</span>'
+            f'<span class="gc-stat">{esc(r.get("stat_label"))}</span>'
+            f'<span class="gc-nums">{_fmt_model(r)} <span class="gc-vs">vs</span> {_fmt_line(r)}'
+            f' &middot; {_fmt_gap(r)} <span class="gc-lean">{esc(r.get("lean"))}</span></span>'
+            f'<span class="gc-bar"><i style="width:{width}%"></i></span></div>')
+
+
+def discrepancy_note(picker: bool) -> str:
+    """The section's note (HTML-escaped). `picker`: the family filter shows,
+    so the note can point at it."""
+    pick = "; pick a stat family to compare like with like" if picker else ""
+    return _note(esc(
+        "Our number minus the posted line, in each stat's own units, so combined stats like "
+        f"Pts+Rebs+Asts and Fantasy Score tend to lead{pick}. Standard lines only: a Goblin "
+        "or Demon line is set off the market on purpose, so its gap is mostly the offset. A "
+        "big gap is as often our miss as the line's, which is why the board ranks lines by "
+        "measured reliability instead. Informational, not a wager recommendation."))
+
+
+def discrepancies_window(rows, scope_label) -> str:
+    """The section's title bar, styled like the board's."""
+    return ('<div class="bv-window"><span class="lab">Biggest discrepancies</span>'
+            f'<span class="meta">{esc(_plural(len(rows), "standard line"))}, largest gap '
+            f'first</span><span class="lock">{esc(scope_label)}</span></div>')
+
+
+def discrepancy_strip_html(rows) -> str:
+    """Chips for the first DISCREPANCY_CHIPS of `rows` (already ranked by
+    discrepancies(), and possibly filtered), each with a bar sized to its gap
+    against the first chip's, then the next DISCREPANCY_MORE in a table under
+    '+N more'. Empty string for no rows."""
+    if rows is None or len(rows) == 0:
+        return ""
+    chips = rows.head(DISCREPANCY_CHIPS)
+    top = float(pd.to_numeric(chips["gap"], errors="coerce").abs().max())
+    strip = "".join(_gap_chip(r, top) for r in chips.to_dict(orient="records"))
+    rest = rows.iloc[len(chips):]
+    more = ""
+    if len(rest):
+        listed = rest.head(DISCREPANCY_MORE)
+        body = "".join(
+            f'<tr><td class="l">{esc(r.get("player"))}</td><td class="l">{esc(r.get("stat_label"))}</td>'
+            f"<td>{_fmt_model(r)}</td><td>{_fmt_line(r)}</td><td>{_fmt_gap(r)}</td>"
+            f'<td class="l lean {_lean_cls(r.get("lean"))}">{esc(r.get("lean"))}</td></tr>'
+            for r in listed.to_dict(orient="records"))
+        cap = (f'<div class="bv-gap-cap">The next {len(listed)} of {len(rest)}, largest gap '
+               "first. The board lists every line.</div>" if len(rest) > len(listed) else "")
+        more = (f'<details class="bv-gap-more"><summary>+{len(rest)} more</summary>'
+                '<div class="bv-gap-scroll"><table class="bv-gap-table"><thead><tr>'
+                '<th class="l">Player</th><th class="l">Stat</th><th>Ours</th><th>Line</th>'
+                '<th>Gap</th><th class="l">Lean</th>'
+                f"</tr></thead><tbody>{body}</tbody></table></div>{cap}</details>")
+    return f'<div class="bv-gap-strip">{strip}</div>{more}'
+
+
+def discrepancies_html(shown, scope_label) -> str:
+    """The whole section for every family (the unfiltered view): title bar,
+    strip, '+N more' and the note. Empty string when the board shows no
+    standard line with a gap."""
+    rows = discrepancies(shown)
+    if rows.empty:
+        return ""
+    return (discrepancies_window(rows, scope_label) + discrepancy_strip_html(rows)
+            + discrepancy_note(len(discrepancy_families(rows)) > 2))
+
+
+def discrepancy_families(rows) -> list[str]:
+    """'All' and the stat families present, in the board's fixed order (a
+    keyed widget's id is hashed from its options, so they never reorder)."""
+    fams = set(rows["stat"].map(props.STAT_FAMILY).dropna()) if len(rows) else set()
+    return ["All"] + [f for f in props.FAMILY_ORDER if f in fams]
+
+
+def in_family(rows, fam) -> pd.DataFrame:
+    """`rows` narrowed to one stat family, order kept; 'All' or None is all."""
+    if not fam or fam == "All":
+        return rows
+    return rows[rows["stat"].map(props.STAT_FAMILY) == fam].reset_index(drop=True)
+
+
+@st.fragment
+def _discrepancy_fragment(rows: pd.DataFrame, key: str) -> None:
+    options = discrepancy_families(rows)
+    fam = "All"
+    if len(options) > 2:            # one family: nothing to pick
+        fam = st.pills("Stat family", options, selection_mode="single", default="All",
+                       key=f"{key}_fam", label_visibility="collapsed")
+    st.markdown(discrepancy_strip_html(in_family(rows, fam)), unsafe_allow_html=True)
+
+
+def render_discrepancies(shown, scope_label, key: str = "bv_gaps") -> int:
+    """'Biggest discrepancies' (DiamondValue's strip) under a board, with a
+    stat-family filter when the lines span more than one family. Renders
+    nothing when there is nothing to rank. Returns how many lines it ranks."""
+    rows = discrepancies(shown)
+    if rows.empty:
+        return 0
+    st.markdown(DISCREPANCY_CSS, unsafe_allow_html=True)
+    st.markdown(discrepancies_window(rows, scope_label), unsafe_allow_html=True)
+    _discrepancy_fragment(rows, key)
+    st.markdown(discrepancy_note(len(discrepancy_families(rows)) > 2), unsafe_allow_html=True)
+    return len(rows)
+
+
 def render_player_lines_block(rows) -> None:
     """Convenience: render one player's lines with the module CSS."""
     html = render_player_lines(rows)

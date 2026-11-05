@@ -453,6 +453,39 @@ def test_board_renders_and_the_card_pill_equals_the_game_page_count(monkeypatch,
     assert not any(lab.startswith("Tyrese Maxey") for lab in labels)
 
 
+CHIP = re.compile(r'<div class="bv-gap-chip (?:over|under)"><span class="gc-player">([^<]*)</span>'
+                  r'<span class="gc-stat">([^<]*)</span>')
+
+
+def test_biggest_discrepancies_close_both_pages_from_the_boards_own_rows(monkeypatch, tmp_path, mdl):
+    """DiamondValue's strip (Barrett, 2026-11-05): last on the slate (after
+    the board) and on the game page (after the tables and their note), and
+    its chips are discrepancies() of what production's date_board shows for
+    the same inputs: the slate's whole board, the game page's own game."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    token = H.paste(w)
+    view = props_ui.date_board(token, H.DATE, store.load_projections(H.DATE).frame,
+                               store.sim_params(), w.roster)
+    want = props_ui.discrepancies(view.shown)
+    assert len(want) > 1
+
+    def chips(markup):
+        return [(unescape(p), unescape(s)) for p, s in CHIP.findall(markup)]
+    slate = html(run("app.py", date=DATE, board=token))
+    assert slate.index("Biggest discrepancies") > slate.index("Model vs the board")
+    assert chips(slate) == list(zip(want["player"], want["stat_label"]))[:props_ui.DISCREPANCY_CHIPS]
+    for (away, home), gid in ((("PHI", "DET"), H.EARLY), (("DEN", "SAS"), H.LATE)):
+        page = html(game(away=away, home=home, board=token))
+        mine = props_ui.discrepancies(view.shown[view.shown["game_id"].astype(str) == gid])
+        assert chips(page) == list(zip(mine["player"], mine["stat_label"]))[:props_ui.DISCREPANCY_CHIPS]
+        if len(mine):
+            assert page.index("Biggest discrepancies") > page.index("FS is PrizePicks")
+            assert f'<span class="lock">{away} at {home}</span>' in page
+    # No board on the link: no section.
+    assert "Biggest discrepancies" not in html(run("app.py", date=DATE))
+    assert "Biggest discrepancies" not in html(game(away="PHI", home="DET"))
+
+
 def test_the_board_under_out_reads_the_marked_frame(monkeypatch, tmp_path, mdl):
     """With Cunningham marked out, Daniss Jenkins's points median crosses his
     7.5 line (hidden as Even without the mark): the line is shown, and its

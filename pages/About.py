@@ -77,6 +77,10 @@ notes = store.trust_caveats() + [
     "reliable part. Its own measurement is shown beside it.",
     "The tier is the order the board ranks rows in: a strong stat's lean outranks a weak "
     "stat's, whatever the size of either gap.",
+    "Biggest discrepancies, under the board, sorts the same shown lines by the size of the gap "
+    "instead: standard lines only, in each stat's own units, with a "
+    "stat-family filter for comparing like with like. It is a display, not a ranking of picks: "
+    "a large gap is as often the model's miss as the line's.",
 ]
 st.markdown("".join(f'<div class="bv-note">{esc(n)}</div>' for n in notes), unsafe_allow_html=True)
 

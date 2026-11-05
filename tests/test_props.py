@@ -12,6 +12,7 @@ import ast
 import json
 import logging
 import math
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -1385,6 +1386,110 @@ def test_top_per_player_keeps_one_row_each_with_a_count():
     t = pd.DataFrame({"person_id": [1, 2, 1, 3, 1, 2], "stat": list("abcdef")})
     rows, more = props_ui.top_per_player(t, n=2)
     assert list(rows["person_id"]) == [1, 2] and more == {1: 2, 2: 1}
+
+
+# ── Biggest discrepancies (DiamondValue's strip, Barrett 2026-11-05) ─────────
+def _gap_rows(specs):
+    """Board-shown-like rows from (player, stat, label, model, line, odds_type)."""
+    rows = []
+    for i, (player, stat, label, model, line, odds) in enumerate(specs):
+        rows.append({"person_id": i + 1, "game_id": "g", "player": player, "team": "DEN",
+                     "opp": "SAS", "stat": stat, "stat_label": label, "line": line,
+                     "model": model, "gap": model - line,
+                     "lean": "More" if model > line else "Less", "odds_type": odds})
+    return pd.DataFrame(rows)
+
+
+def _text(markup: str) -> str:
+    import html as _h
+    import re
+    return " ".join(_h.unescape(re.sub(r"<[^>]*>", " ", markup)).split())
+
+
+def test_discrepancies_rank_shown_standard_lines_by_absolute_gap():
+    """Largest |gap| first, ties in the board's own order; a Goblin or Demon
+    (set off the market on purpose), a gap that rounds to nothing and a
+    missing gap are left out; a missing odds type is a standard line."""
+    t = _gap_rows([("A", "pts", "Points", 20.0, 22.5, "standard"),        # -2.5
+                   ("B", "reb", "Rebounds", 9.0, 7.5, "standard"),        # +1.5
+                   ("C", "pts", "Points", 25.0, 18.5, "goblin"),          # +6.5 offset
+                   ("D", "ast", "Assists", 4.0, 7.5, "Demon"),            # -3.5 offset
+                   ("E", "pra", "Pts+Rebs+Asts", 31.0, 28.5, "standard"), # +2.5, ties A
+                   ("F", "fg3m", "3-PT Made", 2.502, 2.5, "standard"),    # rounds to nothing
+                   ("G", "stl", "Steals", float("nan"), 1.5, "standard"),
+                   ("H", "blk", "Blocks", 1.0, 0.5, None)])               # +0.5
+    # A page filters the board per game, so the frame keeps its parent's
+    # labels, repeats included: the ranking must not lean on them.
+    t.index = [7, 3, 3, 9, 1, 4, 4, 2]
+    got = props_ui.discrepancies(t)
+    assert list(got["player"]) == ["A", "E", "B", "H"]
+    assert got.index.tolist() == [0, 1, 2, 3]
+    assert props_ui.discrepancies(None).empty and props_ui.discrepancies(t.iloc[:0]).empty
+    assert props_ui.discrepancies(t.drop(columns=["odds_type"]))["player"].tolist()[0] == "C"
+
+
+def test_the_strip_is_six_chips_by_gap_then_the_rest_on_demand():
+    specs = [(f"P{i}", "pts", "Points", 20.0 + i, 20.5, "standard") for i in range(10)]
+    html = props_ui.discrepancies_html(_gap_rows(specs), "Nov 5")
+    chips = re.findall(r'<div class="bv-gap-chip (over|under)"><span class="gc-player">'
+                       r'([^<]*)</span>', html)
+    assert [p for _, p in chips] == ["P9", "P8", "P7", "P6", "P5", "P4"]
+    assert {c for c, _ in chips} == {"over"}
+    widths = [int(w) for w in re.findall(r'<i style="width:(\d+)%">', html)]
+    assert widths == [100] + [round(g / 8.5 * 100) for g in (7.5, 6.5, 5.5, 4.5, 3.5)]
+    assert "+4 more</summary>" in html
+    # The rest, largest first; P0 (-0.5) and P1 (+0.5) tie and keep board order.
+    more = html.split("<tbody>")[1].split("</tbody>")[0]
+    assert re.findall(r'<tr><td class="l">([^<]*)</td>', more) == ["P3", "P2", "P0", "P1"]
+    text = _text(html)
+    assert "Biggest discrepancies 10 standard lines, largest gap first Nov 5" in text
+    assert "P9 Points 29.0 vs 20.5 \u00b7 +8.5 More" in text
+    assert "%" not in text and "The next" not in text      # nothing capped here
+    assert "pick a stat family" not in text                 # one family: no picker
+
+
+def test_a_chip_takes_the_leans_colour_and_the_boards_cells():
+    t = _gap_rows([("Less Guy", "reb", "Rebounds", 6.0, 8.5, "standard"),
+                   ("More Guy", "pts", "Points", 22.0, 21.5, "standard")])
+    html = props_ui.discrepancies_html(t, "Nov 5")
+    chip = html.split('<div class="bv-gap-chip under">')[1].split("</div>")[0]
+    assert "Less Guy" in chip and ">Less<" in chip
+    assert props_ui._fmt_model(t.iloc[0]) in chip and props_ui._fmt_line(t.iloc[0]) in chip
+    assert props_ui._fmt_gap(t.iloc[0]) in chip and "-2.5" in chip
+    assert '<div class="bv-gap-chip over"><span class="gc-player">More Guy' in html
+    assert "pick a stat family" in _text(html)             # two families: the picker shows
+
+
+def test_the_more_list_is_capped_and_says_so():
+    n = props_ui.DISCREPANCY_CHIPS + props_ui.DISCREPANCY_MORE + 4
+    specs = [(f"P{i}", "pts", "Points", 10.0 + i / 10, 9.5, "standard") for i in range(n)]
+    html = props_ui.discrepancies_html(_gap_rows(specs), "Nov 5")
+    rest = n - props_ui.DISCREPANCY_CHIPS
+    assert f"+{rest} more</summary>" in html
+    assert html.split("<tbody>")[1].count("<tr>") == props_ui.DISCREPANCY_MORE
+    assert (f"The next {props_ui.DISCREPANCY_MORE} of {rest}, largest gap first. "
+            "The board lists every line.") in _text(html)
+
+
+def test_the_strip_escapes_every_field_and_renders_nothing_when_empty():
+    specs = [(EVIL, "pts", EVIL, 20.0 + i, 20.5, "standard") for i in range(8)]
+    html = props_ui.discrepancies_html(_gap_rows(specs), EVIL)
+    assert "<img" not in html and "onerror=alert(1)>" not in html
+    assert html.count("&lt;img src=x onerror=alert(1)&gt;&quot;&#x27;&amp;") >= 2 * 8 + 1
+    assert props_ui.discrepancies_html(None, "Nov 5") == ""
+    assert props_ui.discrepancies_html(_gap_rows([("A", "pts", "Points", 10.0, 10.0,
+                                                   "standard")]), "Nov 5") == ""
+
+
+def test_the_family_filter_is_the_boards_families_in_its_order():
+    t = props_ui.discrepancies(_gap_rows([("A", "fantasy", "Fantasy Score", 40.0, 35.5, "standard"),
+                                          ("B", "pts", "Points", 20.0, 22.5, "standard"),
+                                          ("C", "pra", "Pts+Rebs+Asts", 31.0, 28.5, "standard"),
+                                          ("D", "pts", "Points", 15.0, 14.5, "standard")]))
+    assert props_ui.discrepancy_families(t) == ["All", "Points", "Combos", "Fantasy"]
+    assert list(props_ui.in_family(t, "Points")["player"]) == ["B", "D"]
+    assert props_ui.in_family(t, "All") is t and props_ui.in_family(t, None) is t
+    assert props_ui.discrepancy_families(t.iloc[:0]) == ["All"]
 
 
 def test_no_em_dashes_or_emojis_in_the_props_modules():

@@ -343,4 +343,8 @@ st.markdown(
     "decide before anyone has started).</div>",
     unsafe_allow_html=True)
 
+# DiamondValue's biggest-gaps strip for this game, at the bottom.
+if board is not None:
+    props_ui.render_discrepancies(mine[0], f"{away} at {home}")
+
 render_footer(FOOT_KEEP)
