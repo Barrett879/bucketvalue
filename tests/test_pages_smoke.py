@@ -186,6 +186,19 @@ def test_game_page_and_bad_params():
     assert "<script>" not in " ".join(m.value for m in at.markdown)
 
 
+def test_the_pages_keep_the_loaded_bucketlib_when_the_code_has_not_changed():
+    """freshen.ensure() runs at the top of every page. On unchanged code it
+    must leave these module objects in place: every monkeypatch in this file
+    lands on them, and a purge would leave the page on modules nobody
+    patched."""
+    before = {n: m for n, m in sys.modules.items()
+              if n == "bucketlib" or n.startswith("bucketlib.")}
+    run("app.py", date=DATE)
+    run("pages/About.py")
+    game(away="PHI", home="DET")
+    assert all(sys.modules.get(n) is m for n, m in before.items())
+
+
 def test_about():
     run("pages/About.py")
 

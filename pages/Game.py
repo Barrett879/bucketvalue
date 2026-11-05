@@ -26,6 +26,12 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Before any bucketlib import: load the code on disk, never a stale package
+# left in this process by an earlier deploy (freshen.py).
+sys.modules.pop("freshen", None)
+import freshen  # noqa: E402
+
+freshen.ensure()
 
 from bucketlib import live, props_ui, store, teams  # noqa: E402
 from bucketlib.theme import (SITE_NAME, render_footer, render_nav, render_page_chrome,  # noqa: E402
