@@ -513,6 +513,37 @@ def test_the_paste_time_the_empty_board_prompt_and_the_pill_title(monkeypatch, t
     assert late.count('class="bv-slate-card"') == 2 and props_ui.NO_LINES_SLATE not in late
 
 
+def test_a_player_with_lines_carries_their_count_in_his_table_row(monkeypatch, tmp_path, mdl):
+    """DiamondValue's teal count: a row's count equals the lines that open
+    under the table for that player (his expander), and the counts add up to
+    the page's line rows (which the card pill equals). No board, no count."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    token = H.paste(w)
+    at = game(away="PHI", home="DET", board=token)
+    page = html(at)
+    counts = {int(pid): int(m.group(1)) for _cls, pid, body in ROW.findall(page)
+              if (m := re.search(r'<span class="bv-nl"[^>]*>(\d+)</span>', body))}
+    opened = {}
+    for e in at.expander:
+        m = re.match(r"(.+): (\d+) lines?$", str(e.label))
+        if m:
+            opened[pid_of(m.group(1).replace("\\", ""))] = int(m.group(2))
+    assert counts and counts == opened
+    assert sum(counts.values()) == page.count('class="bv-pl-row"')
+    assert 'class="bv-nl"' not in html(game(away="PHI", home="DET"))
+
+
+def test_the_slate_says_which_stats_to_trust_under_its_cards(monkeypatch, tmp_path, mdl):
+    H.install(monkeypatch, tmp_path, H.MORNING)
+    page = html(run("app.py", date=DATE))
+    note = re.search(r'<div class="bv-note">(<b>How far to trust each stat\.</b>.*?)</div>', page)
+    assert note is not None
+    unlink = lambda x: re.sub(r'href="[^"]*"', 'href=""', x)      # noqa: E731
+    assert unlink(note.group(1)) == unlink(store.trust_line())
+    assert 'href="/About?date=2026-03-12' in note.group(1)
+    assert page.rindex('class="bv-slate-card"') < note.start()
+
+
 def test_the_board_under_out_reads_the_marked_frame(monkeypatch, tmp_path, mdl):
     """With Cunningham marked out, Daniss Jenkins's points median crosses his
     7.5 line (hidden as Even without the mark): the line is shown, and its

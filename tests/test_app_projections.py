@@ -484,6 +484,37 @@ def test_trust_table_is_the_boards_reliability(monkeypatch):
 
 
 # ── Audit fixes, 2026-10-09 ──────────────────────────────────────────────────
+def test_the_slate_trust_line_is_generated_from_the_boards_tiers(monkeypatch):
+    """DiamondValue's "most predictable stat" line, generated from the tiers
+    the board ranks by, never typed: change the table and the line follows."""
+    t = store.trust_table()
+    model = t[t["source"] == "model"]
+    line = store.trust_line()
+    strong = list(model.loc[model["tier"] == "strong", "label"])
+    weak = list(model.loc[model["tier"] == "weak", "label"])
+    assert strong and weak
+    for lab in strong + weak:
+        assert lab in line
+    for lab in model.loc[model["tier"] == "moderate", "label"]:
+        assert lab not in line, lab
+    monkeypatch.setattr(store, "trust_table", lambda: pd.DataFrame(
+        [{"label": "Rebounds", "tier": "strong", "source": "model"},
+         {"label": "Assists", "tier": "strong", "source": "model"},
+         {"label": "Steals", "tier": "moderate", "source": "model"},
+         {"label": "FT Made", "tier": "unmeasured", "source": "baseline"}]))
+    got = store.trust_line()
+    assert "Rebounds and Assists are the board's most reliable stats" in got
+    assert "weakest" not in got and "Steals" not in got and "FT Made" not in got
+    monkeypatch.setattr(store, "trust_table", lambda: pd.DataFrame(
+        [{"label": "Steals", "tier": "moderate", "source": "model"}]))
+    assert store.trust_line() == ""
+
+    def gone():
+        raise FileNotFoundError("data/stat_reliability.csv")
+    monkeypatch.setattr(store, "trust_table", gone)
+    assert store.trust_line() == ""
+
+
 def _visible(markup: str) -> str:
     import re
     from html import unescape

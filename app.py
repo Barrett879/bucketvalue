@@ -226,6 +226,10 @@ if len(nba):
         line_counts=props_ui.line_counts_by_game(BOARD.shown) if BOARD is not None else None,
         subs=store.card_subs(served, mpg=store.season_mpg(FEATS)),
         b2b=store.b2b_by_game(store.rest_by_game(FEATS))), unsafe_allow_html=True)
+    if FRAME is not None and len(FRAME):
+        _trust = store.trust_line(store.page_url("/About", keep, date=view.isoformat()))
+        if _trust:
+            st.markdown(f'<div class="bv-note">{_trust}</div>', unsafe_allow_html=True)
     if odds is not None and odds.stale and odds.source == "none":
         st.markdown(store.render_notice(
             "<b>Game lines are unavailable right now.</b> The ESPN feed did not answer, "

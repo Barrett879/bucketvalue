@@ -890,6 +890,11 @@ COMMON_CSS = """
     /* The projected-starter dot, after the name. */
     .bv-pt .bv-sd { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
         background: var(--accent-teal); margin-left: 0.35rem; vertical-align: middle; }
+    /* DiamondValue's teal count: the visitor's lines for this player. */
+    .bv-pt .bv-nl { display: inline-block; margin-left: 0.35rem; padding: 0 0.32rem;
+        border: 1px solid var(--accent-teal); border-radius: 999px; color: var(--accent-teal);
+        font-size: 0.62rem; font-weight: 700; line-height: 1.35; vertical-align: middle;
+        cursor: help; }
     /* After tip: each player's actual line under his projected one. */
     .bv-pt tr.act td { font-size: 0.72rem; color: var(--fg-4); padding-top: 0.05rem; }
     .bv-pt tr.act td.lab { color: var(--fg-5); font-style: italic; }

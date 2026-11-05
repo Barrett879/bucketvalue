@@ -306,8 +306,9 @@ if board is not None:
         when = props_ui.paste_time_text(board.meta)
         st.markdown(
             f'<div class="bv-note"><b>Your PrizePicks lines on this game:</b> '
-            f"{esc(props_ui.count_header(*mine))}.{' ' + esc(when) if when else ''} Open a "
-            "player under his team to compare the line with his median.</div>",
+            f"{esc(props_ui.count_header(*mine))}.{' ' + esc(when) if when else ''} A teal "
+            "count beside a name is how many lines he has: open him under his team's table "
+            "to compare each line with his median.</div>",
             unsafe_allow_html=True)
 
 positions = (dict(zip(ROSTER["person_id"].astype("int64"), ROSTER["position"].astype(str)))
@@ -323,6 +324,7 @@ elif len(stamp):
 for team in TEAMS:
     trows = rows[rows["team"] == team]
     view = store.team_view(trows, MED, positions, STARTERS)
+    view = view.assign(n_lines=[len(by_person.get(int(p), ())) for p in view["person_id"]])
     st.markdown(store.render_projection_table(team, view, asof_note=asof,
                                               team_note=store.team_report_label(trows) or "",
                                               actuals=ACT),

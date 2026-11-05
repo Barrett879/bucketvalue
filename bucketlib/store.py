@@ -562,7 +562,21 @@ def _player_cell(p) -> str:
     pos = f'<span class="pos">{esc(p.get("position", ""))}</span>' if p.get("position") else ""
     dot = ('<span class="bv-sd" title="Projected starter"></span>'
            if p.get("starter") is True or p.get("starter") == 1 else "")
-    return f'<td class="l pl">{img}{esc(p["name"])}{dot}{pos}</td>'
+    return f'<td class="l pl">{img}{esc(p["name"])}{_lines_chip(p)}{dot}{pos}</td>'
+
+
+def _lines_chip(p) -> str:
+    """DiamondValue's teal count: how many of the visitor's SHOWN PrizePicks
+    lines this player has (the page fills `n_lines` from the board), so a
+    reader sees whose lines open under the table. Nothing at zero or unset."""
+    try:
+        n = int(p.get("n_lines") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    what = f"{n} PrizePicks {'line' if n == 1 else 'lines'} on your board; open him under this table"
+    return f'<span class="bv-nl" title="{esc(what)}">{n}</span>'
 
 
 def _caption(team: str, asof_note: str = "", team_note: str = "") -> str:
@@ -1230,6 +1244,36 @@ def trust_table() -> pd.DataFrame:
                      "edge": None, "own_tier": None, "own_edge": None, "via": None,
                      "source": "baseline"})
     return pd.DataFrame(recs)
+
+
+def _and_join(items) -> str:
+    items = [str(x) for x in items]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def trust_line(about_url: str = "/About") -> str:
+    """The slate's one line on which stats to trust (DiamondValue's "Pitcher
+    strikeouts are the most predictable per-game stat"), GENERATED from the
+    tiers the board ranks by (trust_table), never typed: when the reliability
+    file changes, so does this. Escaped HTML; '' when the table cannot be
+    read or has no strong and no weak stat."""
+    try:
+        t = trust_table()
+    except Exception:  # noqa: BLE001 - a missing table costs the line, not the page
+        return ""
+    strong = list(t.loc[t["tier"] == "strong", "label"])       # baseline stats are
+    weak = list(t.loc[t["tier"] == "weak", "label"])           # "unmeasured", never here
+    if not strong and not weak:
+        return ""
+    parts = []
+    if strong:
+        parts.append(f"{esc(_and_join(strong))} {'is' if len(strong) == 1 else 'are'} the "
+                     f"board's most reliable {'stat' if len(strong) == 1 else 'stats'}")
+    if weak:
+        parts.append(f"{esc(_and_join(weak))} {'is' if len(weak) == 1 else 'are'} its weakest")
+    return (f"<b>How far to trust each stat.</b> {'; '.join(parts)} (the worst of three "
+            "out-of-sample seasons). The full table, and how it was measured, is on "
+            f'<a href="{esc(about_url)}" target="_self">About</a>.')
 
 
 def trust_caveats() -> list[str]:
