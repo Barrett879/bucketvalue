@@ -637,6 +637,25 @@ def test_about_renders_the_trust_table_from_the_reliability_file():
     assert "freeze at tip-off" not in text
 
 
+def test_about_says_how_it_is_built_and_what_v1_does_not_do():
+    """DiamondValue's About sections. The numbers are read from the code; the
+    scope claims are pinned here, so widening what is projected or priced
+    fails until the page says so."""
+    page = visible(html(run("pages/About.py")))
+    assert (f"models trained on the {M.TRAIN_SEASONS[0]} to {M.TRAIN_SEASONS[-1]} seasons, "
+            "with box-score history back to 2014-15") in page
+    assert "twelve seasons" not in page                     # the training set is not twelve
+    assert f"toward the {M.TEAM_MINUTES:g} an average game" in page
+    assert f"simulated {D.N_DRAWS:,} times" in page
+    # "regular-season games only: no preseason, play-in, playoff or NBA Cup final"
+    assert "It projects regular-season games only" in page and P.PROJECTED_TYPES == {"RS"}
+    # "does not price period lines ..., Dunks, double-doubles or two-player squares"
+    for label, name in (("1H Points", None), ("Dunks", None), ("Double-Double", None),
+                        ("Points", "Nikola Jokic + Jamal Murray")):
+        assert props.classify_stat(label, name)[1] == "refused", label
+    assert "Dunks, double-doubles or two-player squares" in page
+
+
 def test_about_nav_carries_the_board_the_marks_and_the_date(monkeypatch, tmp_path):
     w = H.install(monkeypatch, tmp_path, H.MORNING)
     token = H.paste(w)

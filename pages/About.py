@@ -15,7 +15,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bucketlib import pipeline, props, props_ui, store  # noqa: E402
+from bucketlib import dist, models, pipeline, props, props_ui, store  # noqa: E402
 from bucketlib.theme import SITE_NAME, render_footer, render_nav, render_page_chrome  # noqa: E402
 from bucketlib.util import esc  # noqa: E402
 
@@ -39,13 +39,15 @@ KEEP = {"date": _date_param(),
         **store.view_params(props_ui.board_token(), store.parse_out(st.query_params.get("out")))}
 render_nav("About", keep=KEEP)
 
+# Read from the code, so the page cannot drift from what is served.
+FIRST, LAST = models.TRAIN_SEASONS[0], models.TRAIN_SEASONS[-1]
 st.markdown(f"""
 <div class="bv-masthead"><div class="bv-kicker"><span class="bv-pip"></span>About</div>
 <div class="bv-mast-rule"></div><div class="bv-brand">{SITE_NAME}</div>
 <div class="bv-deck">A modelled stat line for every NBA player in every game, built the same
-way as its siblings DiamondValue (MLB) and GridironValue (NFL): models trained on twelve
-seasons of box scores, validated season by season on games they never saw, and shown as
-the median outcome for a player who plays.</div></div>
+way as its siblings DiamondValue (MLB) and GridironValue (NFL): models trained on the
+{FIRST} to {LAST} seasons, with box-score history back to 2014-15, validated season by
+season on games they never saw, and shown as the median outcome for a player who plays.</div></div>
 """, unsafe_allow_html=True)
 
 FREEZE_MIN = int(pipeline.FREEZE_LEAD.total_seconds() // 60)
@@ -64,6 +66,22 @@ line is judged against. P(play), the chance he plays at all, appears only for a 
 report or below 90%. Projections freeze {FREEZE_MIN} minutes before tip-off and never change
 after that. A provisional projection (made for a later date, or before the latest box scores
 were in) is shown as published but is never frozen.</div>
+<div class="bv-note"><b>How it is built.</b> Three kinds of gradient-boosted model per player
+and game: the chance he plays at all, his minutes if he plays, and a per-minute rate for each
+stat, so a stat's projection is minutes times rate. Each is trained only on what was known
+before the game: earlier box scores, the game's spread and total, and the injury report as
+filed at the time. Each team's projected minutes are then pulled part of the way toward the
+{models.TEAM_MINUTES:g} an average game holds (240 plus overtime), moving bench minutes more
+than starters' and never a player listed Out. Last, every player's game is simulated
+{dist.N_DRAWS:,} times, with minutes errors measured by role and shots drawn so the points
+always add up, and the medians shown come from those simulations, centred on the model's own
+numbers.</div>
+<div class="bv-note"><b>What version 1 does not do.</b> It projects regular-season games only:
+no preseason, play-in, playoff or NBA Cup final. Nothing changes after the freeze, so a
+scratch announced after the last injury report is not in the numbers until you mark him out
+on the game page. The board does not price period lines (halves, quarters, first minutes),
+Dunks, double-doubles or two-player squares, and the model does not price PrizePicks' Reboot
+rule (a More pick voided when a player leaves in the first half and does not return).</div>
 """, unsafe_allow_html=True)
 
 # ── The trust table ──────────────────────────────────────────────────────────
