@@ -220,3 +220,35 @@ predictions of models trained through 2022-23; after a retrain, regenerate
 those predictions with `scripts/train_eval.py` before `scripts/fit_cohere.py
 --grid` means anything (its docstring has the steps), since the script reads
 train_eval's own walk-forward predictions, not the production models'.
+
+## Fantasy Score on the shown numbers (2026-11-05)
+
+**Barrett's call.** Fantasy Score is PrizePicks' formula (PTS + 1.2 REB + 1.5
+AST + 3 STL + 3 BLK - TOV) on the medians the page shows for its six parts,
+each rounded to the tenth it prints (`props.fantasy_shown`). It is the Game
+table's FS column and the number a Fantasy Score line is judged against: the
+simulated fantasy distribution is slid onto it with its shape kept
+(`props.fantasy_on_shown`). Before, FS was the mid-p median of the simulated
+fantasy total, which a visitor could not reproduce from the row (Maxey on
+2026-11-04: his row gives 39.3, FS showed 40.9). A median of a sum is not the
+sum of the medians, so the shown formula runs about 1-2 points under the
+simulated median for a starter.
+
+**Measured cost** (`scripts/prob_gate.py`, which now prices fantasy the board's
+way, on `cache/preds_eval_tm1.parquet`: the same 6,000 rows per fold and the
+same seeds as `docs/prob_gate_tm1.csv`, so the comparison is paired; every
+other stat is identical):
+
+| fold | calibration error | side-picking edge | RPS |
+|---|---|---|---|
+| 2023-24 | 0.025 to 0.052 | +4.28 to +3.83 | 5.214 to 5.243 |
+| 2024-25 | 0.019 to 0.043 | +5.72 to +5.49 | 5.335 to 5.380 |
+| 2025-26 (measured only) | 0.053 | +6.58 | 5.301 |
+
+The fantasy row of `data/stat_reliability.csv` drops from strong (+6.3, the
+simulated median on the v1 predictions) to moderate (+3.83, the worst fold
+under the new rule, downgrade-only). Its displayed tier was already weak,
+inherited from Blocks. The rule trades calibration for a number that adds up
+from the row; switching the board back to the simulated median would restore
+the calibration and leave the table's FS as it is.
+

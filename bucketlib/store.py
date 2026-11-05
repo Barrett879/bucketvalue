@@ -645,8 +645,12 @@ def mark_projected(schedule: pd.DataFrame | None, dates=None) -> pd.DataFrame | 
 PPLAY_SHOW_BELOW = 0.90          # spec 5: P(play) only when listed or below 90%
 DEEP_BENCH_MIN = 10.0            # projected minutes under this: the collapsed deep bench
 KEY_ABSENCE_MIN = 15.0           # the card's "Out:" names 15+ MPG players (spec 5)
-# The Game table's medians: every STAT_COLS column but MIN, which is the mean.
-MEDIAN_STATS = tuple(k for k, _ in STAT_COLS if k != "min")
+# The Game table's medians: every STAT_COLS column but MIN, which is the mean,
+# and FS, which is PrizePicks' formula on the medians shown beside it
+# (props.fantasy_shown, Barrett 2026-11-05: it always adds up from the row).
+MEDIAN_STATS = tuple(k for k, _ in STAT_COLS if k not in ("min", "fantasy"))
+FS_TITLE = ("Fantasy Score: PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK - TOV, "
+            "on the numbers shown in this row")
 VIEW_COLS = ["person_id", "game_id", "name", "position", "status", "reason", "out", "pplay",
              "section", "starter", "p_play", *(k for k, _ in STAT_COLS)]
 _SECTIONS = ("main", "deep", "out")
@@ -714,6 +718,8 @@ def team_view(rows: pd.DataFrame, medians: pd.DataFrame | None = None,
     for s in MEDIAN_STATS:
         col = f"med_{s}"
         v[s] = med[col].reindex(keys).to_numpy() if med is not None and col in med else np.nan
+    fs = [props.fantasy_shown(r) for r in v[list(props.FANTASY_WEIGHTS)].to_dict(orient="records")]
+    v["fantasy"] = np.array([np.nan if x is None else x for x in fs], dtype=float)
     v["_s"] = v["section"].map({s: i for i, s in enumerate(_SECTIONS)})
     v["_b"] = ~v["starter"]
     v = v.sort_values(["_s", "_b", "min", "name"], ascending=[True, True, False, True],
@@ -842,7 +848,8 @@ def render_projection_table(team: str, players: pd.DataFrame, asof_note: str = "
     head = ('<thead><tr class="hgrp"><th colspan="3"></th><th class="avg">Avg</th>'
             f'<th class="ifp" colspan="{len(STAT_COLS) - 1}">Median if he plays</th></tr>'
             '<tr><th class="l"></th><th class="l">Player</th><th>P(play)</th>'
-            + "".join(f"<th>{esc(lab)}</th>" for _, lab in STAT_COLS) + "</tr></thead>")
+            + "".join(f'<th title="{esc(FS_TITLE)}">{esc(lab)}</th>' if k == "fantasy"
+                      else f"<th>{esc(lab)}</th>" for k, lab in STAT_COLS) + "</tr></thead>")
 
     def body(part):
         return "".join(_proj_row(p, actuals) for _, p in part.iterrows())

@@ -2034,16 +2034,69 @@ def test_season_record_refuses_a_registry_without_a_readable_window(case):
 
 
 # ── Defect 13: Fantasy ties, and the board cap's silent drop ────────────────
+def _parts(**medians) -> dict:
+    """Point-mass pmfs for Fantasy Score's six parts: a point mass's mid-p
+    median is the point itself, so the shown formula is exact arithmetic."""
+    return {s: Pmf(np.array([float(v)]), np.array([1.0])) for s, v in medians.items()}
+
+
+SHOWN_PARTS = dict(pts=20, reb=5, ast=4, stl=1, blk=1, tov=2)   # 20+6+6+3+3-2 = 36.0
+
+
 def test_a_fantasy_line_on_the_tenths_grid_can_tie_and_says_so(no_reliability):
     pmf = Pmf(np.round(np.arange(340, 371) / 10, 1), np.ones(31) / 31)
+    parts = {**_parts(**SHOWN_PARTS), "pts": Pmf(np.array([20.0]), np.array([1.0]))}
     table, _ = props.compare(_matched([_line(stat="Fantasy Score", line=35.5),
                                        _line(stat="Points", line=27.5)]),
-                             FixedProvider(pmf, {"pts": Pmf.from_poisson(27.0)}), _proj_row())
+                             FixedProvider(pmf, parts), _proj_row())
     fan = table[table["stat"] == "fantasy"].iloc[0]
+    assert fan["model"] == 36.0                  # the formula on the shown parts
     assert fan["p_push"] > 0 and bool(fan["tie_possible"]) is True
     assert "landing exactly on 35.5" in props_ui._stat_cell(fan.to_dict())
     pts = table[table["stat"] == "pts"].iloc[0]
     assert bool(pts["tie_possible"]) is False
+
+
+def test_fantasy_shown_is_the_prizepicks_formula_on_the_printed_numbers():
+    """PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK - TOV, each part first rounded
+    to the tenth the page prints (3.46 shows as 3.5), hundredths kept."""
+    meds = {"pts": 23.94, "reb": 3.46, "ast": 4.88, "stl": 1.52, "blk": 0.49, "tov": 2.21}
+    assert props.fantasy_shown(meds) == pytest.approx(23.9 + 1.2 * 3.5 + 1.5 * 4.9 + 3 * 1.5 + 3 * 0.5 - 2.2,
+                                                     abs=1e-9)
+    assert props.fantasy_shown(meds) == 39.25
+    assert props.fantasy_shown({**meds, "blk": None}) is None
+    assert props.fantasy_shown({**meds, "tov": float("nan")}) is None
+    assert props.fantasy_shown({k: v for k, v in meds.items() if k != "stl"}) is None
+
+
+def test_a_fantasy_line_is_judged_against_the_shown_formula_not_the_simulated_median(
+        no_reliability):
+    """The simulated fantasy distribution (median 38.0 here) is slid, shape
+    kept, so its middle sits on the formula of the shown parts (36.0): a line
+    at 37.5 is Less, which the simulated median alone would have called More."""
+    sim = Pmf(np.round(np.arange(330, 431) / 10, 1), np.ones(101) / 101)        # median 38.0
+    assert abs(sim.median() - 38.0) < 0.06
+    table, _ = props.compare(_matched([_line(stat="Fantasy Score", line=37.5)]),
+                             FixedProvider(sim, _parts(**SHOWN_PARTS)), _proj_row())
+    fan = table.iloc[0]
+    assert fan["model"] == 36.0 and fan["gap"] == 36.0 - 37.5
+    assert fan["lean"] == "Less" and fan["q_less"] > 0.5
+    slid = sim.shifted(36.0 - sim.median())
+    assert (fan["p_under"], fan["p_push"], fan["p_over"]) == slid.split(37.5)
+    np.testing.assert_allclose(np.diff(slid.probs), np.diff(sim.probs))     # the shape is kept
+
+
+def test_a_fantasy_line_with_a_part_missing_is_unprojected_not_zero_filled(no_reliability):
+    sim = Pmf(np.round(np.arange(330, 431) / 10, 1), np.ones(101) / 101)
+    parts = {k: v for k, v in _parts(**SHOWN_PARTS).items() if k != "blk"}
+
+    class NoBlocks(FixedProvider):
+        def pmf(self, person_id, game_id, stat):
+            return None if stat == "blk" else super().pmf(person_id, game_id, stat)
+    table, meta = props.compare(_matched([_line(stat="Fantasy Score", line=37.5)]),
+                                NoBlocks(sim, parts), _proj_row())
+    assert table.empty and meta["unprojected"] == 1
+    assert "no distribution for a Fantasy Score part" in meta["unprojected_why"]
 
 
 def test_the_board_cap_counts_what_it_drops(monkeypatch, roster, schedule):

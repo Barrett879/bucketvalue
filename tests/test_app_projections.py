@@ -85,6 +85,13 @@ def test_team_view_sections_order_and_numbers(proj, params):
         want = m.loc[list(zip(played["person_id"], played["game_id"])), f"med_{s}"].to_numpy()
         assert np.array_equal(played[s].to_numpy(), want, equal_nan=True), s
     assert np.array_equal(played["min"].to_numpy(), by.loc[played["person_id"], "min"].to_numpy())
+    # FS is not a median: PrizePicks' formula on the parts printed in the row.
+    parts = list(props.FANTASY_WEIGHTS)
+    printed = played[parts].map(lambda x: float(f"{x:.1f}"))
+    want = (printed["pts"] + 1.2 * printed["reb"] + 1.5 * printed["ast"] + 3 * printed["stl"]
+            + 3 * printed["blk"] - printed["tov"])
+    np.testing.assert_allclose(played["fantasy"].to_numpy(), want.to_numpy(), atol=1e-9)
+    assert played["fantasy"].notna().all() and "fantasy" not in store.MEDIAN_STATS
 
 
 def test_deep_bench_is_under_ten_projected_minutes(proj):
@@ -410,6 +417,21 @@ def test_table_medians_and_the_board_share_one_provider(monkeypatch, tmp_path, p
     for r in view.shown.to_dict(orient="records"):
         if r["stat"] in store.MEDIAN_STATS:
             assert r["model"] == m.loc[(r["person_id"], r["game_id"]), f"med_{r['stat']}"], r
+    # A Fantasy Score line's model value is the table's FS for that player:
+    # one number, the formula on the medians the page prints.
+    tv = pd.concat([store.team_view(g, med) for _, g in frame.groupby(["game_id", "team"])])
+    tv = tv[~tv["out"]].set_index(["person_id", "game_id"])
+    lines = pd.DataFrame([{"name": n, "team": t, "position": "", "stat_type": "Fantasy Score",
+                           "line": 30.5, "start_time": None, "direction": "both",
+                           "odds_type": "standard", "opp": None, "is_combo": False, "league": None,
+                           "source": "board", "person_id": int(pid), "game_id": str(gid),
+                           "match": "matched"}
+                          for (pid, gid), n, t in zip(tv.index, tv["name"], frame.set_index(
+                              ["person_id", "game_id"]).loc[tv.index, "team"])])
+    table, meta = props.compare(lines, simprov.provider_for(frame, params), frame)
+    assert len(table) == len(tv) and meta["unprojected"] == 0, meta["unprojected_why"]
+    for r in table.to_dict(orient="records"):
+        assert r["model"] == tv.loc[(r["person_id"], r["game_id"]), "fantasy"], r
 
 
 # ── Notices ──────────────────────────────────────────────────────────────────

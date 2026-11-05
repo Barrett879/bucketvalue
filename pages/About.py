@@ -58,7 +58,9 @@ advice. The posted line already prices most of what any model knows, so a gap be
 two is information to weigh, not an edge to bet.</div>
 <div class="bv-note"><b>How to read a game page.</b> MIN is the projected average for a player
 who plays. Every other column is a median if he plays: half of his outcomes land above it and
-half below. P(play), the chance he plays at all, appears only for a player on the injury
+half below. FS is the exception: PrizePicks' Fantasy Score formula (PTS + 1.2 REB + 1.5 AST +
+3 STL + 3 BLK - TOV) on the numbers shown in its row, which is also the number a Fantasy Score
+line is judged against. P(play), the chance he plays at all, appears only for a player on the injury
 report or below 90%. Projections freeze {FREEZE_MIN} minutes before tip-off and never change
 after that. A provisional projection (made for a later date, or before the latest box scores
 were in) is shown as published but is never frozen.</div>

@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bucketlib import cache as C  # noqa: E402
 from bucketlib import dist as D  # noqa: E402
+from bucketlib import props as PR  # noqa: E402
 from bucketlib.pmf import Pmf  # noqa: E402
 # player_input lives in simprov (one implementation, shared with serving); an
 # eval row carries pred_<s> beside the actual <s>, and pred_ wins when present.
@@ -72,6 +73,13 @@ def main() -> int:
         d = d.iloc[np.linspace(0, len(d) - 1, min(args.n, len(d))).astype(int)]
         for i, (_, r) in enumerate(d.iterrows()):
             sim = D.pmfs(player_input(r), params, seed=i, stats=BOARD, n=2000)
+            # Fantasy Score as the board prices it (props.fantasy_on_shown,
+            # 2026-11-05): the formula on the parts' shown medians, the
+            # simulated distribution slid onto it.
+            on = PR.fantasy_on_shown(sim.get("fantasy"), {s: (sim[s].median() if sim.get(s) is not None
+                                                              else None) for s in PR.FANTASY_WEIGHTS})
+            if on is not None:
+                sim["fantasy"] = on[1]
             for s in BOARD:
                 y = float(r[s])
                 b = float(r[f"b2_{s}"])

@@ -166,7 +166,11 @@ plays"; P(play) only when listed or below 90%; status badges from the report
 reason and no numbers; mark-out via `?out=` with the "your adjustments" banner;
 pasted lines per player. Slate: the board (`props_ui.render_board`) fed by
 `SimProvider`, card line-count pills, "Out: X, Y +2". About: the trust table
-generated from data/stat_reliability.csv.
+generated from data/stat_reliability.csv. Since 2026-11-05 (Barrett's call)
+the Game table's FS column is PrizePicks' Fantasy Score formula on the medians
+shown beside it, and a Fantasy Score line is judged against that same number
+(props.fantasy_shown, props.fantasy_on_shown); docs/model_report.md has the
+measured cost.
 
 ## 6. Amendments after build 1 (2026-10-09, verified and fixed)
 

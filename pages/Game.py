@@ -335,7 +335,9 @@ for team in TEAMS:
 st.markdown(
     '<div class="bv-note">MIN is the projected average for a player who plays. The other '
     "columns are medians if he plays: half of his outcomes in this spot land above the number "
-    "and half below, so a column of medians does not add up to a team total. P(play) appears "
+    "and half below, so a column of medians does not add up to a team total. FS is PrizePicks' "
+    "Fantasy Score formula (PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK - TOV) on the numbers "
+    "shown in its row, and a Fantasy Score line is judged against it. P(play) appears "
     "only for a player on the injury report or below 90% to play. A dot marks a projected "
     "starter: the five likely players who have started most this season (projected minutes "
     "decide before anyone has started).</div>",

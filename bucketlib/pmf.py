@@ -353,6 +353,17 @@ class Pmf:
 
     mid_p_median = median
 
+    def shifted(self, delta: float) -> "Pmf":
+        """The same distribution translated by `delta`, rounded to whole grid
+        steps: every probability kept, so the shape is untouched and the
+        median moves by exactly that many steps (within half a step of
+        `delta`). No floor is applied: for a stat that can go negative."""
+        d = float(delta)
+        if not math.isfinite(d):
+            raise ValueError("shift must be finite")
+        k = int(round(d / self.step))
+        return Pmf._from_grid(self.offset + k * self.step, self.step, self.probs.copy())
+
     # ── Re-centring ─────────────────────────────────────────────────────────
     def recentre(self, target_mean: float, lower: float | None = None) -> "Pmf":
         """A pmf on the same grid whose mean() equals `target_mean`.

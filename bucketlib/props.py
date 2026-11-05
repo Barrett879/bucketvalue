@@ -163,6 +163,52 @@ COMBO_STATS = frozenset({"pr", "pa", "ra", "pra", "stocks", "fantasy"})
 # Grid step of each stat's outcome. Fantasy lands on tenths.
 STAT_STEP = {s: (0.1 if s == "fantasy" else 1.0) for s in STAT_FORMULA}
 
+# ── Fantasy Score: the formula on the numbers shown (Barrett, 2026-11-05) ────
+# The pages print each stat's mid-p median to a tenth (util.fmt_num), and
+# Fantasy Score is PrizePicks' formula on THOSE numbers, so it always adds up
+# from the row a visitor reads. A median of a sum is not the sum of the
+# medians (steals and blocks sit low), so it runs about 1-2 points under the
+# simulated fantasy median for a starter; a Fantasy Score line is judged
+# against it all the same (fantasy_on_shown), and the Game table shows it
+# (store.team_view). One definition for both, so they cannot disagree.
+SHOWN_PLACES = 1
+
+
+def shown_value(value) -> float | None:
+    """A number as the pages print it (util.fmt_num at SHOWN_PLACES), or None
+    when there is none."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return float(f"{v:.{SHOWN_PLACES}f}") if math.isfinite(v) else None
+
+
+def fantasy_shown(medians) -> float | None:
+    """PrizePicks Fantasy Score (FANTASY_WEIGHTS) on the SHOWN medians of its
+    six parts, `medians` mapping each part to its median. None when any part
+    has no number: never zero-filled, since a missing part is not a zero."""
+    total = 0.0
+    for stat, w in FANTASY_WEIGHTS.items():
+        v = shown_value(medians.get(stat)) if medians is not None else None
+        if v is None:
+            return None
+        total += w * v
+    # Every term is a whole number of hundredths: rounding drops float noise,
+    # so 39.25 stays 39.25 and a line at it reads as exactly on it.
+    return round(total, 2)
+
+
+def fantasy_on_shown(fantasy_pmf: Pmf | None, medians) -> tuple[float, Pmf] | None:
+    """(the shown Fantasy Score, the fantasy distribution slid so its mid-p
+    median sits on it, shape kept), or None when either is missing. The
+    board prices a Fantasy Score line on this pmf, so its lean agrees with
+    the shown number against the line (to within half a 0.1 step)."""
+    f = fantasy_shown(medians)
+    if f is None or fantasy_pmf is None:
+        return None
+    return f, fantasy_pmf.shifted(f - fantasy_pmf.median())
+
 STAT_LABEL = {
     "pts": "Points", "reb": "Rebounds", "ast": "Assists", "fg3m": "3-PT Made",
     "blk": "Blocks", "stl": "Steals", "tov": "Turnovers", "pr": "Pts+Rebs",
@@ -1667,6 +1713,22 @@ def _bump(d: dict, k, n: int = 1) -> None:
     d[k] = d.get(k, 0) + n
 
 
+def _centred_pmf(dist_provider, pid: int, gid: str, prow: dict, stat: str) -> Pmf | None:
+    """The provider's pmf for one player, game and stat, re-centred on the
+    projection row's shipped mean when it carries one: how compare() reads
+    every line, and every part of a Fantasy Score line."""
+    pmf = dist_provider.pmf(pid, gid, stat) if dist_provider is not None else None
+    if pmf is None:
+        return None
+    target = shipped_mean(prow, stat)
+    if target is not None and abs(pmf.mean() - target) > 1e-9 * max(1.0, abs(target)):
+        try:
+            pmf = pmf.recentre(target, lower=None if stat == "fantasy" else 0.0)
+        except ValueError as e:
+            logger.warning("could not re-centre %s %s on %s: %s", pid, stat, target, e)
+    return pmf
+
+
 def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
             roster: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
     """Every pasted line against its distribution. Returns (table, meta).
@@ -1765,17 +1827,23 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
                 _bump(meta["unprojected_why"], "no projection for this player and game")
                 continue
             gid = str(prow["game_id"])
-            pmf = dist_provider.pmf(pid, gid, stat) if dist_provider is not None else None
+            pmf = _centred_pmf(dist_provider, pid, gid, prow, stat)
             if pmf is None:
                 meta["unprojected"] += 1
                 _bump(meta["unprojected_why"], "no distribution for this stat")
                 continue
-            target = shipped_mean(prow, stat)
-            if target is not None and abs(pmf.mean() - target) > 1e-9 * max(1.0, abs(target)):
-                try:
-                    pmf = pmf.recentre(target, lower=None if stat == "fantasy" else 0.0)
-                except ValueError as e:
-                    logger.warning("could not re-centre %s %s on %s: %s", pid, stat, target, e)
+            shown = None
+            if stat == "fantasy":
+                # The formula on the medians the page shows for its parts,
+                # each read exactly as its own line would be (fantasy_shown).
+                parts = {s: _centred_pmf(dist_provider, pid, gid, prow, s) for s in FANTASY_WEIGHTS}
+                on = fantasy_on_shown(pmf, {s: (q.median() if q is not None else None)
+                                            for s, q in parts.items()})
+                if on is None:
+                    meta["unprojected"] += 1
+                    _bump(meta["unprojected_why"], "no distribution for a Fantasy Score part")
+                    continue
+                shown, pmf = on
             line = float(rec["line"])
             p_lt, p_eq, p_gt = pmf.split(line)
             vr = np.nan
@@ -1786,7 +1854,7 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
                     vr = np.nan
             q_more, q_less = side_probabilities(p_lt, p_eq, p_gt, None)
             lean = lean_from(q_more)
-            median = pmf.median()
+            median = shown if shown is not None else pmf.median()
             rel = reliability_for(stat)
             src = "model"
             if hasattr(dist_provider, "source"):

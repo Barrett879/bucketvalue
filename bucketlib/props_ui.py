@@ -802,9 +802,10 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
         out.append(reboot)
     if shown is not None and len(shown) and shown["stat"].isin(props.COMBO_STATS).any():
         out.append(_note(
-            "Combination lines (Pts+Rebs+Asts, Blks+Stls, Fantasy Score and the "
-            "rest) show their own median, which is not the sum of the component "
-            "medians."))
+            "Combination lines (Pts+Rebs+Asts, Blks+Stls and the rest) show their "
+            "own median, which is not the sum of the component medians. Fantasy "
+            "Score is the exception: PrizePicks' formula on the medians shown for "
+            "its parts, the same number as the FS column on the game page."))
     out.append(_note(
         "Model values are distribution medians for a player who plays, and the "
         "gap is median minus line in the stat's own units. Rows are ranked by "

@@ -275,11 +275,22 @@ def test_compare_end_to_end_whole_and_half_lines_both_sides(params):
     assert set(table["source"]) == {"model"}
     kinds = set()
     for r in table.itertuples():
-        target = P.shipped_mean(proj[proj.person_id == r.person_id].iloc[0], r.stat)
-        assert _close(r.mean, target), (r.stat, r.mean, target)
         p = prov.pmf(r.person_id, r.game_id, r.stat)
-        assert (r.p_under, r.p_push, r.p_over) == p.split(r.line)
-        assert r.model == p.median()
+        if r.stat == "fantasy":
+            # Fantasy Score is PrizePicks' formula on the medians shown for
+            # its parts (Barrett, 2026-11-05), the simulated distribution slid
+            # onto it with its shape kept: the shown number, not the shipped
+            # mean, is what the line is judged against.
+            parts = {s: prov.pmf(r.person_id, r.game_id, s).median() for s in P.FANTASY_WEIGHTS}
+            shown, slid = P.fantasy_on_shown(p, parts)
+            assert r.model == shown == P.fantasy_shown(parts)
+            assert abs(slid.median() - shown) <= 0.05 + 1e-9 and _close(r.mean, slid.mean())
+            assert (r.p_under, r.p_push, r.p_over) == slid.split(r.line)
+        else:
+            target = P.shipped_mean(proj[proj.person_id == r.person_id].iloc[0], r.stat)
+            assert _close(r.mean, target), (r.stat, r.mean, target)
+            assert (r.p_under, r.p_push, r.p_over) == p.split(r.line)
+            assert r.model == p.median()
         whole = float(r.line).is_integer()
         assert (r.p_push > 0) == whole or r.stat == "fantasy"
         kinds.add((r.lean, "whole" if whole else "half"))
