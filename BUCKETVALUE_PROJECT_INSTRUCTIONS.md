@@ -285,6 +285,101 @@ percentiles. Targets that fail ship a labelled baseline.
   (props.restore_saved: the copy is a second paste box, re-validated and re-matched;
   lines for games already played are dropped). Never on the server's disk; a board
   opened from someone else's link is never copied; Clear all removes the copy.
+- **A typed list pastes too** (Barrett, 2026-11-06: "can you incorporate these into
+  the script"): one pick per line, as typed or copied from a picks post ("Take the
+  OVER on Miles Bridges for a combined 6.5 Rebounds and Assists", "Oso Ighodaro o7.5
+  P+R", "7+ R+A (No)", DiamondValue's "Name, Stat, Line"). props.parse_typed_lines
+  reads the whole paste when the board parser finds no square naming a stat; in a
+  board paste it adds only the typed lines that name a side, and counts the ones it
+  could not read. The Over or Under written is the PICK, shown beside the lean
+  ("Pick: More") and never used to price or rank; the sides offered stay unknown. A
+  stat is priced as written or not at all: a note after it ("LOCK") is read only on a
+  line with a side, only when it names no stat ("points, rebounds and assists
+  combined" is PRA) and when no qualifier or note word opens the note, filler words
+  aside ("rebounds offensive", "rebounds, only offensive", "points in the paint" are
+  refused, "coming off a big game" is a note), and a word that changes the stat
+  among a note's first four ("rebounds, but only offensive", "points, all from the
+  paint", "threes, as attempts", "rebound chances", "all from three") refuses it
+  too, but the matchup does not ("elite offensive rating"); a stat run across a comma with a
+  note after it ("rebounds, assists are live too") is refused, two stats with only
+  a comma between them are a combo only with "combined" after them, and a letter is
+  a stat only where "+", "&" or "/" joins it ("R+A", "Pts + R + A", "Reb + A") or
+  among capitals joined by "and" ("R and A"): "points - a lock" is Points and
+  "points + a lock" is refused; a slash, pipe or bullet between stats joins them
+  too ("Pts / R / A", "Pts | R | A"); a
+  parenthesis joins the stat when every word in it changes the stat ("(offensive)",
+  "(3PA)", "(OREBs)", "(offensive only)", "(+ assists)", "(w/ assists)", "(inc.
+  assists)", "(along with assists)", "(assists included)"), and one that changes
+  it among other words ("(offensive glass)", "(O boards)",
+  "(off glass)") or adds another stat loosely ("(assists too)") refuses the line
+  unless it speaks of the matchup ("(weak defensive team)"). A result word before
+  the line or first in the note ("o25.5 pts - cashed", "- that one lost"),
+  "cashed" anywhere after the stat, or a result alone after it or in a parenthesis
+  ("- hit", "(W)", "(cashed it)") makes a recap, counted (typed_recap) and never
+  filed; a recap naming another player ends the name line above (one naming the
+  name line's own player keeps it); later in a note "won" or "lost" is context,
+  and "it cashes tonight" is a pick, but without a word of hope "- this one
+  cashes" is a recap; "- missed shootaround" and "- push it" are notes. A Yes
+  never turns the pick, so the reader weighs a No (also "Nope", "Nah", "No way", "Not a chance", "(answer: No)"): it is
+  the answer right after the pick's own "?" ("26+ 3-PT Made? No", "26+ points on
+  Saturday? No way"), first after the line or last on it with closers only ("7+
+  R+A No - fade", "26+ points No lol"), before the number of a "7+" line, or in a
+  parenthesis that is only the answer ("(No 2u)"); one that starts a note ("no
+  doubt", "no Towns", "NO TOWNS TONIGHT") or answers the note's own question ("is
+  Towns playing? No") is the note's; anywhere else, above all beside a written Over
+  ("No, I like Jalen Brunson over 25.5 points", "over 25.5 points, no for real",
+  "(no, not a typo)"), the line is counted (typed_unclear) and never guessed.
+  After the pick's own "?" other answers are read too ("Never", "Fat chance",
+  "Yeah, no" are a No, "I like it" a Yes) and any other words there leave the side
+  unclear; so do "no it is a lock", a correction ("No, wait, yes") and a No idiom
+  beside a written side ("over 25.5 points - no way"), while "(no B2B)" is a note. A
+  handle or hashtag that may stand for the name ("#KAT", "@Money23Green",
+  "#Pickett") names nobody and never borrows the name above; a tag is decoration
+  only when all of it is ("#NBA", "#PrizePicks", "@hoopspicks:") or it is a team's
+  own hashtag ("#DubNation"), and "@Jalen Brunson" is his name; a tag that splits
+  into a tout's words is decoration only with a bet's word in it ("#LockOfTheDay",
+  "#LetsCash"), so "@King23" and "#Buckets" are nicknames. A pick outranks the board's line for the same
+  player and stat, and a board line it sets aside at another number is reported,
+  never counted as loaded; a pick and a square at the same number merge. Picks are
+  never held or withheld as period lines, but a quarter square under a typed pick is
+  held (and the message names the pick, since a Demon typed above the full-game line
+  looks the same), and a pick lends its player (not its line) to the period-board
+  check; Goblin and Demon rungs lend players too, and set the ratio (at half the
+  bar) only when fewer than two standard players do. A period marker anywhere on a
+  line ("(1H)", "Q1", "1st-half", "first qtr"), in a section label above it ("1Q
+  props:", "1Q Locks", "## 1Q props"; in a board paste only a label ending with a
+  colon or naming the picks), on a name line above it ("Jalen Brunson (1Q)", "Main
+  Slate 1H props:", which label every pick under them, named or not, until a label
+  naming none), or on its game heading refuses it, and the report says which picks
+  a line above made period props (typed_period_label). Any spelling of a period
+  counts ("1st 1/2", "Q-1", "q 1", "First Q", "1st period", "1qprops"); a name
+  line's "full game" holds for that player and ends only a name line's period, and a
+  team label under a period heading keeps the period unless it says "full game".
+  Refusing is the safe side,
+  so a line naming a period is a label unless the period is cancelled ("No 1Q props
+  today", "Full game picks, 1H later:"; a negation reaches the period across no
+  mark and must deny the period's picks, so "No more waiting, 1Q props:" and "No 1Q
+  parlays:" are labels) or the line reads as a remark
+  (a result: "What a 4th quarter!", "1H recap: 3-1"; or a remark's verb with a
+  subject other than the period: "Q4 Brunson is different", while "1Q is the move"
+  is a label; or "2H plays in the discord"); a heading's own period ("Magic @ Suns
+  (1H)") holds over the game's own team headings, a loose pair of them and a
+  sub-label naming one ("Magic players:"), and ends at any other. ESPN's "NO" beside a name or after a side word is New Orleans for a
+  Pelican and a No for anyone else (alt_pick); after "7+", after a question, or on a
+  line naming nobody it is the market's No; "vs NO" is the opponent. A team heading
+  ("Suns:") only groups: the roster's team wins. A game is named by a game heading
+  ("Magic @ Suns 7:00 PM MST", "ORL vs PHX", "Magic @ Suns on ESPN": a broadcast,
+  a call sign or "| late game" is set aside), "vs Lakers"/"@ATL", or team headings
+  whose latest game (tipped today or within 6 hours, or last night and before noon
+  ET unless both play again today) or next game is against each other; two teams
+  joined on one line by "&", "/", a dash or "x" ("ORL-PHX") are a game heading when
+  their latest game (unless both play again today) or next game is against each
+  other, routed as "@" is, and team headings otherwise. A named game that has
+  tipped claims the line, so a list sent after its game is reported as late, never
+  filed under each team's next game. The typed reader stops at 5,000 lines or
+  40,000 words per paste (MAX_TYPED_LINES, MAX_TYPED_WORDS; a board paste is about
+  2 words a line): 5,000 lines of 40 junk words cost seconds, and the daily bot runs
+  the whole suite, timing tests included, before every refresh.
 - `/`: nav (wordmark, Home, About; right cluster Update lines, Share, theme toggle);
   masthead (NBA PROJECTIONS kicker; tiles: games, first tip ET, injury reports filed
   X/30 with as-of time); date bar (chevrons, date, Yesterday/Today/Tomorrow; the

@@ -511,7 +511,7 @@ def test_the_paste_time_the_empty_board_prompt_and_the_pill_title(monkeypatch, t
     stamp = "Last paste 6:05 PM ET, Thu Mar 12."
     slate = html(run("app.py", date=DATE, board=token))
     assert stamp in slate and props_ui.NO_LINES_SLATE not in slate
-    pill = re.search(r'<span class="bv-slate-lines" title="(\d+) of your PrizePicks lines? '
+    pill = re.search(r'<span class="bv-slate-lines" title="(\d+) of your lines '
                      r'shown for this game" aria-label="[^"]+"><b>(\d+)</b>', slate)
     assert pill is not None and pill.group(1) == pill.group(2)
     page = html(game(away="DEN", home="SAS", board=token))
@@ -524,6 +524,64 @@ def test_the_paste_time_the_empty_board_prompt_and_the_pill_title(monkeypatch, t
     store._live_frame.clear()
     late = html(run("app.py", date=DATE))
     assert late.count('class="bv-slate-card"') == 2 and props_ui.NO_LINES_SLATE not in late
+
+
+def test_a_hidden_pasted_pick_is_named_on_the_game_page(monkeypatch, tmp_path, mdl):
+    """The Game page says a pasted pick is not shown there, and why. Checked
+    on the rendered page; a grep of its source passed with the call disabled
+    (review 2, I5 and I11)."""
+    w = H.install(monkeypatch, tmp_path, H.MORNING)
+    token = H.paste(w)
+    view = props_ui.date_board(token, H.DATE, store.load_projections(H.DATE).frame,
+                               store.sim_params(), w.roster)
+    row = view.shown[view.shown["lean"].isin(["More", "Less"])].iloc[0]
+    board = props.get_board(token)
+    mine = board[(board["person_id"] == row["person_id"]) & (board["stat"] == row["stat"])]
+    assert len(mine) == 1
+    side = str(row["lean"]).lower()
+    # A pick on the lean, on a line that offers only the other side: hidden,
+    # and the reason is the model's lean (review 3, R9).
+    token = props.add_to_board(token, mine.assign(pick=side,
+                                                  direction="less" if side == "more" else "more"))
+    away, home = ("PHI", "DET") if str(row["game_id"]) == H.EARLY else ("DEN", "SAS")
+    named = (f"{row['player']} {row['stat_label']} (picked {row['lean']}; the model leans "
+             f"{row['lean']}, a side this line does not offer)")
+    page = visible(html(game(away=away, home=home, board=token)))
+    assert f"Not shown here: the pasted pick {named}." in page
+    slate = visible(html(run("app.py", date=DATE, board=token)))
+    assert f"The pasted pick among them: {named}." in slate
+
+
+def test_a_game_with_one_line_says_so_on_its_pill():
+    """'1 of your line shown for this game' passed every test: the pill test
+    reads the first pill whose title says 'lines' (review 3, F17)."""
+    w = H.load()
+    row = w.sched[w.sched["game_id"] == H.LATE].iloc[0]
+    one = store.render_slate_card(row, H.DATE, {}, n_lines=1)
+    assert 'title="1 of your lines shown for this game"' in one
+    assert '<b>1</b><span class="u">line</span>' in one
+    two = store.render_slate_card(row, H.DATE, {}, n_lines=2)
+    assert 'title="2 of your lines shown for this game"' in two
+    assert '<b>2</b><span class="u">lines</span>' in two
+
+
+def test_one_saved_line_is_one_line(monkeypatch):
+    """'1 lines saved for October 20.' (review 2, I10)."""
+    monkeypatch.setattr(store, "now_utc",
+                        lambda: dt.datetime(2026, 10, 20, 16, 0, tzinfo=dt.timezone.utc))
+    row = {"name": "Victor Wembanyama", "team_code": "SAS", "stat_type": "Points", "stat": "pts",
+           "line": 24.5, "direction": "", "odds_type": "standard", "opp": "OKC",
+           "is_combo": False, "league": None, "match": "matched", "person_id": 1641705,
+           "how": "exact", "roster_name": "Victor Wembanyama", "roster_team": "SAS",
+           "game_date": "2026-10-20", "game_id": "0022600003",
+           "tip_utc": "2026-10-21T01:30:00+00:00", "pick": None}
+    one = props.add_to_board(None, pd.DataFrame([row]))
+    assert "<b>1 line saved for October 20.</b>" in html(run("app.py", date="2026-10-20",
+                                                             board=one))
+    two = props.add_to_board(one, pd.DataFrame([{**row, "stat_type": "Rebounds", "stat": "reb",
+                                                 "line": 11.5}]))
+    assert "<b>2 lines saved for October 20.</b>" in html(run("app.py", date="2026-10-20",
+                                                              board=two))
 
 
 def test_a_player_with_lines_carries_their_count_in_his_table_row(monkeypatch, tmp_path, mdl):

@@ -105,6 +105,44 @@ def canonical(value) -> str | None:
     return _ALIAS.get(_key(value))
 
 
+# A team as a person writes it in a typed list of picks ("Suns:"): the
+# nickname and its common short forms, and the city when only one team plays
+# there (never "Los Angeles" or "LA", which are two). Kept out of canonical(),
+# whose callers read feed codes and URL parameters.
+_NICKNAMES = {
+    "ATL": ("Hawks",), "BOS": ("Celtics",), "BKN": ("Nets",), "CHA": ("Hornets",),
+    "CHI": ("Bulls",), "CLE": ("Cavaliers", "Cavs"), "DAL": ("Mavericks", "Mavs"),
+    "DEN": ("Nuggets",), "DET": ("Pistons",), "GSW": ("Warriors",), "HOU": ("Rockets",),
+    "IND": ("Pacers",), "LAC": ("Clippers",), "LAL": ("Lakers", "LA Lakers"),
+    "MEM": ("Grizzlies",), "MIA": ("Heat",), "MIL": ("Bucks",),
+    "MIN": ("Timberwolves", "Wolves"), "NOP": ("Pelicans", "Pels"), "NYK": ("Knicks",),
+    "OKC": ("Thunder",), "ORL": ("Magic",), "PHI": ("76ers", "Sixers"), "PHX": ("Suns",),
+    "POR": ("Trail Blazers", "Blazers"), "SAC": ("Kings",), "SAS": ("Spurs",),
+    "TOR": ("Raptors",), "UTA": ("Jazz",), "WAS": ("Wizards",),
+}
+_CITIES = {
+    "ATL": "Atlanta", "BOS": "Boston", "BKN": "Brooklyn", "CHA": "Charlotte",
+    "CHI": "Chicago", "CLE": "Cleveland", "DAL": "Dallas", "DEN": "Denver",
+    "DET": "Detroit", "GSW": "Golden State", "HOU": "Houston", "IND": "Indiana",
+    "MEM": "Memphis", "MIA": "Miami", "MIL": "Milwaukee", "MIN": "Minnesota",
+    "NOP": "New Orleans", "NYK": "New York", "OKC": "Oklahoma City", "ORL": "Orlando",
+    "PHI": "Philadelphia", "PHX": "Phoenix", "POR": "Portland", "SAC": "Sacramento",
+    "SAS": "San Antonio", "TOR": "Toronto", "UTA": "Utah", "WAS": "Washington",
+}
+_NICK: dict[str, str] = {_key(n): c for c, names in _NICKNAMES.items() for n in names}
+_CITY: dict[str, str] = {_key(city): c for c, city in _CITIES.items()}
+
+
+def from_words(value, cities: bool = True) -> str | None:
+    """NBA tricode for a team as a person writes it: anything canonical()
+    reads, a nickname ("Suns", "Sixers"), or (when `cities`) a city only one
+    team plays in ("Phoenix"). None for anything else."""
+    if value is None:
+        return None
+    k = _key(value)
+    return _ALIAS.get(k) or _NICK.get(k) or (_CITY.get(k) if cities else None)
+
+
 def from_team_id(team_id) -> str | None:
     try:
         return _BY_TEAM_ID.get(int(team_id))

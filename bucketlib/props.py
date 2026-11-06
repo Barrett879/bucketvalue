@@ -13,7 +13,9 @@ A visitor pastes them. That is the whole ingestion path, and it is deliberate:
      or App". Solving (1) would not solve (2).
 
 So the visitor opens the feed (FEED_URL) or the board in their own browser and
-pastes what they see. This module parses it. **Do not add a fetcher here.**
+pastes what they see, or pastes a list of picks typed by hand or copied from a
+picks post ("Oso Ighodaro over 7.5 Points + Rebounds", parse_typed_lines).
+This module parses it. **Do not add a fetcher here.**
 tests/test_props.py parses this module's imports and fails if it, or anything
 it imports from bucketlib, imports a network library.
 
@@ -64,12 +66,14 @@ never wired into a public page. The board is a view; the record is evidence.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import math
 import re
 import secrets
 import threading
 import time
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -279,9 +283,18 @@ STAT_MAP: dict[str, str] = {alias: stat for stat, aliases in _STAT_ALIASES.items
 # are capped at MAX_LABEL_LEN before any of these run, so even the alternations
 # with \s* cannot be driven into long scans.
 _PERIOD = re.compile(
-    r"\b(?:[1-4]\s*(?:st|nd|rd|th)?\s*(?:h|q|half|qtr|quarter)"
-    r"|(?:first|1st)\s+\d+\s+min\w*|in\s+(?:the\s+)?first|first\s+(?:half|quarter)"
-    r"|second\s+(?:half|quarter)|third\s+quarter|fourth\s+quarter)\b")
+    r"\b(?:[1-4][\s\-]*(?:st|nd|rd|th)?[\s\-]*(?:h|q|half|halves|qtr|qrtr|qrt|quarter|hlf|hf)s?"
+    r"|[qh]-?[1-4]"
+    r"|(?:first|1st|opening|through)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine"
+    r"|ten|eleven|twelve)\s+min(?:s|ute|utes)?"
+    r"|in\s+(?:the\s+)?first|(?:first|second)[\s\-]+(?:half|quarter|qtr|qrtr|hlf|frame)"
+    r"|(?:third|fourth)[\s\-]+(?:quarter|qtr|qrtr|frame)|opening[\s\-]+(?:quarter|qtr|half)"
+    r"|(?:quarter|qtr|half)\s*(?:[1-4](?![\d.])|one|two|three|four)"
+    # "First Q", "Q 1", "1st period" (review 7, B23).
+    r"|(?:first|second|third|fourth)[\s\-]+q|[qh]\s+[1-4](?![\d.])"
+    r"|(?:first|1st|second|2nd|third|3rd|fourth|4th|opening)[\s\-]+period"
+    # The sportsbook's "1st 1/2", "1st \u00bd" (review 7, A3).
+    r"|(?:first|1st|second|2nd)\s*(?:1/2|\u00bd))(?!\w)")
 _REFUSALS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bdunks?\b"),
      "not in the box score the model is trained on"),
@@ -316,7 +329,7 @@ def classify_stat(stat_type, name=None, is_combo=False, league=None
     spaced = " ".join(raw.split())
     if _PERIOD.search(spaced):
         return None, "refused", REFUSE_PERIOD
-    hit = STAT_MAP.get(label_key(raw))
+    hit = STAT_MAP.get(label_key(raw)) or typed_stat(raw)
     if hit:
         return hit, "ok", None
     for pat, why in _REFUSALS:
@@ -392,6 +405,11 @@ def sides_from_allowed_wager_types(value) -> str:
     return sides.pop()
 
 
+def pick_of(value) -> str | None:
+    """A visitor's typed pick, 'more' or 'less', or None for anything else."""
+    return value if isinstance(value, str) and value in PICKS else None
+
+
 def offered_sides(direction, odds_type=None) -> str:
     """'both', 'more' or 'less'. An explicit direction (board buttons or the
     feed's allowed_wager_types) always wins; ODDS_TYPE_SIDES is the fallback."""
@@ -411,8 +429,14 @@ def is_pickable(lean, sides) -> bool:
 
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
+# `pick`, `pair` and `pair_loose` come from a typed list only
+# (parse_typed_lines): the side the visitor wrote, the game its game heading
+# names, and the two teams a loose heading joins ("ORL-PHX"), a game only
+# when the schedule pairs them (typed_games). None elsewhere.
 PARSED_COLUMNS = ["name", "team", "position", "stat_type", "line", "start_time",
-                  "direction", "odds_type", "opp", "is_combo", "league", "source"]
+                  "direction", "odds_type", "opp", "is_combo", "league", "source",
+                  "pick", "alt_pick", "pair", "pair_loose"]
+PICKS = frozenset({"more", "less"})
 _ODDS_TYPES = {"standard", "demon", "goblin"}
 # attrs['json_shape'] for a feed whose data[] is an empty list: the projections
 # feed itself, with no lines on it right now. Any other json_shape means the
@@ -423,7 +447,8 @@ EMPTY_FEED = "empty feed"
 def _new_attrs() -> dict:
     return {"skipped_noname": 0, "skipped_badline": 0, "skipped_live": 0,
             "skipped_error": 0, "truncated": 0, "too_large": False,
-            "json_shape": None, "allowed_wager_types": {}}
+            "json_shape": None, "allowed_wager_types": {}, "typed_noname": 0,
+            "typed_unread": 0, "typed_recap": 0, "typed_unclear": 0, "typed_period_label": 0}
 
 
 def _frame(rows: list[dict], attrs: dict) -> pd.DataFrame:
@@ -786,8 +811,2754 @@ def parse_prizepicks_board(text: str) -> pd.DataFrame:
     return _frame(rows, attrs)
 
 
+# ── A typed list of picks (Barrett, 2026-11-06) ──────────────────────────────
+# One pick per line, as a visitor types them or copies them from a picks post.
+# The first real one (Magic at Suns, 2026-11-05):
+#
+#     Suns:
+#     Take the OVER on Miles Bridges for a combined 6.5 Rebounds and Assists
+#     (Combined Rebounds and Assists will be 7 or more)
+#     Oso Ighodaro over 7.5 Points + Rebounds (Combined Points and ...)
+#     Magic:
+#     Wendell Carter Jr. under 23.5 Points + Rebounds + Assists (...)
+#
+# Read per line: exactly one number (the line: "7 or more", "7+" and "at least
+# 7" are a 6.5 line picked Over, and a "No" after them is the Under), at most
+# one side, a stat on either side of the number, and a name of two or more
+# words once the words around it ("Take the OVER on", "for a combined") are
+# set aside at its edges. Tout decoration is set aside too: emoji and keycap
+# numbers, markdown, "POTD:", "NBA:", "#NBA" and "Leg 1:" labels, thread
+# numbers ("1/", "[1/3]"), a handle, a date, a tip time, American odds
+# ("-120"), unit sizes ("2u") and a units column. A note after the stat
+# ("LOCK", ", second half of a back to back") is set aside only on a line
+# that names a side, and only when it names no stat and changes none:
+# "points, rebounds and assists combined" is PRA, never Points, and
+# "rebounds offensive" or "points in the paint" is no Rebounds or Points
+# (review 3, R1), nor is "rebounds, only offensive" (review 5, A4). A stat
+# run across a comma or a dash with a note after it ("rebounds, assists are
+# live too") could be either, so it is not read (review 4, B1); two stats
+# with only a comma between them are a combo only when "combined" follows,
+# and a letter is a stat only where "+", "&" or "/" joins it ("R+A", "Pts +
+# R + A", "Reb + A") or among capitals joined by "and" ("R and A"), so
+# "points - a lock" is Points and "points + a lock" is not read (review 5,
+# A9, B2; review 6, B2, B14); a slash, pipe, bullet or middle dot between
+# them joins them the same way ("Pts / R / A", "Pts | R | A"; review 7, A2).
+# A word that changes the stat among a note's first words ("rebounds, but
+# only offensive", "points, all from the paint", "rebound chances", "all
+# from three") leaves it unread too (review 6, A7; review 7, A8), but the
+# matchup does not ("elite offensive rating", "great transition team";
+# review 7, B16). A result word before the line or
+# first in the note after the stat ("o25.5 pts - cashed", "- that one
+# lost"), "cashed" anywhere after it, or a result alone after it or in a
+# parenthesis ("- hit", "- easy dub", "(W)", "(cashed it)") makes it a
+# recap, counted (typed_recap) and never a pick; later in a note "won" or
+# "lost" is context ("Knicks lost last night"), and "cashes" is a hope ("it
+# cashes tonight"; review 5, A10, B6; review 6, A8, B13) only beside a
+# word of hope: "- this one cashes" is a recap (review 7, B5). "- missed
+# shootaround" is about the player and "- push it" is a tout's bet, so both
+# are notes (review 7, B19). An average ("Points 27.1 avg") is no pick
+# (review 3, R7; review 4, A7).
+# A parenthesis is a gloss unless it holds a team, an opponent ("@ATL"), a
+# Demon or Goblin tag, a side, a Yes/No, or only words that change the stat
+# ("(offensive)", "(3PA)", "(+ assists)", "(and assists)", "(w/ assists)",
+# "(assists included)", "(offensive only)"), which join the stat label: the
+# line is priced on the stat written or not at all. A parenthesis naming
+# another stat outright ("points (rebounds)") or as if added ("(assists
+# too)"), or changing it among other words ("(offensive glass)", "(off
+# glass)"), leaves it unrecognised, unless the words speak of the matchup
+# ("(weak defensive team)", review 4, A2; review 5, A7). A period marker
+# anywhere on the line ("(1H)", "Q1", "first 5 minutes", "1st-half", "first
+# qtr"), in a section label above it ("1Q props:", "1Q Locks", "## 1Q
+# props"), on a name line above it ("Jalen Brunson (1Q)", "Main Slate 1H
+# props:", which label every pick under them, named or not, until a label
+# naming none) or on its game heading ("Magic @ Suns (1H)", which holds over
+# the game's own team headings and sub-labels) makes it a period prop,
+# refused and counted as one (review 5, A1, A3, B1, B4; review 6, A1, B4,
+# B9), and the report says which picks a label made period props
+# (typed_period_label, review 6, B12). A period is read however a book or a
+# tout spells it ("1st 1/2", "Q-1", "q 1", "First Q", "1st period", "1st
+# qrtr", "1qprops", a keycap 1 before Q; review 7, A3, B23). A "full game"
+# on a name line holds for that player's picks and ends only a period a name
+# line set; a team label under a period game heading keeps the period unless
+# it says "full game" (review 7, B2, B22). Refusing is the safe side, so a
+# line naming a period is a label unless the period is cancelled ("No 1Q
+# props today", a negation with no mark between it and the period that
+# denies the period's picks: "No more waiting, 1Q props:" and "No 1Q
+# parlays:" are labels; review 7, A7) or the line reads as a remark: a result
+# ("What a 4th quarter!", "1H recap: 3-1") or a remark's verb with a subject
+# other than the period ("Q4 Brunson is different"; "1Q is the move" is a
+# label; review 4, A6, B2; review 6, A3, B4); "2nd half of a back-to-back"
+# is a note, not a period. DiamondValue's "Name, Stat, Line"
+# list (comma, pipe, tab or bullet) reads the same way. A name alone on its
+# line names the picks on the
+# lines after it, with any team, opponent or tip time written beside it. A
+# line shaped like a pick that holds more than one number is counted
+# (typed_unread), never guessed; so is a pick whose name is a handle
+# ("@jalenbrunson1 o25.5 pts", review 4, B3). A tag is a tout's decoration
+# only when all of it is ("#NBA", "#PrizePicks", "@hoopspicks:") or it is a
+# team's own hashtag ("#DubNation"): a player's handle holding a part of one
+# ("@Money23Green", "#Pickett") names nobody, so his line is counted, never
+# lent the name above (review 6, A4, B7, A11). A tag that splits wholly into
+# a tout's words is decoration only when one of them is a bet's
+# ("#LockOfTheDay", "#LetsCash"), so "@King23" and "#Buckets" are a player's
+# nickname (review 7, B10, B18). "@Jalen Brunson" is his name (review 5,
+# B10, A21).
+#
+# THE SIDE WRITTEN IS THE VISITOR'S PICK, never the sides the line offers:
+# `pick` rides beside the line to the board ("Pick: More") while `direction`
+# stays unknown, so a pick the model disagrees with is shown. A square that
+# offers one side only lends it to a pick on its number, and a lean on the
+# other side is then hidden like any line's; the hidden-lines note names the
+# pick and the model's lean (review 3, F19).
+# ESPN writes New Orleans "NO": an all-caps "NO" beside the name, or after a
+# side word, is read both ways until the roster says whose player it is
+# (alt_pick, settled in typed_games). A Pelican keeps his Over; anyone else's
+# "NO" is a No. A "NO" after "7+" or a question, or on a line naming no
+# player, is the market's No, and so is one with closers after it ("NO -
+# fade", "NO at 38c"). A Yes never turns the pick, so the reading weighs a
+# No ("No", "Nope", "Nah", "No way", "Not a chance", "(answer: No)",
+# _market_answers): it is the answer where it plainly stands as one, right
+# after the pick's own question mark ("26+ 3-PT Made? No", "26+ points on
+# Saturday? No way"), first after the line or last on it with closers only
+# ("7+ R+A No - fade", "26+ points No lol"), before the number of a "7+" line
+# ("Miles Bridges No 7+ R+A"), or a parenthesis that is only the answer
+# ("(No 2u)"). One that starts a note ("no doubt", "no Towns", "NO TOWNS
+# TONIGHT", "with no Towns") or answers a question the note asks ("is Towns
+# playing? No") is the note's (review 4, A1; review 5, A2, A5, B3; review
+# 6, A2, A6, B1, B3), and "vs NO", "@NO" are New Orleans, the opponent (A4).
+# Anywhere else the side cannot be told, above all beside a written Over or
+# Under ("No, I like Jalen Brunson over 25.5 points", "over 25.5 points, no
+# for real", "(no, not a typo)"), so the line is counted (typed_unclear),
+# never guessed (review 6, B5, B6). Right after the pick's own question,
+# other ways to answer are read ("Never", "Fat chance", "Yeah, no" are a No;
+# "I like it" a Yes), and other words there leave the side unclear ("? Tough
+# one"). So do a No that opens a clause that may be a Yes ("no it is a
+# lock"), a correction ("No, wait, yes") and a No idiom beside a written
+# side ("over 25.5 points - no way"; review 7, A5, A6, B6, B7, B8). A word
+# holding a digit closes no answer: "(no B2B)" is a note (review 7, B4).
+#
+# A TYPED LINE HAS NO GAME TIME, so it routes like board text: the player's
+# next game today or tomorrow. A team heading ("Suns:") only GROUPS the list:
+# it scopes the name match, and the roster's team wins when they disagree. A
+# game is NAMED only by a game heading ("Magic @ Suns", "ORL vs PHX 9:00
+# PM", "Magic @ Suns on ESPN": a broadcast, a call sign or "| late game" is
+# set aside; review 7, A9, B11), an opponent on the line ("vs Lakers",
+# "@ATL"), or two team headings
+# the SCHEDULE pairs (typed_games). Two teams joined by "&", "and", "/", a
+# dash or "x" are two team headings, a game only when the schedule says so
+# ("Knicks & Nets" groups a list; review 3, R6): when their latest game, or
+# their next, is against each other, the pair names that game as "@" does,
+# so last night's "ORL-PHX" list is late all the next day (review 4, B4),
+# unless both teams play again today: that list is today's (review 5, B9).
+# A named game that has
+# tipped claims the line, so a list sent in after its game is reported as
+# late instead of being filed under each team's next game. The first list
+# was exactly that: it came in after Magic at Suns had ended.
+TYPED_SOURCE = "typed"
+MAX_TYPED_LINES = 5_000         # a typed list is dozens of lines; this bounds a hostile paste
+MAX_TYPED_WORDS = 40_000        # ...and this one of long lines: a board line is ~2 words
+TYPED_LATE_HOURS = 6.0          # a named game that tipped this recently claims a typed line
+TYPED_MORNING_AFTER_HOUR = 12   # until noon ET, two headings that met last night name that game
+_SIDE_WORDS = {"over": "more", "under": "less", "more": "more", "less": "less",
+               "higher": "more", "lower": "less"}
+# A letter is a side only right before the number ("o 6.5") or last on the
+# line ("6.5 R+A U"), never inside a name.
+_SIDE_LETTERS = {"o": "more", "u": "less"}
+_OR_SIDE = {"more": "more", "over": "more", "higher": "more",
+            "less": "less", "fewer": "less", "under": "less", "lower": "less"}
+_YES_NO = {"yes": True, "no": False}
+# The words a visitor answers a market with, beyond Yes and No ("? Nope", "?
+# Yeah", review 6, A6). Only a No ever turns the pick: a Yes is the line's own
+# side.
+_ANSWER_WORDS = {**_YES_NO, "nope": False, "nah": False, "naw": False, "yep": True,
+                 "yup": True, "yeah": True, "yea": True}
+# An amount after an answer ("No 2u", "No at 38c", "No 100%"): a closer. A word
+# that merely holds a digit is not one: "(no B2B)", "(no 76ers)" (review 7, B4).
+_AMOUNT = re.compile(r"\d{1,3}(?:\.\d{1,2})?(?:u|units?|c|cents?|%)?"
+                     r"|[+-]?\d{3,4}|\d{1,2}x|x\d{1,2}")
+# Spellings of the same answers: "Nooo", "Nahh", "Nay", "Yesss", "Yeahh"
+# (review 7, A6).
+_NO_FORM = re.compile(r"no{2,}|na+h+|nay|nope+")
+_YES_FORM = re.compile(r"ye+s+|ye+a+h+|yu+p+|ye+p+")
+
+
+def _answer_value(w: str):
+    """True for a Yes, False for a No, None for any other word."""
+    if w in _ANSWER_WORDS:
+        return _ANSWER_WORDS[w]
+    if _NO_FORM.fullmatch(w):
+        return False
+    return True if _YES_FORM.fullmatch(w) else None
+
+
+# After the pick's own question mark, the other ways to say No or Yes ("?
+# Never", "? Fat chance", "? Doubt it", "? Fade"), closers aside; any other
+# words there leave the side unclear (_market_answers; review 7, A6).
+_ASKED_NO = frozenset({("never",), ("negative",), ("unlikely",), ("fade",), ("fading",),
+                       ("pass",), ("doubt",), ("i", "doubt"), ("fat", "chance"),
+                       ("not", "likely"), ("not", "happening"), ("certainly", "not"),
+                       ("probably", "not"), ("not",), ("not", "a", "shot"), ("hard", "pass"),
+                       ("fade", "him"), ("fade", "that")})
+_ASKED_YES = frozenset({("like",), ("i", "like"), ("love",), ("i", "love"), ("think", "so"),
+                        ("i", "think", "so"), ("of", "course"), ("certainly",), ("likely",),
+                        ("probably",), ("yessir",)})
+# After "no", a word that makes the two one No: "? No way" and "? No chance"
+# were read as a note, and the board showed the opposite pick (review 6, A2).
+_NO_IDIOM_NEXT = frozenset({"way", "chance", "shot", "shots", "dice", "go", "bueno"})
+# After an answer, the words a tout closes it with ("No lol", "No - fade", "NO
+# 2u", "No at 38c", "(No for me)"). With nothing else after it, a Yes or No
+# stands alone (_after_answer).
+_ANSWER_CLOSERS = frozenset({
+    "for", "sure", "imo", "lol", "lmao", "tbh", "fr", "fade", "fading", "pass", "lock", "locks",
+    "locked", "max", "play", "bet", "x2", "x3", "2x", "3x", "at", "@", "sir", "thanks", "thx",
+    "please", "pls", "again", "easy", "ez", "money", "cash", "hammer", "smash", "nuke", "tail",
+    "unit", "units", "u", "bol", "lfg", "potd", "free", "boys", "baby", "bro", "here", "today",
+    "tonight", "me", "all", "day", "jose", "hell", "fam",
+    # "Lock it in", "Let's ride", "Absolutely" after a pick's question
+    # (review 7, A6).
+    "it", "in", "this", "lets", "let's", "ride", "go", "absolutely", "definitely", "obviously",
+    "duh", "ofc", "easily"})
+# The words a clause opens with. After a No ("No he's cold", "no but
+# seriously", "no u can't fade this") they make the No and the clause one
+# thought, which beside a written Over or Under may argue either side
+# (review 6, B6).
+_CLAUSE_STARTS = frozenset({
+    "he", "hes", "he's", "she", "shes", "she's", "they", "theyre", "they're", "i", "im", "i'm",
+    "id", "i'd", "we", "its", "it's", "it", "this", "that", "thats", "that's", "but", "and",
+    "because", "cause", "cuz", "since", "so", "you", "ur", "your", "sadly", "honestly",
+    "though", "if", "as", "not", "never", "there", "theres", "there's",
+    # "No wait, yes", "No actually": a correction (review 7, B8)
+    "wait", "actually", "nvm", "scratch"})
+# Before a No that closes a parenthesis, the words that make it the visitor's
+# answer: "(answer: No)", "(I say no)", "(taking the No)" (review 6, A6).
+_ANSWER_LEADS = frozenset({"answer", "my", "pick", "i", "say", "taking", "take", "going", "im",
+                           "i'm", "me", "call", "verdict", "the", "is", "with", "its", "it's"})
+# Words that may stand between a line and the question mark closing it, as
+# its own question's ("Will Jalen Brunson score 26+ points on Saturday? No",
+# "...in his next game? No"): its answer is the visitor's (review 6, B1).
+_QUESTION_CONTEXT = frozenset({
+    "on", "in", "this", "his", "the", "next", "game", "games", "again", "tonight", "today",
+    "tomorrow", "for", "or", "more", "regulation", "road", "home", "night", "matchup", "at",
+    "tonight's", "today's", "tomorrow's", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "monday's", "tuesday's", "wednesday's", "thursday's",
+    "friday's", "saturday's", "sunday's"})
+_ODDS_WORDS = {"demon": "demon", "goblin": "goblin", "standard": "standard"}
+_NEUTRAL_SIDES = frozenset({"o/u", "over/under", "u/o", "under/over", "more/less",
+                            "less/more", "higher/lower"})
+_UNIT_WORDS = frozenset({"u", "unit", "units"})
+_TYPED_NUM = re.compile(r"^\d{1,3}(?:\.\d{1,2})?$")
+_TYPED_GLUED = re.compile(r"^(o|u|over|under)(\d{1,3}(?:\.\d{1,2})?)$", re.IGNORECASE)
+# "25.5pts", "o11.5reb": a stat glued to a decimal line. A decimal only, so
+# "2u", "1H" and "3PT" are never split, and the glued word must be a stat.
+_TYPED_GLUED_STAT = re.compile(r"^(o|u|over|under)?(\d{1,3}\.\d{1,2})([a-z][a-z+&]{0,14})$",
+                               re.IGNORECASE)
+_TYPED_PLUS = re.compile(r"^(\d{1,3}(?:\.5)?)\+$")                 # "7+", "6.5+"
+_TYPED_PLUS_STAT = re.compile(r"^(\d{1,3}(?:\.5)?\+)([a-z][a-z+&]{0,14})$",   # "9+reb"
+                              re.IGNORECASE)
+_TYPED_SPREAD = re.compile(r"^-\d{1,2}(?:\.\d{1,2})?$")      # "-3.5": a spread, never a line
+_TYPED_ODDS = re.compile(r"^[+-]\d{3,4}$")                      # "-120", "+105": American odds
+_TYPED_UNITS = re.compile(r"^\d{1,2}(?:\.\d{1,2})?u(?:nits?)?$", re.IGNORECASE)    # "2u"
+_TYPED_PAREN = re.compile(r"\(([^()]{0,200})\)")
+_TYPED_BULLET = re.compile(r"^(?:[-*>\u2022\u00b7\u25cf\u2013\u2014\u2192]+\s*"
+                           r"|\d{1,3}[.)]\s+|#{1,6}\s+)")
+# A keycap number emoji (digit, variation selector, keycap): a bullet, so its
+# digit is never a second number on the line.
+_KEYCAP = re.compile(r"[0-9#*]\ufe0f?\u20e3")
+# ...except a 1 to 4 just before Q or H: "1\ufe0f\u20e3Q props:" is a 1Q label (review 7, A3).
+_KEYCAP_PERIOD = re.compile(r"([1-4])\ufe0f?\u20e3(?=[qhQH](?![a-z]))")
+# What a chat client leaves around a pick: **bold**, __bold__, _italics_,
+# `code`, ~~strike~~. An underscore inside a word ("@hoops_picks") or
+# opening a handle ("@_hoopspicks:") stays (review 4, B10).
+_MARKDOWN = re.compile(r"\*+|`+|~+|(?<!@)_{2,}|(?<![\w@])_|_(?!\w)")
+_TZ_WORDS = ("et|est|edt|ct|cst|cdt|mt|mst|mdt|pt|pst|pdt|az|eastern|central|mountain"
+             "|pacific")
+_MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+          r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?")
+# Before a pick and never part of it, each anchored at the start: a thread
+# number or a date ("1/", "2/5", "11/5", "11/05/26", "[1/3]", "Nov 5:"), a
+# handle ("@hoopspicks:"), a hashtag ("#NBA"), a tip time ("7:30pm ET"), a
+# multiplier ("2x", "x2") and a max-play label ("MAX PLAY:"). A "2pm" or
+# "3pm" is a stat as often as a time ("3PM over 4.5"): _read_typed tries both.
+_TYPED_PREFIX = re.compile(
+    r"^(?:\d{1,2}/\d{0,2}(?:/\d{2,4})?[:.)\-]?\s+|\[\d{1,2}/\d{1,2}\]\s*|@\w{1,30}:\s*"
+    r"|#[a-z]\w{0,29}:?\s+"
+    r"|" + _MONTH + r"\s*\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?(?:\s*[:.)\-]\s*|\s+)"
+    r"|(?![23]pm\b)\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)"
+    r"(?:\s*(?:" + _TZ_WORDS + r")\b)?\s*[:\-]?\s*"
+    r"|\d{1,2}x[:\-]?\s+|x\d{1,2}[:\-]?\s+|max\s+(?:play|bet|units?)\b\s*[:\-]?\s*)",
+    re.IGNORECASE)
+# A tip time that may be the stat ("3pm Jalen Brunson o25.5 pts", against
+# "3PM over 4.5 Stephen Curry").
+_TIP_23 = re.compile(r"^[23]\s*p\.?m\.?(?!\w)(?:\s*(?:" + _TZ_WORDS + r")\b)?\s*[:\-]?\s*",
+                     re.IGNORECASE)
+# A handle with no colon ("@hoopspicks Josh Hart ..."), set aside unless it is
+# a team: "@ATL" is the opponent.
+_HANDLE = re.compile(r"^@(\w{1,30})(?:\s*[:\-]\s*|\s+)")
+# "1 Miles Bridges over 6.5 R+A": a list number, set aside only when another
+# number is left to be the line, and never the 2 or 3 that begins a stat
+# ("3 Pointers Made").
+_LEAD_NUMBER = re.compile(r"^\d{1,2}\s+(?=[A-Z])(?!(?i:p(?:oint|t|m)))")
+# "Leg 1:", "Pick #2 -", "#3)": a numbered label before the pick, whose number
+# is not the line.
+_TYPED_LABEL = re.compile(
+    r"^(?:(?:leg|pick|play|bet|lock|prop|game|parlay)\s*#?\s*\d{1,2}|#\s*\d{1,2})"
+    r"\s*[:.)\-]?\s+", re.IGNORECASE)
+_TYPED_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ]\S*)?$")
+# A field separator: a comma, semicolon, pipe, tab, bullet, middle dot or
+# arrow, or a slash or ">" with a space either side ("Miles Bridges \u2022 R+A
+# \u2022 6.5", "Miles Bridges\u2022Rebs+Asts\u20226.5", "Josh Hart >> o8.5 reb").
+_TYPED_SEPS = re.compile(r"\s*[,;|\t\u2022\u00b7\u2192]\s*|\s+(?:/|>+)\s+")
+# A separator standing between two stat words or letters ("Pts / R / A",
+# "Reb \u2022 A", "Pts | R | A", "Pts\u2022R\u2022A") joins them as "/" does: split into fields, the
+# combo was priced as its first stat (review 7, A2).
+_STAT_SEP_CHARS = "/|\u2022\u00b7"
+_GLUED_SEP = re.compile(r"[|\u2022\u00b7]")
+# A units column: a lone small whole number closing a separated row
+# ("Miles Bridges, Rebs+Asts, 6.5, Over, 1").
+_UNITS_FIELD = re.compile(r",\s*\d{1,2}\s*$")
+# What must be left before a units column or a list number is set aside: a
+# line with a decimal or a "7+". A whole-number line on a stat with a digit
+# in its name ("Stephen Curry, 3PT, 4") keeps its number.
+_HAS_LINE = re.compile(r"\d\.\d|\d\+")
+# Between the two teams of a game heading: "@", "at", "vs", "v", "versus",
+# "x", "and", "&", "/" or a dash ("ORL-PHX", "Magic/Suns").
+_TYPED_GAME = re.compile(r"\s*(?:@|\bat\b|\bvs\b\.?|\bv\b\.?|\bversus\b|\bx\b|\band\b"
+                         r"|[&/\-\u2013\u2014])\s*", re.IGNORECASE)
+# What a heading carries besides its teams, set aside before it is read: a tip
+# time ("9:00 PM", "9 ET", "21:00", "9.00pm", "2100", "at 9 PM"), a record
+# ("4-4"), a date ("11/5", "Nov 5, 2026", "5 Nov", "2026-11-05"), a weekday
+# ("Thursday Night"), a time zone ("ET", "Eastern Time", "Arizona time",
+# "local"), the network ("on ESPN", "| ESPN", "NBA League Pass", "on Amazon
+# Prime", "FanDuel Sports Network"), the Cup ("NBA Cup group play", "Cup
+# game"), "Game 1" and "tonight". "Magic @ Suns 7:00 PM MST" still names its
+# game (review 3, F4), and so do "Magic @ Suns 9 PM ET / 7 PM MST" (review 4,
+# A5), "Magic at Suns at 9", "Tonight @ 9" and "9p ET" (review 5, A6).
+# A regional network may carry its region ("NBC Sports Bay Area", "FanDuel
+# Sports Network Southwest"); a national one never does, so the word after it
+# is the city of the heading's team: "Tonight on ESPN Washington at Atlanta"
+# lost Washington and its game (review 6, B8).
+_REGIONAL_NETS = (r"(?:(?:fan\s*duel|bally|nbc|spectrum|monumental|altitude|marquee|root"
+                  r"|space\s+city|chicago|gulf\s+coast|rip\s+city|yes)"
+                  r"\s+(?:sports(?:\s*net(?:work)?)?"
+                  r"|network|home\s+network|television(?:\s+network)?|tv)|fdsn\w*|nbcs\w*)")
+_NET_REGIONS = (r"(?:\s+(?:bay\s+area|california|philadelphia|boston|washington|sun|florida"
+                r"|southwest|southeast|north|ohio|detroit|wisconsin|indiana|oklahoma"
+                r"|new\s+orleans|west|midwest|socal|northwest|plus))?")
+_NATIONAL_NETS = (r"(?:msg(?:\d|\s+networks?)?|sportsnet|kjzz"
+                  r"|espn(?:2|\s*\+|\s+plus)?|tnt|abc|nbc|nba\s*tv|(?:amazon\s+)?prime(?:\s+video)?"
+                  r"|peacock|amazon|trutv|(?:nba\s+)?league\s+pass)")
+_NETWORKS = r"(?:" + _REGIONAL_NETS + _NET_REGIONS + r"|" + _NATIONAL_NETS + r")"
+# ...and with a region after any network: NBC's own stations brand by city
+# ("on NBC Washington"), so a heading that reads as no game is read again with
+# this (review 7, B11).
+_NETWORKS_WIDE = r"(?:(?:" + _REGIONAL_NETS + r"|" + _NATIONAL_NETS + r")" + _NET_REGIONS + r")"
+# A national network named on the line: only then is a heading read twice.
+_NATIONAL_NAMED = re.compile(r"\b(?:nbc|abc|tnt|espn|peacock|prime|amazon|msg|nba\s*tv"
+                             r"|league\s+pass|trutv)\b", re.IGNORECASE)
+
+
+def _heading_noise(networks: str) -> re.Pattern:
+    """What a heading carries besides its teams (see above), with `networks`
+    for the networks it may name. Every piece of it starts a word or starts
+    at an "@", so the lookahead in front skips every other place at once: a
+    hundred pieces tried at each character of a 300-character line made a
+    hostile paste of such lines cost seconds (review P8; the test pins the
+    pattern with and without it to the same result)."""
+    return re.compile(r"(?=@|\b\w)(?:" + _heading_noise_body(networks) + ")", re.IGNORECASE)
+
+
+def _heading_noise_body(networks: str) -> str:
+    """The pieces of _heading_noise, each starting a word or at an "@"."""
+    return (
+        r"\b\d{4}-\d{2}-\d{2}\b"
+        r"|(?:\bat\s+|@\s*)?\b\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)"
+        r"|(?:\bat\s+|@\s*)?\b\d{1,2}(?::\d{2})?\s*(?:" + _TZ_WORDS + r")\b|\b\d{1,2}:\d{2}\b"
+        r"|\b(?:[01]\d|2[0-3])[0-5]\d\b"
+        r"|\b\d{1,2}\s*-\s*\d{1,2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b"
+        r"|\b" + _MONTH + r"\s*\d{1,2}(?:st|nd|rd|th)?\b(?:,?\s*\d{4}\b)?"
+        r"|\b\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH
+        + r"|\b(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day|sday|nesday|rsday|urday)?\b\.?"
+        r"(?:\s+night\b)?"
+        r"|(?:\bon\s+)?\b" + networks + r"(?!\w)"
+        r"|\b(?:emirates\s+)?nba\s+cup(?:\s+(?:group\s+(?:play|stage)|game|night|knockout))?\b"
+        r"|\bin[\s\-]season\s+tournament\b|\bcup\s+(?:night|game|knockout)\b"
+        r"|\b(?:cup\s+)?(?:(?:east|west)(?:ern)?\s+)?group\s+(?:play|stage|[a-c])\b"
+        r"|\bgame\s+\d{1,2}\b"
+        r"|(?:\bat\s+|@\s*)\b\d{1,2}(?:[:.]\d{2})?\b|\b\d{1,2}(?:[:.]\d{2})?\s*[ap]\b"
+        r"|\b\d{1,2}h\d{2}\b|\b(?:arizona|phoenix|local|tip|game|start)\s+time\b|\blocal\b"
+        # "tip 9 ET", "tipoff 9 PM", "9 o'clock", "9ish", "21h", "7:00 Arizona",
+        # a date as 11.5.26 (review 6, A9).
+        r"|\btip(?:[\s\-]*off)?\b|\b\d{1,2}\s*o.?\s*clock\b|\b\d{1,2}(?::\d{2})?\s*ish\b"
+        r"|\b(?:1[2-9]|2[0-3])h\b|\barizona\b|\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"
+        # "on Max", "on Bally", "on Suns Live", "| late game" (review 7, A9).
+        r"|\bon\s+(?:hbo\s+)?max\b|\bon\s+bally\b|\bon\s+[a-z]+\s+live\b"
+        r"|\b(?:late|early|night|main)\s+(?:game|slate|window)\b"
+        r"|\b(?:" + _TZ_WORDS + r")(?:\s+time)?\b|\b(?:tonight|today|tomorrow)\b")
+
+
+_HEADING_NOISE = _heading_noise(_NETWORKS)
+_HEADING_NOISE_WIDE = _heading_noise(_NETWORKS_WIDE)
+# Context a tout writes that is not a period ("2nd half of a back-to-back",
+# "2nd half of B2B", "in the first meeting", "in the first 5 games", "in first
+# place", "2nd half of the season"), set aside before a line is searched for
+# one (review 3, F12).
+_PERIOD_NOTE = re.compile(
+    r"\b(?:1st|2nd|first|second)[\s\-]+(?:(?:half|leg|night|end|game)\s+)?"
+    r"of\s+(?:(?:a|the|this)\s+)?(?:back[\s\-]*to[\s\-]*backs?|b2b)\b"
+    r"|\b(?:1st|2nd|first|second)[\s\-]+half\s+of\s+(?:(?:the|this|last)\s+)?season\b"
+    r"|\bin\s+(?:(?:the|their|his)\s+)?first\s+(?:\w+\s+)?"
+    r"(?:meetings?|matchups?|games?|times?|starts?|outings?|weeks?|months?|rounds?|place)\b"
+    r"|\bfirst\s+(?:\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:games|meetings|starts|outings|matchups|weeks)\b",
+    re.IGNORECASE)
+# A word that is only a period marker ("1Q", "Q1", "1st", "half"), left out of
+# the name and the stat once the line is known to be a period prop.
+_PERIOD_TOKEN = re.compile(r"^(?:[1-4](?:st|nd|rd|th)?-?[qh]s?|[qh]-?[1-4]|[1-4](?:st|nd|rd|th)"
+                           r"|(?:[1-4](?:st|nd|rd|th)?|first|second|third|fourth)-"
+                           r"(?:half|quarter|qtr)"
+                           r"|first|second|third|fourth|half|halves|quarter|quarters|qtr|qrtr"
+                           r"|qrt|hlf|hf|frame|period|q|1/2|\u00bd)$",
+                           re.IGNORECASE)
+# A period glued to the word after it ("#1QProps", "1Q_props", "1Qprops:",
+# "#FirstQuarter", "FIRSTQUARTER:"), spaced before a period is looked for
+# (review 7, A3).
+_GLUED_PERIOD = re.compile(
+    r"(?<![a-z0-9])([1-4](?:st|nd|rd|th)?[qh]|[qh][1-4])_?(?=(?:props?|picks?|plays?|bets?|locks?"
+    r"|lines?|slips?|unders?|overs?)\b)|\b(first|second|third|fourth)_?(quarter|half|qtr)\b",
+    re.IGNORECASE)
+
+
+def _unglue_periods(text: str) -> str:
+    return _GLUED_PERIOD.sub(lambda m: f"{m.group(1)} " if m.group(1)
+                             else f"{m.group(2)} {m.group(3)}", str(text))
+_POSSESSIVE = re.compile(r"(?:'s|\u2019s|'|\u2019)$", re.IGNORECASE)   # "BRUNSON'S" too
+_EDGE_PUNCT = ",:;!?\"()[]{}|-\u2013\u2014"
+_SIGN_PUNCT = ",:;!?\"()[]{}|"           # edges stripped before reading a sign ("-120")
+_SYMBOL_CATEGORIES = frozenset({"So", "Sk", "Cs", "Co", "Cf", "Cn"})
+_TYPED_MAX_TOKENS = 40
+# Words at the EDGES of a typed name that are not part of it, set aside at its
+# edges only: a word inside a name is never removed. None is a first name on
+# the roster ("max" was: Max Strus, Max Christie; "MAX PLAY:" is a prefix).
+_NAME_LEAD = frozenset({"take", "taking", "bet", "bets", "betting", "play", "playing",
+                        "hammer", "smash", "ride", "back", "tail", "grab", "go", "pick",
+                        "picks", "lock", "lean", "like", "love", "i", "im", "i'm", "the",
+                        "on", "for", "with", "my", "best", "a", "potd", "lotd", "potn",
+                        "bonus", "parlay", "nuke", "leg", "prop", "props", "nba", "give",
+                        "me", "gimme",
+                        # "NO DOUBT Karl-Anthony Towns over 11.5" (review 5)
+                        "no", "doubt", "brainer", "question"})
+_NAME_TAIL = frozenset({"for", "a", "an", "combined", "total", "of", "at", "with", "on",
+                        "to", "record", "get", "gets", "score", "scores", "have", "has",
+                        "hit", "hits", "the", "will", "be", "should", "goes", "go", "than",
+                        "in", "his", "is", "tonight", "today", "tomorrow",
+                        # "Will Josh Hart grab 9+ rebounds?" (review 6)
+                        "records", "grab", "grabs", "make", "makes", "dish", "dishes",
+                        "drop", "drops", "tally", "notch", "register", "collect"})
+# ("post" was one too, and cut Quinten Post's surname: review 7, A10.)
+# Before the number the words are cut back the same way, except the two that
+# are also stat letters: "P + R + A" and "TO" (turnovers) keep their last word.
+_PRE_TAIL = _NAME_TAIL - {"a", "to"}
+# After the line, the words a tout closes a pick with ("tonight", "LOCK", "BOL").
+_POST_TAIL = frozenset({"tonight", "today", "tomorrow", "lock", "locks", "bol", "lfg", "boom",
+                        "hammer", "smash", "nuke", "easy", "cash", "money", "potd", "free"})
+_TOTAL_WORDS = frozenset({"total", "team", "teams", "game"})
+_NAME_PARTICLES = frozenset({"jr", "sr", "ii", "iii", "iv", "v", "de", "da", "del", "di",
+                             "du", "la", "le", "van", "von", "der", "dos", "el", "st"})
+_STAT_LEAD = frozenset({"combined", "total", "of", "the", "in", "his"})
+# A parenthesis word that changes the stat ("rebounds (offensive)", "threes
+# (attempts)", "points (fantasy)"): it joins the label, so the line is priced
+# on the stat written or not at all, never on the stat without it.
+_STAT_QUALIFIERS = frozenset({"offensive", "defensive", "off", "def", "oreb", "dreb",
+                              "attempted", "attempts", "attempt", "att", "atts", "fga", "fta",
+                              "3pa", "fantasy", "fpts", "combo", "combos"})
+# "off" and "def" change the stat beside stat words ("(off.)", "(def reb)")
+# and beside most others ("(off glass)", "(off, not total)", review 5, A7);
+# only before a word of an everyday phrase (_WEAK_GLOSS_NEXT) are they no
+# qualifier: "(off the bench)", "(def a lock)", "(off night)".
+_WEAK_QUALIFIERS = frozenset({"off", "def"})
+_WEAK_GLOSS_NEXT = frozenset({"the", "a", "an", "bench", "ball", "rest", "night", "nights",
+                              "day", "days", "week", "weeks", "season", "injury", "court",
+                              "floor", "script", "his", "their", "my", "it", "lock", "play",
+                              "this", "that", "to", "of", "and", "or"})
+# Words a parenthesis may hold beside a qualifier without changing what it
+# says: "(offensive only)", "(just attempts)" (review 4, A2).
+_PAREN_FILLER = frozenset({"only", "just", "ones", "the"})
+# After a qualifier, a word that makes the parenthesis about the matchup, not
+# the stat: "(weak defensive team)" (review 3, R10).
+_MATCHUP_NOUNS = frozenset({"team", "teams", "matchup", "matchups", "opponent", "opponents",
+                            "opp", "unit", "rating", "ratings", "lineup", "lineups", "scheme",
+                            "frontcourt", "backcourt", "ranking", "efficiency", "pace"})
+# Before a stat in a parenthesis, an addition: "(+ assists)", "(and assists)",
+# "(w/ assists)", "(including rebounds and assists)"; after it, the same:
+# "(assists included)" (review 5, A7).
+_CONNECT = frozenset({"+", "&", "and", "plus", "with", "w", "w/", "incl", "including",
+                      "includes", "counting", "inc", "alongside"})
+# Two words that add a stat as one does: "(along with assists)", "(together
+# with assists)", "(combined with assists)" (review 6, A7).
+_CONNECT_PAIRS = (["combined", "with"], ["along", "with"], ["together", "with"])
+# Roots of a word that makes a stat another one: "rebounds, exclusively
+# offensive", "rebounds (OREBs)", "(o-boards)", "points, all from the paint",
+# "threes, as attempts", "points, in transition" were priced as the stat
+# without it (review 6, A7). In a note's first words, or in a parenthesis,
+# the line is then not read as that stat.
+_QUAL_ROOTS = ("attempt", "paint", "fastbreak", "oreb", "dreb", "oboard", "dboard", "oglass",
+               "dglass", "putback")
+# Whole words that do it unless a matchup noun follows ("weak defensive team",
+# "elite offensive rating", "great transition team" are the matchup; review 7,
+# B16), and words that do it only as all of a short note ("threes, shots
+# taken", but not "shots are falling").
+_QUAL_FORMS = frozenset({"offensive", "defensive", "transition"})
+_QUAL_SHORT = frozenset({"shots", "taken", "volume"})
+# Whole words that do the same: "threes (tries)", "rebs, ORB", "assists
+# (potential)", "rebound chances", "steals (deflections)" (review 7, A8).
+_QUAL_WORDS = frozenset({"fga", "fta", "3pa", "tries", "potential",
+                         "chances", "contested", "deflections", "deflection",
+                         "secondary", "volume", "fts", "ftm", "orb", "drb", "orbs", "drbs"})
+# After "from", a range that makes points another stat: "from three", "from
+# deep", "from the line" (review 7, A8).
+_FROM_RANGE = frozenset({"three", "threes", "3", "deep", "downtown", "distance", "line",
+                         "beyond", "outside"})
+_CONNECT_AFTER = frozenset({"included", "incl", "added"})
+# In a parenthesis, a word that makes the stat another one ("(in the paint)",
+# "(fastbreak)"): the line is not read as the stat outside it.
+_PAREN_STAT_NOTES = frozenset({"paint", "fastbreak"})
+# Beside another stat in a parenthesis, a word that may add it to the line's:
+# "(assists too)", "(his assists count as well)" (review 5, A7).
+_ADDING_WORDS = frozenset({"too", "also", "well", "count", "counts", "counted", "added", "adding",
+                           "combined", "together", "both", "including", "included"})
+# In a note right after the stat, a word that makes it another stat ("points
+# in the paint", "points per game"): the line is not read as the stat before
+# it. Later in a note it is context ("coming off a big game", review 4, B8).
+_NOTE_STAT_WORDS = frozenset({"paint", "bench", "fastbreak", "per", "avg", "average", "ppg",
+                              "rpg", "apg"})
+# Words a note may open with before the word that changes the stat: "rebounds,
+# only offensive", "threes, counting attempts", "points, mostly in the paint"
+# were priced as the stat without it (review 5, A4, B5).
+_NOTE_FILLER = _PAREN_FILLER | frozenset({"all", "strictly", "purely", "mostly", "mainly",
+                                          "counting", "including", "includes", "incl", "on",
+                                          "in", "of", "kind", "just", "only", "a", "an"})
+# A result, not a pick ("Josh Hart o8.5 reb - cashed"), when one of these
+# comes before the line, or first in the note after the stat (_read_line).
+_RECAP_WORDS = frozenset({"cashed", "missed", "pushed", "graded", "won", "lost"})
+# Results that are never a note's context, wherever they sit after the stat:
+# "- easy, cashed", "- he cashed it", "Knicks won and it cashed" (review 5,
+# B6). "won", "lost", "missed" and "pushed" also tell of the team ("Knicks
+# lost last night", "Knicks pushed the pace"), so they count only first.
+_RECAP_ALWAYS = frozenset({"cashed", "graded"})
+# Words that make "cashes" a hope, not a result: "it cashes tonight", "this
+# line cashes often". Without one, "... CASHES" is last night's (review 7,
+# B5); a hope beside a result word is a pick's note: "(W tonight)" (B19).
+_HOPE_WORDS = frozenset({"tonight", "today", "tomorrow", "will", "gonna", "should", "often",
+                         "always", "usually", "every"})
+# Results that make a note or a parenthesis a recap when they are all it says
+# beside a subject: "- hit", "- easy dub", ": HIT", "(W)", "(push)", "- loss"
+# (review 6, A8). Beside other words "hit" is a tout's "bet" ("hit this") and
+# "W" a hope ("easy W tonight" is still read as a result, the safe side).
+_RESULT_ALONE = frozenset({"w", "l", "hit", "push", "loss", "win", "dub", "winner", "cashed",
+                           "won", "lost", "missed", "pushed", "graded"})
+# Words a recap's note may open with before its result: "- that one lost",
+# "- it pushed", "- barely missed", "= cashed", "LOCK cashed" (review 5, A10,
+# B6).
+_RECAP_SUBJECTS = frozenset({"it", "that", "this", "one", "barely", "just", "finally",
+                             "easily", "easy", "tough", "close", "almost", "nearly", "sadly",
+                             "unfortunately", "w", "l", "and", "but", "so"})
+# What may follow a stat run that crossed a comma: "points, rebounds and
+# assists combined", "Points, Rebounds, and Assists for sure" and "...
+# assists - lets ride" are PRA. Anything else after it ("assists are live
+# too") leaves the line unread (_stat_then_note).
+_COMBO_CLOSERS = frozenset({"combined", "total", "together", "overall", "for", "sure", "imo",
+                            "lets", "let's", "go", "baby", "ride", "riding", "it", "lock",
+                            "locked", "in", "book", "tail", "fr", "boys", "love", "like", "i",
+                            # "all day", "max play", "trust me", "let's get it", "no
+                            # brainer", "my fav" (review 5, B11)
+                            "all", "day", "max", "play", "ez", "trust", "me", "bet", "get",
+                            "no", "brainer", "doubt", "fav", "fave", "favorite", "my", "units",
+                            "unit", "x2", "dub", "w", "here", "we"})
+# After two stats with only a comma between them, a word that makes them one
+# combo: "rebounds, assists combined" (review 5, A9).
+_COMBINERS = frozenset({"combined", "total", "together", "overall"})
+# A name typed all in lower case is taken only when none of its words is one
+# of these: "some words about the matchup" is a sentence, not a player.
+_PLAIN_WORDS = frozenset({
+    "a", "about", "all", "an", "and", "any", "are", "at", "be", "been", "but", "by", "did",
+    "do", "does", "for", "from", "game", "had", "has", "have", "he", "her", "here", "his",
+    "how", "i", "if", "in", "is", "it", "its", "just", "last", "like", "line", "lines",
+    "love", "matchup", "my", "night", "no", "not", "of", "on", "or", "our", "parlay",
+    "pick", "picks", "really", "she", "so", "some", "that", "the", "their", "there", "these",
+    "they", "think", "this", "those", "to", "today", "tonight", "very", "was", "we", "were",
+    "what", "when", "why", "with", "words", "yes", "you", "your"})
+_OPP_MARKS = frozenset({"vs", "vs.", "v", "v.", "@", "at", "against", "versus"})
+# After "no", a word that makes the two a note's words wherever they sit: "no
+# doubt", "NO BRAINER", "no question" (review 4, A1; review 5, A2). They mean
+# Yes, which never turns the pick. "no way" and "no chance" mean No
+# (_NO_IDIOM_NEXT, review 6, A2).
+_NO_NOTE_WORDS = frozenset({"doubt", "doubts", "brainer", "brainers", "question", "questions",
+                            "cap", "fear", "worries", "worry", "problem", "problems", "sweat",
+                            "hesitation", "issue", "issues", "lie", "joke", "one"})
+# Before "no", a word that makes it a note's: "with no Towns", "there is no
+# stopping him".
+_NOTE_LEADS = frozenset({"with", "w/", "w", "has", "have", "had", "there's", "theres", "is",
+                         "are", "zero"})
+_HEADING_TAIL = frozenset({"picks", "pick", "props", "prop", "plays", "play", "bets", "bet",
+                           "lines", "parlay", "leans", "lean"})
+# What a tout calls the picks a section holds ("1Q props", "1Q locks", "1H
+# slips"). Inside a board paste a section label needs a colon or one of these,
+# since a square's own label ("1Q Points") and a board's period tabs ("1Q")
+# hold neither (review 5, B1). Set aside at the end of a heading or a name
+# line ("Knicks 1Q locks", "Jalen Brunson 1Q props").
+_TOUT_NOUNS = _HEADING_TAIL | frozenset({
+    "locks", "lock", "slips", "slip", "card", "cards", "targets", "target", "specials",
+    "special", "potd", "sweats", "fliers", "flyers", "bangers", "sprinkles", "overs", "unders",
+    "parlays", "tickets", "ticket", "spots", "selections"})
+# The most a player's line can plausibly be, per stat. Only used before a name
+# from the line above is lent to a line that has none: "Over 112.5 points"
+# under a player's name is a team total, not his.
+_TYPED_PLAUSIBLE = {"pts": 75, "reb": 30, "ast": 25, "fg3m": 15, "blk": 12, "stl": 10,
+                    "tov": 12, "pr": 95, "pa": 95, "ra": 50, "pra": 110, "stocks": 15,
+                    "fantasy": 130, "ftm": 30, "fta": 35, "fgm": 30, "fga": 50, "fg2m": 30,
+                    "fg2a": 45, "fg3a": 25, "oreb": 15, "dreb": 25, "pf": 6.5}
+
+# Stat words a person types, for typed_stat. Single letters count only inside
+# a combination ("R+A"), never alone.
+_TYPED_PART = {
+    "points": "pts", "point": "pts", "pts": "pts", "pt": "pts", "p": "pts",
+    "rebounds": "reb", "rebound": "reb", "rebs": "reb", "reb": "reb", "rebds": "reb",
+    "boards": "reb", "board": "reb", "rb": "reb", "rbs": "reb", "r": "reb",
+    "assists": "ast", "assist": "ast", "asts": "ast", "ast": "ast", "dimes": "ast",
+    "a": "ast",
+    "blocks": "blk", "block": "blk", "blks": "blk", "blk": "blk", "b": "blk",
+    "steals": "stl", "steal": "stl", "stls": "stl", "stl": "stl", "s": "stl",
+}
+_TYPED_COMBO = {frozenset({"pts", "reb"}): "pr", frozenset({"pts", "ast"}): "pa",
+                frozenset({"reb", "ast"}): "ra", frozenset({"pts", "reb", "ast"}): "pra",
+                frozenset({"blk", "stl"}): "stocks"}
+# Whole typed phrases, in label_key form, that STAT_MAP does not carry.
+_TYPED_ALIASES = {
+    "threes": "fg3m", "3s": "fg3m", "3pt": "fg3m", "3pointer": "fg3m", "3pointers": "fg3m",
+    "threepointer": "fg3m", "threepointers": "fg3m", "madethrees": "fg3m",
+    "threesmade": "fg3m", "3smade": "fg3m", "3ptm": "fg3m", "3pointfieldgoals": "fg3m",
+    "3pointfieldgoalsmade": "fg3m", "pr": "pr", "pa": "pa", "ra": "ra",
+    "stocks": "stocks", "fpts": "fantasy", "fantasypts": "fantasy", "tos": "tov",
+    "threesattempted": "fg3a", "attemptedthrees": "fg3a", "threesattempts": "fg3a",
+    "3sattempted": "fg3a", "3pa": "fg3a",
+    # "rebounds (OREBs)" is the offensive line (review 6, A7).
+    "orebs": "oreb", "drebs": "dreb",
+    # Basketball-Reference's ORB and DRB (review 7, A8).
+    "orb": "oreb", "orbs": "oreb", "drb": "dreb", "drbs": "dreb",
+}
+_TYPED_SPLIT = re.compile(r"\s*(?:\+|&|,|/|\band\b|\bplus\b)\s*")
+# A joiner standing alone between the words of a stat ("Pts + R + A").
+_JOINERS = frozenset({"+", "&", "/"})
+
+
+def typed_stat(phrase) -> str | None:
+    """The stat a typed phrase names, or None: 'Rebounds and Assists' is 'ra',
+    'Points, Rebounds, and Assists' 'pra', 'R + A' 'ra', anything STAT_MAP
+    reads itself. Every part must be a stat word, so 'first half points' is
+    None and the paste path hands that label to classify_stat, which refuses
+    it as a period prop."""
+    words = str(phrase or "")[:MAX_LABEL_LEN].lower().split()
+    while words and words[0].strip(_EDGE_PUNCT) in _STAT_LEAD:
+        words.pop(0)
+    raw = " ".join(words).strip(_EDGE_PUNCT + " .")
+    if not raw:
+        return None
+    key = label_key(raw)
+    hit = STAT_MAP.get(key) or _TYPED_ALIASES.get(key)
+    if hit:
+        return hit
+    parts = [p for p in _TYPED_SPLIT.split(raw) if p]
+    if len(parts) == 1:
+        parts = raw.split()            # "Points Rebounds Assists": whole words only
+        if len(parts) == 1:
+            k = label_key(parts[0])
+            return _TYPED_PART.get(k) if len(k) >= 4 else None
+        if any(len(p) < 3 for p in parts) or any(p[-1] in ";:.!?" for p in parts[:-1]):
+            return None                # "rebounds; assists": a break, as a comma is
+    else:
+        # A letter is a stat only where "+", "&" or "/" joins it ("R+A",
+        # "P/R/A", "Pts + R + A", "Reb + A", which were priced as their first
+        # stat alone: review 6, B2), or among capitals joined by "and" ("R and
+        # A", "P, R and A", review 6, B14). "points, a lock" and "points - a lock" are no
+        # Pts+Asts (review 5, B2), and "points + a lock" is not read
+        # (_stat_then_note). Two stats with nothing but a comma between them
+        # are a combo or a stat and a remark ("assists, rebounds no"), so
+        # neither is read here (review 5, A9; _stat_then_note reads them when
+        # "combined" follows).
+        single = [len(label_key(p)) == 1 for p in parts]
+        joined = (re.search(r"[+&/]", raw) is not None
+                  and re.search(r",|\band\b|\bplus\b", raw) is None)
+        capitals = all(single) and all(
+            c.isupper() for c in re.findall(r"\b[A-Za-z]\b", str(phrase)[:MAX_LABEL_LEN]))
+        if any(single) and not (joined or capitals):
+            return None
+        if len(parts) == 2 and re.search(r"[+&/]|\band\b|\bplus\b", raw) is None:
+            return None
+    if len(parts) > 3:
+        return None
+    keys = [_TYPED_PART.get(label_key(p)) for p in parts]
+    if None in keys or len(set(keys)) != len(keys):
+        return None
+    return _TYPED_COMBO.get(frozenset(keys))
+
+
+def _stat_piece(tok: str, last: bool) -> bool:
+    """The last (or the first) "/"-part of a token is a stat word or a stat
+    letter ("Pts", "R", "Reb/A")."""
+    parts = [p for p in tok.strip(_EDGE_PUNCT + ".").split("/") if p]
+    if not parts:
+        return False
+    k = label_key(parts[-1] if last else parts[0])
+    return (len(k) == 1 and k in _TYPED_PART) or _stat_word(k)
+
+
+def _join_stat_seps(s: str) -> str:
+    """s with each separator between two stat pieces turned into "/" (see
+    _STAT_SEP_CHARS). Linear: one pass over the words."""
+    words = s.split()
+    if len(words) < 2 or not any(set(w) & set(_STAT_SEP_CHARS) for w in words):
+        return s
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if (len(w) == 1 and w in _STAT_SEP_CHARS and out and i + 1 < len(words)
+                and out[-1][-1:].isalnum() and _stat_piece(out[-1], True)
+                and _stat_piece(words[i + 1], False)):
+            out[-1] += "/" + words[i + 1]
+            i += 2
+            continue
+        if _GLUED_SEP.search(w):
+            parts = _GLUED_SEP.split(w)
+            if len(parts) > 1 and all(p and _stat_piece(p, False) for p in parts):
+                w = "/".join(parts)
+        out.append(w)
+        i += 1
+    return " ".join(out)
+
+
+def _strip_symbols(text: str) -> str:
+    """Emoji and other symbols out, a space each, so a bullet emoji or a trailing
+    flame sticks to neither a name nor a stat. A keycap number goes whole."""
+    if text.isascii():
+        return text
+    text = _KEYCAP_PERIOD.sub(r"\1", text)      # "1\ufe0f\u20e3Q props": the label's own digit
+    text = _KEYCAP.sub(" ", text)
+    return "".join(" " if (unicodedata.category(ch) in _SYMBOL_CATEGORIES
+                           or 0xFE00 <= ord(ch) <= 0xFE0F or ch == "\u20e3") else ch
+                   for ch in text)
+
+
+def _clean(ln: str, tags: list | None = None) -> str:
+    """A typed line without its decoration: symbols, markdown, then a bullet,
+    a _TYPED_PREFIX, a _TYPED_LABEL and a handle (_HANDLE) at its start.
+    Each handle or hashtag set aside is added to `tags`. Bounded: at most four
+    passes, each anchored at the start."""
+    s, found = _clean_tags(str(ln))
+    if tags is not None:
+        tags.extend(found)
+    return s
+
+
+@functools.lru_cache(maxsize=512)
+def _clean_tags(ln: str) -> tuple[str, tuple[str, ...]]:
+    """_clean's line and tags, kept: the heading, name-line, section-label and
+    pick readers each clean the same line (review P8)."""
+    tags: list[str] = []
+    s = _MARKDOWN.sub(" ", _strip_symbols(ln)).strip()
+    for _ in range(4):
+        b = _TYPED_BULLET.sub("", s)
+        p = _TYPED_PREFIX.match(b)
+        if p is not None and p.group(0).lstrip()[:1] in ("@", "#"):
+            tags.append(p.group(0).strip())
+        t = _TYPED_LABEL.sub("", _TYPED_PREFIX.sub("", b)).strip()
+        h = _HANDLE.match(t)
+        if h and _team_word(h.group(1)) is None:
+            tags.append(h.group(0).strip())
+            t = t[h.end():].strip()
+        if t == s:
+            break
+        s = t
+    return s, tuple(tags)
+
+
+def _team_word(text: str) -> str | None:
+    """A team written in a heading or a parenthesis: 'Suns', 'Phoenix Suns',
+    'Phoenix', 'PHX'. Codes count only as three capitals ('PHX', not 'Phx'),
+    so a stray 'No' or 'NO' is not the Pelicans; '@ATL' is an opponent, never
+    a team."""
+    s = str(text or "").strip(_EDGE_PUNCT + " ")
+    if not s or len(s) > 40 or "@" in s:
+        return None
+    key = teams._key(s)
+    if len(key) < 3 or (len(key) == 3 and not s.isupper()):
+        return None
+    return teams.from_words(s)
+
+
+# The words that name a matchup outright. "&", "and", "/", a dash or "x"
+# between two teams may only group them ("Knicks & Nets"), so the schedule
+# decides those (_heading_parts, typed_games).
+_GAME_MARKS = frozenset({"@", "at", "vs", "vs.", "v", "v.", "versus"})
+
+
+# A local station's call sign after "on" ("Magic @ Suns on KTVK"), in
+# capitals: noise in a heading, unless it is a team's code (review 7, A9).
+_CALL_SIGN = re.compile(r"\b[Oo]n\s+([KW][A-Z]{2,3})\b")
+
+
+def _heading_parts(ln: str) -> tuple[tuple[str, ...], bool] | None:
+    """(teams, loose) for a heading: (('PHX',), False) for a team heading
+    ('Suns:', 'Phoenix Suns picks', 'Suns 5-3:'), (('ORL', 'PHX'), False) for
+    a game heading ('Magic @ Suns', 'ORL vs PHX 9:00 PM ET', 'Thu 11/5: Magic
+    at Suns'), with loose True when the joiner may only group the two
+    ('ORL-PHX', 'Magic/Suns', 'Knicks & Nets'); None for anything else. A
+    digit left once the time, date and record are set aside means a pick,
+    never a heading. A period it names ('Knicks @ Cavs First Half', 'Magic
+    @ Warriors 1H:') is set aside here and read by _section_period (review 5,
+    A19, B4)."""
+    got = _heading_read(ln, _HEADING_NOISE)
+    if got is None and _NATIONAL_NAMED.search(str(ln)):
+        got = _heading_read(ln, _HEADING_NOISE_WIDE)     # "Wizards at Hawks on NBC Washington"
+    return got
+
+
+@functools.lru_cache(maxsize=256)
+def _noise_sub(noise: re.Pattern, s: str) -> str:
+    """noise.sub(" ", s), kept: the heading reader and the name-line reader
+    each set the same line's heading noise aside (review P8)."""
+    return noise.sub(" ", s)
+
+
+def _has_digit(s: str) -> bool:
+    """Any digit in s, as str.isdigit counts them."""
+    return any(map(str.isdigit, s))
+
+
+def _heading_read(ln: str, noise: re.Pattern) -> tuple[tuple[str, ...], bool] | None:
+    """_heading_parts with `noise` for what a heading carries."""
+    s = _TYPED_PAREN.sub(" ", _clean(ln))
+    s = _CALL_SIGN.sub(lambda m: m.group(0) if _team_word(m.group(1)) else " ", s)
+    s = _drop_period(_noise_sub(noise, s))
+    if _has_digit(s.replace("76ers", "")):
+        return None
+    words = s.replace(":", " ").split()
+    # A tail word, or a separator the noise left behind ("Magic @ Suns /" once
+    # "9 PM ET / 7 PM MST" is out, review 4, A5).
+    while words and (words[-1].lower().strip(_EDGE_PUNCT + "/.,") in _TOUT_NOUNS
+                     or not words[-1].strip(_EDGE_PUNCT + "/.,")):
+        words.pop()
+    while words and not words[0].strip(_EDGE_PUNCT + "/.,"):
+        words.pop(0)
+    s = " ".join(words).strip(_EDGE_PUNCT + " ")         # "Magic vs Suns -" once the time is out
+    one = _team_word(s)
+    if one:
+        return (one,), False
+    joint = _TYPED_GAME.search(s)
+    parts = _TYPED_GAME.split(s)
+    if joint is not None and len(parts) == 2:
+        a, b = _team_or_no(parts[0]), _team_or_no(parts[1])
+        if a and b and a != b:
+            return (a, b), joint.group(0).strip().lower() not in _GAME_MARKS
+    return None
+
+
+def _typed_heading(ln: str) -> tuple[str, ...] | None:
+    """The teams of a heading (_heading_parts), or None."""
+    got = _heading_parts(ln)
+    return got[0] if got else None
+
+
+def _edge_team(tok: str) -> str | None:
+    """A team code or nickname written at the edge of a typed name ('PHX',
+    "Suns'", or ESPN's two-letter 'GS', 'NY', 'SA', 'NO'). Never a city
+    (Orlando Robinson and P.J. Washington keep theirs). Codes count only in
+    capitals, and 'NO' is also read as a No until the roster decides
+    (alt_pick)."""
+    core = _POSSESSIVE.sub("", tok.strip(_EDGE_PUNCT))
+    if core.isupper() and len(core) in (2, 3):
+        return teams.canonical(core)
+    return teams.from_words(core, cities=False) if len(core) >= 4 else None
+
+
+def _capitalised(tok: str) -> bool:
+    t = tok.strip(_EDGE_PUNCT)
+    return bool(t) and (t[0].isupper() or t.lower().rstrip(".") in _NAME_PARTICLES)
+
+
+# What the words around a typed pick turned out to be (_typed_name's kind).
+NAME_OK, NAME_NONE, NAME_BAD, NAME_TEAM = "name", "none", "bad", "team"
+
+
+def _typed_name(tokens, strict: bool = False, question: bool = False
+                ) -> tuple[str | None, str | None, str]:
+    """(name, team, kind) from the words around a typed pick. Lead-in and
+    trailing words are set aside at the edges, and a team code or nickname
+    at an edge is read as his team. kind is NAME_OK, NAME_NONE (no words: a
+    name on a line above may name it), NAME_TEAM (a team: a team total, not
+    a player's line) or NAME_BAD (words that are not a full name, such as a
+    surname alone). A name is written in capitals ('Miles Bridges', 'ZACH
+    EDEY') or, unless `strict` (a name alone on its line, with no pick to
+    vouch for it), all in lower case with no everyday word in it ('miles
+    bridges'). Never a mix, which keeps 'Last night we hit' from reading as a
+    player. `question` ('Will Miles Bridges record 7+ ...?') sets a leading
+    'Will' aside when two words are left after it, so Will Riley keeps his
+    name."""
+    toks = [t for t in tokens if t.strip(_EDGE_PUNCT)]
+    while toks and toks[0].strip(_EDGE_PUNCT).lower() in _NAME_LEAD:
+        toks.pop(0)
+    while toks and toks[-1].strip(_EDGE_PUNCT).lower() in _NAME_TAIL:
+        toks.pop()
+    if question and len(toks) >= 3 and toks[0].strip(_EDGE_PUNCT).lower() == "will":
+        toks.pop(0)
+    if not toks:
+        return None, None, NAME_NONE
+    whole = _team_word(" ".join(toks))
+    if whole is not None:
+        return None, whole, NAME_TEAM
+    team = None
+    for edge in (0, -1):
+        if len(toks) > 2:
+            code = _edge_team(toks[edge])
+            if code:
+                team = code
+                toks.pop(edge)
+    toks[-1] = _POSSESSIVE.sub("", toks[-1].rstrip(_EDGE_PUNCT))
+    name = " ".join(toks).strip(_EDGE_PUNCT + " ")
+    parts = name.split()
+    if name.isupper() and all(teams.from_words(p.strip(_EDGE_PUNCT)) for p in parts):
+        return None, team, NAME_TEAM                 # "LAL BOS": a matchup in codes
+    lower = (not strict and name == name.lower()
+             and not any(t.strip(_EDGE_PUNCT) in _PLAIN_WORDS for t in parts))
+    # Capitals throughout are a tout's style ('ZACH EDEY'), which the guard
+    # against team codes in _person_like would otherwise refuse.
+    looks = name.title() if name.isupper() else name
+    if (not _person_like(looks) or len(parts) > 5
+            or not (all(_capitalised(t) for t in parts) or lower)
+            or _team_word(name) is not None or typed_stat(name) is not None):
+        return None, team, NAME_BAD
+    return name, team, NAME_OK
+
+
+def _strip_opp(tokens: list[str]) -> tuple[list[str], str | None]:
+    """Tokens without a 'vs Magic' / '@ ORL' / 'against the Suns' clause, and
+    the opponent it names. Looks at the last two such marks only: the work per
+    line stays a few lookups however a hostile line repeats them."""
+    low = [t.strip(_EDGE_PUNCT).lower() if t != "@" else "@" for t in tokens]
+    seen = 0
+    for i in range(len(tokens) - 1, -1, -1):
+        if low[i] not in _OPP_MARKS:
+            continue
+        seen += 1
+        j = i + 1 + (1 if i + 1 < len(tokens) and low[i + 1] == "the" else 0)
+        if j < len(tokens) and tokens[j].strip(_EDGE_PUNCT + ".") == "NO":
+            return tokens[:i] + tokens[j + 1:], "NOP"     # ESPN's "vs NO" (review 4, A4)
+        for span in (3, 2, 1):
+            code = _team_word(" ".join(tokens[j:j + span])) if j + span <= len(tokens) else None
+            if code:
+                return tokens[:i] + tokens[j + span:], code
+        if seen >= 2:
+            break
+    return tokens, None
+
+
+def _team_or_no(text: str) -> str | None:
+    """_team_word, or ESPN's "NO" (New Orleans) where only a team can stand:
+    after "vs" or "@", or as one side of a matchup ("MIN @ NO")."""
+    return "NOP" if str(text or "").strip(_EDGE_PUNCT + ". ") == "NO" else _team_word(text)
+
+
+def _stat_digit(bare: list[str], i: int) -> bool:
+    """A 2 or 3 that begins a stat ('3 pointers made', '3 pt made'), not a line."""
+    if bare[i] not in ("2", "3") or i + 1 >= len(bare):
+        return False
+    nxt = bare[i + 1]
+    return nxt.startswith(("pointer", "pt", "point-", "pm")) or nxt == "point"
+
+
+def _glued_stat(word: str) -> bool:
+    return typed_stat(word) is not None or label_key(word) in STAT_MAP
+
+
+def _typed_tokens(s: str) -> list[str]:
+    """Whitespace tokens, with a glued side split off ('o6.5'), a glued stat
+    split off ('25.5pts', '9+reb', 'o25.5pts.'), a glued '@' split off
+    ('@ATL'), a sentence's full stop taken off a number ('25.5.'), and dates,
+    American odds and unit sizes dropped."""
+    out: list[str] = []
+    for t in s.split():
+        core = t.strip(_EDGE_PUNCT)
+        signed = t.strip(_SIGN_PUNCT)
+        plain = core[:-1] if core.endswith(".") and len(core) > 1 else core
+        m = _TYPED_GLUED.match(plain)
+        if m:
+            out += [m.group(1), m.group(2)]
+            continue
+        g = _TYPED_GLUED_STAT.match(plain) or _TYPED_PLUS_STAT.match(plain)
+        if g and _glued_stat(g.groups()[-1]):
+            out += [x for x in g.groups() if x]
+        elif core.endswith(".") and _TYPED_NUM.match(core[:-1]):
+            out.append(core[:-1])
+        elif core.startswith("@") and len(core) > 1:
+            out += ["@", core[1:]]
+        elif (_TYPED_DATE.match(core) or _TYPED_ODDS.match(signed)
+              or _TYPED_UNITS.match(core)):
+            continue
+        else:
+            out.append(t)
+    return out
+
+
+def _kept(tok: str, period) -> bool:
+    """A word that stays for the name and the stat: not bare punctuation
+    ('-', '!!'), and not a period marker once the line is a period prop."""
+    core = tok.strip(_EDGE_PUNCT + ".")
+    return bool(core) and not (period is not None and _PERIOD_TOKEN.match(core))
+
+
+_DASHES = frozenset("-\u2013\u2014")
+
+
+def _breaks(tokens: list[str]) -> list[str]:
+    """Tokens with a lone dash folded into a comma on the word before it, so
+    "rebounds - assists too" breaks where "rebounds, assists too" does
+    (review 4, B1)."""
+    out: list[str] = []
+    for t in tokens:
+        if t and set(t) <= _DASHES:
+            if out and not out[-1].endswith((",", ";")):
+                out[-1] += ","
+            continue
+        out.append(t)
+    return out
+
+
+def _name_then_stat(words: list[str], question: bool):
+    """(stat, name, team, kind, phrase) for 'NAME STAT' words, the stat being
+    the last one to six of them, or None. A stat whose words before it are
+    not a full name comes back as NAME_BAD, with no name."""
+    first = None
+    for j in range(min(len(words), 6), 0, -1):
+        phrase = " ".join(words[-j:])
+        st_j = typed_stat(phrase)
+        if st_j is None:
+            continue
+        nm, nt, kd = _typed_name(words[:-j], question=question)
+        if kd in (NAME_OK, NAME_NONE, NAME_TEAM):
+            return st_j, nm, nt, kd, phrase
+        first = first or (st_j, None, nt, NAME_BAD, phrase)
+    return first
+
+
+# _read_typed's answer for a line shaped like a pick (a side or a "7+") that
+# holds more than one number: counted, never guessed.
+_UNREAD = "unread"
+# ...and for a pick that reports its result ("o25.5 pts - cashed"): counted
+# as typed_recap, never filed (review 4, A7, B7). _RECAP_NAMED when the recap
+# names a player: it ends the name line above, as a pick would (review 5,
+# A11, B7).
+_RECAP = "recap"
+_RECAP_NAMED = "recap named"
+# ...and for a pick whose side cannot be told: a No that may be the answer
+# or a note's word (_market_answers), counted as typed_unclear (review 6), and
+# _UNCLEAR_NAMED when the line names a player: it ends the name line above.
+_UNCLEAR = "unclear"
+_UNCLEAR_NAMED = "unclear named"
+
+
+def _flip(side: str) -> str:
+    return "less" if side == "more" else "more"
+
+
+def _pickish(tok: str) -> bool:
+    """A word that may sit between a line and its answer without being a
+    note: the stat, a joiner, a closer, an opponent or a mark ('26+ points?
+    No', '7+ R+A: No', 'over 25.5 pts vs MIA No')."""
+    core = tok.strip(_EDGE_PUNCT + ".?")
+    low = core.lower()
+    return bool(not low or low in _CONNECT or low in _STAT_LEAD or low in _POST_TAIL
+                or low in _OPP_MARKS or _stat_word(label_key(low))
+                or typed_stat(low) is not None or _team_word(core) is not None)
+
+
+def _answer_spans(bare: list[str]) -> list[tuple[int, int, bool, str]]:
+    """(first, last, value, kind) for each Yes or No among the words: kind
+    'plain' ("No", "Nope", "Yeah"), 'idiom' for a No in more words than one
+    ("No way", "No chance", "Not a chance", "Absolutely not"), or 'note' for
+    a "no" that a word after it makes a note's ("no doubt", "no brainer").
+    Linear: one pass over the words."""
+    out: list[tuple[int, int, bool, str]] = []
+    i = 0
+    while i < len(bare):
+        w = bare[i].rstrip(".")
+        nxt = bare[i + 1].rstrip(".") if i + 1 < len(bare) else ""
+        if w == "no" and nxt in _NO_NOTE_WORDS:
+            out.append((i, i + 1, True, "note"))
+            i += 2
+        elif w == "no" and nxt in _NO_IDIOM_NEXT:
+            out.append((i, i + 1, False, "idiom"))
+            i += 2
+        elif w == "not" and [x.rstrip(".") for x in bare[i + 1:i + 3]] == ["a", "chance"]:
+            out.append((i, i + 2, False, "idiom"))
+            i += 3
+        elif w == "not" and i > 0 and bare[i - 1] in ("absolutely", "definitely"):
+            out.append((i - 1, i, False, "idiom"))
+            i += 1
+        elif w in ("yeah", "yea", "yep", "yup") and nxt in ("no", "nah", "nope") and (
+                bare[i + 2].rstrip(".") if i + 2 < len(bare) else "") not in _NO_NOTE_WORDS:
+            # "Yeah, no": a No, and "Yeah no way" one too (review 7, A5).
+            more = i + 2 < len(bare) and bare[i + 2].rstrip(".") in _NO_IDIOM_NEXT
+            out.append((i, i + 1 + more, False, "idiom"))
+            i += 2 + more
+        else:
+            v = _answer_value(w)
+            if v is not None and not (w == "no" and bare[i].endswith(".") and nxt.isdigit()):
+                out.append((i, i, v, "plain"))           # never "No. 1 option" (review 7, B4)
+            i += 1
+    return out
+
+
+def _after_answer(toks: list[str], bare: list[str], e: int, val: bool,
+                  used=frozenset()) -> str:
+    """What follows a Yes or No whose last word is token e: 'alone' (nothing,
+    or closers only: "No", "No lol", "No - fade", "NO 2u", "No at 38c"),
+    'two' (the other answer, last on the line: "Yes No", a copied market's
+    two buttons), 'clause' (a mark, a clause or a closer with more words
+    after it: "No, he's cold", "No - Towns out", "No he's cold", "no for
+    real") or 'word' (a note's own word: "no Towns", "NO MATTER WHAT", "no
+    defense")."""
+    rest = [j for j in range(e + 1, len(bare)) if j not in used and bare[j].rstrip(".")]
+    if not rest:
+        return "alone"
+    words = [bare[j].rstrip(".") for j in rest]
+    if len(words) == 1 and _answer_value(words[0]) is not None:
+        return "two" if _answer_value(words[0]) != val else "alone"
+    if all(w in _ANSWER_CLOSERS or _AMOUNT.fullmatch(w) for w in words):
+        return "alone"
+    marked = toks[e][-1:] in ",;:!.)" or any(not bare[j].rstrip(".") for j in range(e + 1, rest[0]))
+    if marked or words[0] in _ANSWER_CLOSERS or words[0] in _CLAUSE_STARTS:
+        return "clause"
+    return "word"
+
+
+# In the clause after a No, words that may make it a Yes: a second negation
+# ("no, there's no way he misses", "no you can't fade him") or a word of the
+# Yes ("no it is a lock", "no your boy is cooking", review 7, B6).
+_TURNS = frozenset({
+    "no", "not", "never", "nobody", "nothing", "none", "cant", "can't", "wont", "won't", "dont",
+    "don't", "doesnt", "doesn't", "isnt", "isn't", "aint", "ain't", "wasnt", "wasn't", "without",
+    "lock", "locks", "locked", "free", "money", "easy", "ez", "cooking", "cook", "cooks", "hammer",
+    "smash", "love", "like", "sure", "definitely", "absolutely", "guaranteed", "gets", "get",
+    "bank", "cash", "lfg", "gimme", "hit", "hits", "doubt", "fade", "fading"})
+
+
+# Closers that speak for the side written ("lock it", "hammer", "easy money"):
+# after a No beside a written Over or Under they make it unclear.
+_YES_CLOSERS = frozenset({
+    "lock", "locks", "locked", "max", "play", "bet", "easy", "ez", "money", "cash", "hammer",
+    "smash", "nuke", "tail", "bol", "lfg", "potd", "free", "it", "in", "this", "lets", "let's",
+    "ride", "go", "absolutely", "definitely", "obviously", "duh", "ofc", "easily", "boys", "baby"})
+
+
+def _clause_turns(bare: list[str], e: int, used=frozenset()) -> bool:
+    """The clause after the answer at token e may make it a Yes (_TURNS). A
+    clause that is another answer ("No. Yes on Hart though") is not."""
+    rest = [bare[j].rstrip(".") for j in range(e + 1, min(len(bare), e + 10))
+            if j not in used and bare[j].rstrip(".")]
+    if not rest or _answer_value(rest[0]) is not None:
+        return False
+    return any(w in _TURNS for w in rest)
+
+
+def _stat_end(toks: list[str], k: int) -> int:
+    """The last token of the stat named right after the number at token k
+    ("26+ 3-PT Made? No", "11+ R + A? No"), or k when none is. Six tokens
+    at most are tried."""
+    end = k
+    for j in range(k + 1, min(len(toks), k + 7)):
+        if typed_stat(" ".join(t.rstrip("?") for t in toks[k + 1:j + 1])) is not None:
+            end = j
+    return end
+
+
+def _result_only(words) -> bool:
+    """Words that say a result and nothing else, beside a subject: "hit",
+    "it hit", "easy dub", "W", "that one lost" (review 6, A8). "hit" with a
+    word after it is a tout's "bet": "hit this", "hit it"."""
+    ws = [w for w in (str(t).strip(_EDGE_PUNCT + ".=<>~").lower() for t in words)
+          if w and w not in _POST_TAIL]
+    if any(w in ("hit", "push") for w in ws[:-1]):
+        return False                                     # "hit it", "push it": a bet
+    core = [w for w in ws if w not in _RECAP_SUBJECTS or w in _RESULT_ALONE]
+    return bool(core) and all(w in _RESULT_ALONE for w in core)
+
+
+def _missed_context(words) -> bool:
+    """'missed' about the player's game, not the pick's: '(missed last game)',
+    '- missed shootaround', '(just missed last time)' (review 7, B19)."""
+    ws = [str(t).strip(_EDGE_PUNCT + ".").lower() for t in words]
+    return bool(ws) and ws[0] == "missed" and bool(set(ws[1:3]) & {
+        "game", "games", "shootaround", "practice", "time", "last", "workout", "workouts"})
+
+
+def _paren_recap(low: str) -> bool:
+    """A parenthesis that tells a result: "(cashed)", "(won)", "(cashed it)",
+    "(it cashed)", "(won easily)", "(W)", "(hit)", "(push)", "(cashes)"
+    (review 5, A10; review 6, A8; review 7, B5). One with a number is context
+    ("(won 3 straight)"), and so is one with a hope ("(W tonight)") or about
+    the player's games ("(missed last game)"), and "(hit it)" is a bet
+    (review 7, B19)."""
+    words = [w for w in (x.strip(_EDGE_PUNCT + ".!") for x in low.split()) if w]
+    if not words or len(words) > 4 or _has_digit(low):
+        return False
+    if any(w in _RECAP_ALWAYS for w in words):
+        return True
+    if any(w in _HOPE_WORDS for w in words):
+        return False
+    if "cashes" in words:
+        return True
+    core = [w for w in words if w not in _RECAP_SUBJECTS or w in _RESULT_ALONE]
+    return bool(core) and ((core[0] in _RECAP_WORDS and not _missed_context(core))
+                           or _result_only(words))
+
+
+def _paren_answer(inner: str) -> tuple[bool, str, str] | None:
+    """(value, form, kind) for a parenthesis that answers the market. "(No)",
+    "(No.)", "(No, fade)", "(No 2u)", "(No for me)", "(answer: No)" and "(I
+    say no)" are 'alone'; "(no, not a typo)" and "(No - Towns out)" a
+    'clause', which may be the answer or a note on the number. None for a
+    gloss: "(no doubt)", "(no assists line today)", "(Yes/No)" (review 6,
+    A6, B6)."""
+    ptoks = inner.split()
+    if not ptoks or len(ptoks) > 8:
+        return None
+    pbare = [t.strip(_EDGE_PUNCT).lower() for t in ptoks]
+    spans = _answer_spans(pbare)
+    if len(spans) != 1 or spans[0][3] == "note":
+        return None
+    s, e, val, _kind = spans[0]
+    if s == 0:
+        form = _after_answer(ptoks, pbare, e, val)
+        if form == "word":
+            return None
+        return val, ("alone" if form == "alone" else "clause"), _kind
+    if e == len(pbare) - 1 and all(w.rstrip(".") in _ANSWER_LEADS for w in pbare[:s]):
+        return val, "alone", _kind
+    return None
+
+
+def _market_answers(toks: list[str], bare: list[str], k: int, used: set, end: int,
+                    explicit: bool):
+    """The visitor's answers to a market on a line whose number is token k:
+    (answers, no_at), answers a set of True (Yes) and False (No), no_at the
+    all-caps NOs whose reading the roster settles (True when after the
+    number); the tokens they take are added to `used`. _UNCLEAR when a No may
+    be the answer or a note's word; None for a copied market's two buttons
+    ("7+ R+A Yes No"). A Yes never turns the pick, so a No is what is
+    weighed: the answer where it plainly stands as one (after the pick's own
+    question mark, first after the line, last on it, before the number of a
+    "7+" line), the note's where a note's word stands ("no Towns", "no
+    doubt", "with no Towns", the answer to the note's own question), and
+    unclear anywhere else, above all beside a written Over or Under, where
+    "No, he's cold" and "No, I'm not kidding" argue opposite sides (review 6,
+    A2, A6, B1, B3, B5, B6)."""
+    spans = _answer_spans(bare)
+    answers: set = set()
+    no_at: list[bool] = []
+    if not spans and not any("?" in t for t in toks):
+        return answers, no_at
+    if len(spans) > 4:
+        return None                # no market line says Yes or No five times
+    qmarks = [i for i, t in enumerate(toks) if "?" in t]
+    stat_end = _stat_end(toks, k)
+
+    def plain(j: int) -> bool:
+        # A word between the line and its answer that is no note's: the stat
+        # ("3-PT Made", "R + A"), a joiner, a closer, a mark, a team, the
+        # opponent, or the game ("on Saturday", "in his next game").
+        w = bare[j].rstrip(".")
+        return (j in used or not w or k < j <= stat_end or _pickish(toks[j])
+                or w in _QUESTION_CONTEXT)
+
+    # The question mark that closes the pick ("26+ points? No", "26+ 3-PT
+    # Made? No"): plain words between it and the line, and after a mark only
+    # the options it offers ("7+ R+A: Yes or No? No"). Any other is a
+    # question the note asks ("is Towns playing? No", review 5, A2).
+    pick_q = None
+    if qmarks:
+        q, ok, marked = qmarks[0], True, False
+        for j in range(k + 1, q + 1):
+            w = bare[j].rstrip(".")
+            option = _answer_value(w) is not None or w == "or"
+            if not w:
+                marked = marked or j < q
+                continue
+            if (marked and not option) or not (plain(j) or option):
+                ok = False
+                break
+            marked = marked or (j < q and toks[j].rstrip("?")[-1:] in ",;:.!")
+        pick_q = q if ok else None
+    # The options a question offers, never its answer: "Yes or No", and a Yes
+    # or No inside the pick's question when an answer follows it ("7+ R+A -
+    # yes? no.").
+    options = {j for o in range(1, len(bare) - 1) if bare[o] == "or"
+               and _answer_value(bare[o - 1].rstrip(".")) is not None
+               and _answer_value(bare[o + 1].rstrip(".")) is not None for j in (o - 1, o, o + 1)}
+    if pick_q is not None and any(s > pick_q for s, _e, _v, _k in spans):
+        options |= {s for s, _e, _v, _k in spans if s <= pick_q}
+    used |= {j for j in options if bare[j] == "or"}
+    taken = False
+    noted: set = set()             # the words of a note's Yes ("no doubt") and the opponent's NO
+    for s, e, val, kind in spans:
+        if s in used:
+            continue                                 # "no more than 23": the line's own words
+        caps = kind == "plain" and toks[s].strip(_EDGE_PUNCT + ".") == "NO"
+        if caps and s > 0 and bare[s - 1] in _OPP_MARKS:
+            noted.add(s)
+            continue                                 # "vs NO": the opponent (_strip_opp)
+        if s in options:
+            used.add(s)
+            continue                                 # "Yes or No? No": the question's options
+        first_val = next(iter(answers), False if no_at else None)
+        if (taken and kind != "note" and first_val is not None and val != first_val
+                and not (s > 0 and bare[s - 1] in _NOTE_LEADS)
+                and _after_answer(toks, bare, e, val, used) != "word"
+                and not (e + 1 < len(bare) and bare[e + 1] in ("on", "for"))):
+            # "No... actually yes", "Yes. No wait, no": a corrected answer,
+            # which may be read either way (review 7, B8). "No. Yes on Hart
+            # though" answers another pick, and in "Yes. No Towns, more
+            # shots" the No starts a note.
+            return _UNCLEAR
+        if kind == "note" or taken:
+            # "no doubt", and once an answer is given, the note's ("7+ R+A No.
+            # Yes on Hart though").
+            noted |= set(range(s, e + 1)) if kind == "note" else set()
+            continue
+        lead_note = s > 0 and bare[s - 1] in _NOTE_LEADS     # "with no Towns", "there's no way"
+        span = set(range(s, e + 1))
+        if lead_note and e < k:
+            continue
+        if e < k:
+            # Before the number: "Miles Bridges No 7+ R+A", "No - Miles
+            # Bridges 7+ R+A", "Miles Bridges: No on 7+ R+A", ESPN's "NO Zion
+            # Williamson ...". Beside a written side, a No opening the line is
+            # a reply or a pass ("No, I like Jalen Brunson over 25.5 points",
+            # "No play: ...", review 6, B5): not read.
+            on = e + 2 == k and bare[e + 1] == "on"
+            if val:
+                answers.add(True)
+            elif caps and not toks[e].endswith(","):
+                no_at.append(False)
+            elif explicit:
+                return _UNCLEAR
+            elif (toks[e][-1:] in ":|" or e + 1 == k or on
+                  or (e + 1 < k and set(toks[e + 1]) <= _DASHES)):
+                answers.add(False)
+                span |= {e + 1} if on else set()
+            else:
+                return _UNCLEAR
+            used |= span
+            taken = True
+            continue
+        form = _after_answer(toks, bare, e, val, used)
+        if form == "two":
+            # "7+ R+A Yes No": a copied market's two buttons, counted, never
+            # dropped without a word (review 7, A5).
+            return _UNCLEAR
+        q_before = max((q for q in qmarks if q < s), default=None)
+        if q_before is not None and q_before != pick_q:
+            slot = "note"                            # "is Towns playing? No"
+        elif q_before is not None:
+            between = [j for j in range(q_before + 1, s) if j not in used and bare[j].rstrip(".")]
+            slot = "asked" if len(between) <= 2 else "later"     # "26+ points? I say no"
+        elif all(plain(j) for j in range(k + 1, s)):
+            slot = "first"
+        else:
+            slot = "later"
+        if lead_note and not (slot == "asked" and kind == "idiom"):
+            # The note's ("with no Towns", "Knicks have no defense"), except
+            # "There's no way" right after the pick's own question (review 7,
+            # A6).
+            noted |= span
+            continue
+        if kind == "idiom" and explicit and slot != "asked":
+            # "Josh Hart under 8.5 rebounds no shot": "no shot he gets there"
+            # or "no shot he misses", beside a side already written (review 7,
+            # B7).
+            return _UNCLEAR
+        if val:
+            if slot in ("asked", "first") or form == "alone":
+                answers.add(True)
+                used |= span
+                taken = True
+            continue
+        if caps and slot != "asked" and e == end:
+            # ESPN's NO last on the line: New Orleans, or a No, settled by the
+            # roster (alt_pick).
+            no_at.append(True)
+            used |= span
+            taken = True
+            continue
+        if slot == "note":
+            if explicit:
+                continue                             # the note's answer: the written side stands
+            return _UNCLEAR
+        if kind == "idiom" and form != "alone":
+            return _UNCLEAR                          # "No way he misses": which side?
+        if form == "word":
+            if slot == "asked":
+                return _UNCLEAR                      # "26+ points? No Towns though"
+            continue                                 # "no Towns", "NO MATTER WHAT": the note's
+        if (form == "clause" and (slot == "later" or (slot == "first" and explicit))) or (
+                slot == "later" and explicit):
+            # "over 25.5 points, no but seriously", "Over 8.5 rebounds No, he's
+            # been cold": the answer, or a note on the Over, cannot be told.
+            return _UNCLEAR
+        if form == "clause" and _clause_turns(bare, e, used):
+            # "26+ points no there's no way he misses", "9+ rebounds no it is a
+            # lock": a No that opens a Yes (review 7, B6).
+            return _UNCLEAR
+        if explicit and form == "alone" and any(
+                bare[j].rstrip(".") in _YES_CLOSERS
+                for j in range(e + 1, len(bare)) if j not in used):
+            # "over 25.5 points nope, lock it": a Yes's closer beside a written
+            # side (review 7).
+            return _UNCLEAR
+        answers.add(False)
+        used |= span
+        taken = True
+    if pick_q is not None and pick_q > k and not taken:
+        # After the pick's own question mark, words that are no answer the
+        # reader knows: "? Fat chance", "? Never", "? Doubt it" were read as
+        # the implied side (review 7, A6). Another way to say No is read; any
+        # other words leave the side unclear.
+        idx = [j for j in range(pick_q + 1, len(bare)) if j not in used and j not in noted
+               and bare[j].rstrip(".") and not _AMOUNT.fullmatch(bare[j].rstrip("."))
+               and not _pickish(toks[j])
+               and (bare[j].rstrip(".") not in _ANSWER_CLOSERS
+                    or bare[j].rstrip(".") in ("fade", "fading", "pass"))]
+        said = tuple(bare[j].rstrip(".") for j in idx)
+        if said in _ASKED_NO or said in _ASKED_YES:
+            answers.add(said in _ASKED_YES)
+            used |= set(idx)
+        elif said:
+            return _UNCLEAR
+    return answers, no_at
+
+
+# The single stats a combination is made of, for a parenthesis that names
+# one (_named_stats).
+_STAT_PARTS = {"pr": {"pts", "reb"}, "pa": {"pts", "ast"}, "ra": {"reb", "ast"},
+               "pra": {"pts", "reb", "ast"}, "stocks": {"blk", "stl"}}
+
+
+def _named_stats(text: str) -> set:
+    """The single stats the words of `text` name ('his assists are up' is
+    {'ast'})."""
+    out: set = set()
+    for w in str(text).split():
+        k = label_key(w.strip(_EDGE_PUNCT + "."))
+        st = (STAT_MAP.get(k) or _TYPED_ALIASES.get(k) or _TYPED_PART.get(k)) if _stat_word(k) \
+            else None
+        if st:
+            out |= _STAT_PARTS.get(st, {st})
+    return out
+
+
+def _stat_word(key: str) -> bool:
+    """A label_key naming a stat by itself ('rebounds', 'pts', '3pt', '3s'),
+    never a single letter or 'to'."""
+    if key in _TYPED_ALIASES:
+        return key not in ("pr", "pa", "ra")
+    return len(key) >= 3 and (key in STAT_MAP or key in _TYPED_PART)
+
+
+def _strong_qual(keys: list[str], i: int) -> bool:
+    """keys[i], a label_key word, changes the stat beside it wherever it sits
+    among a few words: a _QUAL_ROOTS word, 'o' or 'd' before 'boards' or
+    'glass', 'offense' or 'defense' after 'on' or beside 'only' or 'just' (or
+    alone: 'on defense', 'defense only', but never 'no defense on the other
+    side'), FGA, FTA or 3PA (review 6, A7), _QUAL_WORDS, _QUAL_FORMS and
+    _QUAL_SHORT (review 7, A8, B16). Never
+    'off' or 'def' alone, which are an everyday word as often ('coming off a
+    big game', 'bad def tonight')."""
+    k = keys[i]
+    if any(r in k for r in _QUAL_ROOTS) or k in _QUAL_WORDS:
+        return True
+    nxt = keys[i + 1] if i + 1 < len(keys) else ""
+    prev = keys[i - 1] if i > 0 else ""
+    if k in _QUAL_FORMS:
+        return nxt not in _MATCHUP_NOUNS
+    if k in _QUAL_SHORT:
+        return len([x for x in keys if x]) <= 2
+    if k == "rim":
+        # "points, at the rim" (the paint), never "he attacks the rim".
+        return keys[max(0, i - 2):i] == ["at", "the"] and len([x for x in keys if x]) <= 3
+    if k == "from" and (nxt in _FROM_RANGE or (nxt == "the" and keys[i + 2:i + 3] == ["line"])):
+        return True                                      # "points, from three", "(from 3)"
+    if k in ("o", "d") and nxt in ("board", "boards", "glass", "reb", "rebs", "rebounds"):
+        return True
+    return k in ("offense", "defense") and (
+        len(keys) == 1 or prev == "on" or bool({prev, nxt} & {"only", "just"}))
+
+
+def _names_stat(words) -> bool:
+    """Words after a stat that name or change one. A stat anywhere
+    ('rebounds', 'R+A'): 'points, rebounds and assists combined' is PRA. A
+    word that changes the stat in the first four (_strong_qual: 'rebounds,
+    but only offensive', 'points, all from the paint'), or a qualifier or a
+    note word first ('offensive', 'per game'): 'rebounds offensive' is not
+    Rebounds. Later in a note those are context: 'coming off a big game',
+    'bad def tonight' (review 4, B8)."""
+    keys = [label_key(str(w).strip(_EDGE_PUNCT + ".")) for w in words]
+    for w, k in zip(words, keys):
+        if _stat_word(k) or (len(k) >= 3 and typed_stat(w) is not None):
+            return True
+    if any(_strong_qual(keys, i) for i in range(min(4, len(keys)))):
+        return True
+    rest = keys
+    for _ in range(4):                   # "only offensive", "on the offensive glass"
+        if rest and (not rest[0] or rest[0] in _NOTE_FILLER):
+            rest = rest[1:]
+    if rest and (rest[0] in _STAT_QUALIFIERS or rest[0] in _NOTE_STAT_WORDS):
+        return True
+    return "paint" in keys[:3]
+
+
+def _paren_stat(inner: str) -> tuple[str | None, str | None]:
+    """How a parenthesis bears on the stat: ('add', '+ assists') for an
+    addition ('(+ assists)', '(and assists)', '(+ reb + ast)', '(w/ assists)',
+    '(assists included)'); ('mention', ...) for another stat named as if it
+    were added ('(assists too)'), which leaves a line on another stat
+    unrecognised (review 5, A7); ('qual', ...)
+    when every word changes or names the stat and one changes it
+    ('(offensive)', '(3PA)', '(off.)', '(3pt attempts)', '(offensive
+    only)'), and also when a qualifier sits among other words ('(offensive
+    boards are his thing)'), whose join then names no stat, so the line is
+    unrecognised, never priced on the stat without it (review 4, A2);
+    ('stat', ...) for a stat named outright ('(R+A)'); else (None, None), a
+    gloss whose words leave the stat alone ('(weak defensive team)', '(off
+    the bench)', review 3, R10)."""
+    words = [w for w in re.split(r"[\s,/]+", inner) if w]
+    if not words or len(words) > 8:
+        return None, None
+    if [w.lower() for w in words[:2]] in _CONNECT_PAIRS:
+        words = words[1:]                                # "(combined with assists)"
+    head = words[0].lower().rstrip(".")
+    if head in _CONNECT or head[0] in "+&":
+        rest = " ".join(words[1:]) if head in _CONNECT else inner.lstrip("+& ")
+        return ("add", f"+ {rest}") if rest and typed_stat(rest) is not None else (None, None)
+    if len(words) >= 2 and words[-1].lower().rstrip(".") in _CONNECT_AFTER \
+            and typed_stat(" ".join(words[:-1])) is not None:
+        return "add", "+ " + " ".join(words[:-1])       # "(assists included)"
+    keys = [label_key(w.strip(_EDGE_PUNCT + ".")) for w in words]
+    quals = [i for i, k in enumerate(keys) if k in _STAT_QUALIFIERS or _strong_qual(keys, i)]
+    if quals:
+        if all(i in quals or k in _CONNECT or k in _PAREN_FILLER or _stat_word(k)
+               for i, k in enumerate(keys)):
+            return "qual", " ".join(w for w, k in zip(words, keys) if k not in _PAREN_FILLER)
+        strong = [i for i in quals if keys[i] not in _WEAK_QUALIFIERS
+                  or not (i + 1 < len(keys) and keys[i + 1] in _WEAK_GLOSS_NEXT)]
+        if strong and not any(i + 1 < len(keys) and keys[i + 1] in _MATCHUP_NOUNS
+                              for i in strong):
+            return "qual", inner
+    if typed_stat(inner) is not None:
+        return "stat", inner
+    core = " ".join(w for w, k in zip(words, keys) if k not in _PAREN_FILLER)
+    if core and typed_stat(core) is not None:
+        return "stat", core                              # "points (3s only)" (review 7, A8)
+    if any(k in _PAREN_STAT_NOTES for k in keys):
+        return "qual", inner                             # "(in the paint)": another stat
+    if not _has_digit(inner) and any(_stat_word(k) for k in keys) \
+            and any(k in _ADDING_WORDS for k in keys):
+        # "(assists too)", "(his assists count as well)": another stat named
+        # as if it were added. Whether it is the line's own is told where that
+        # is known (_read_line). A note that only mentions one ("(no assists
+        # line today)", "(UNDER on his assists)") is a gloss.
+        return "mention", inner
+    return None, None
+
+
+def _ends_in_a(tokens: list[str]) -> bool:
+    """The words end in a lone letter "a" joined to the stat before it
+    ("points + a", "PTS & A", "points + A+", "points/a"), which may be the
+    article of the words after it (review 6, B2; review 7, A4, B3)."""
+    last = tokens[-1].lower().rstrip("+") if tokens else ""
+    if last == "a":
+        # After a stat word only: in "R + A" the "A" is Assists.
+        return (len(tokens) >= 3 and tokens[-2] in _JOINERS
+                and len(label_key(tokens[-3])) >= 3)
+    glued = re.search(r"([a-z0-9]+)[+&/]a$", last)
+    return glued is not None and len(glued.group(1)) >= 3      # "points/a", not "R+A"
+
+
+def _stat_then_note(post: list[str]) -> tuple[str, str] | None:
+    """(stat, phrase) for the words after a line: the longest run of up to
+    six of them that names a stat, with a note after it that names none.
+    None when no run does, when the note names a stat, or when the run
+    crosses a comma and more than a closer ('combined') follows it:
+    'rebounds, assists are a sneaky play too' is R+A or Rebounds and a note,
+    and neither is read (review 4, B1)."""
+    for j in range(min(len(post) - 1, 6), 0, -1):
+        phrase = " ".join(post[:j])
+        note = post[j:]
+        if post[j - 1] in _JOINERS:
+            continue                                     # "Pts +": an unfinished phrase
+        if note[0][:1] in _JOINERS and _stat_piece(
+                note[0].lstrip("+&/") or (note[1] if len(note) > 1 else ""), False):
+            continue                                     # "Pts", then "+ R + A": never Points alone
+        if _ends_in_a(post[:j]):
+            # "points + a lock", "POINTS + A LOCK", "points + A+ spot",
+            # "points/a lock": "+ a" is Assists, or "a" the article of the note
+            # after it (review 6, B2; review 7, A4, B3).
+            return None
+        lead = note[0].strip(_EDGE_PUNCT + ".")
+        if len(lead) == 1 and lead.lower() in _TYPED_PART and (lead.lower() != "a" or lead == "A"):
+            # "Pts, R, A", "Reb, A": a combo written with commas, or a stat
+            # and a note? Never the first stat alone (review 7, A2). A
+            # lower-case "a" is the article ("points, a lock").
+            return None
+        st = typed_stat(phrase)
+        if st is None and "," in phrase and note[0].strip(_EDGE_PUNCT + ".").lower() in _COMBINERS:
+            # "rebounds, assists combined": two stats with a comma between them
+            # are a combo when a word says so (review 5, A9).
+            st = typed_stat(phrase.replace(",", " and "))
+        if st is None:
+            continue
+        if _names_stat(note):
+            return None
+        if any(w.endswith((",", ";")) for w in post[:j - 1]) and any(
+                w.strip(_EDGE_PUNCT + ".").lower() not in _COMBO_CLOSERS | _POST_TAIL
+                for w in note):
+            return None
+        return st, phrase
+    return None
+
+
+# The words of a tout's decoration in a handle or a hashtag ("#NBA",
+# "#PrizePicks", "#LOCK", "@hoopspicks:", "@hoops_daily"), which never stand
+# for a player. A tag is decoration only when it splits wholly into these
+# (digits aside): one that merely holds one is a player's as often
+# ("@Money23Green", "@HarrisonBarnes", "#Pickett" were read as decoration and
+# their lines priced as the name line's player, review 6, A4, B7). A pick
+# under its name line with decoration keeps the name above (review 5, B10);
+# "#KAT" and "@jalenbrunson1" stand for a player (review 4, B3). None of these
+# is a word of a name on the roster.
+_DECOR_PARTS = frozenset({
+    "nba", "picks", "pick", "props", "prop", "bets", "bet", "betting", "lock", "locks", "potd",
+    "bol", "parlay", "parlays", "dfs", "prize", "play", "plays", "fire", "lfg", "gambling",
+    "gamble", "sports", "sport", "tips", "tip", "free", "money", "cash", "units", "unit",
+    "slip", "slips", "ticket", "tickets", "hoops", "hoop", "fantasy", "odds", "twitter",
+    "daily", "the", "best", "top", "king", "guru", "edge", "value", "official", "hq", "news",
+    "club", "talk", "nation", "insider", "live", "bettor", "bettors", "capper", "cappers",
+    "winners", "winner", "league", "bank", "bankroll", "degen", "degens", "stats", "analytics",
+    "model", "models", "my", "our", "bucket", "buckets",
+    # "#PlayerProps", "#LockOfTheDay", "#MoneyMaker", "#LetsCash" (review 7, B18)
+    "player", "players", "of", "day", "it", "maker", "underdog", "lets", "let"})
+# Among a decoration tag's parts, at least one of the tout's own words: "#TheKing",
+# "@King23" and "#Buckets" are a player's nickname (review 7, B10).
+_BET_PARTS = frozenset({
+    "nba", "picks", "pick", "props", "prop", "bets", "bet", "betting", "lock", "locks", "potd",
+    "bol", "parlay", "parlays", "dfs", "prize", "play", "plays", "fire", "lfg", "gambling",
+    "gamble", "sports", "sport", "tips", "free", "money", "cash", "units", "unit", "slip", "slips",
+    "ticket", "tickets", "hoops", "hoop", "fantasy", "odds", "bettor", "bettors", "capper",
+    "cappers", "degen", "degens", "bankroll", "underdog", "twitter"})
+_DECOR_TAGS = frozenset({"pp", "ud", "w", "gl", "ez", "goat", "fyp"})
+# Teams' own hashtags ("#DubNation", "#LakeShow", "#BleedGreen"): a fan's
+# decoration, never a player (review 6, A11).
+_TEAM_SLOGANS = frozenset({
+    "truetoatlanta", "bleedgreen", "differenthere", "brooklyngrit", "netsworld", "allfly",
+    "buzzcity", "bullsnation", "letemknow", "bethefight", "mffl", "milehighbasketball",
+    "detroitbasketball", "dubnation", "onemission", "rocketsnation", "boombaby", "goldblooded",
+    "clippernation", "lakeshow", "grindcity", "bigmemphis", "heatculture", "heattwitter",
+    "fearthedeer", "raisedbywolves", "wontbowdown", "newyorkforever", "thunderup",
+    "magictogether", "philaunite", "valleyproud", "wearethevalley", "ripcity", "lightthebeam",
+    "sacramentoproud", "porvida", "gospursgo", "wethenorth", "takenote", "dcaboveall"})
+# Beside a team's nickname in a fan's tag ("#GoSpursGo", "#KnicksTape").
+_FAN_WORDS = frozenset({"go", "lets", "let", "up", "tape", "fan", "fans", "gang", "szn",
+                        "season", "forever", "pride", "family", "nation", "in", "for", "we",
+                        "are", "all", "day", "win", "time"})
+# "hoopspicks: Jalen Brunson ...": a source's name and a colon before a pick.
+_SOURCE_PREFIX = re.compile(r"^_*[a-z][a-z0-9_]{1,29}_*:\s+")
+
+
+def _splits_into(word: str, parts) -> list[str] | None:
+    """`word` as a run of `parts` and nothing else ("hoopspicks" is hoops +
+    picks; "pickett" is no run), or None. Bounded: a tag is at most 30
+    letters and a part at most 12."""
+    best: list = [[]] + [None] * len(word)
+    for i in range(1, len(word) + 1):
+        for j in range(max(0, i - 12), i):
+            if best[j] is not None and word[j:i] in parts:
+                best[i] = best[j] + [word[j:i]]
+                break
+    return best[-1]
+
+
+def _could_name(tag: str) -> bool:
+    """A handle or hashtag that may stand for a player ('@jalenbrunson1',
+    '#KAT', '@Money23Green'), not a tout's decoration ('#NBA', '#LOCK',
+    '@hoopspicks:'), a team ('#Knicks') or a team's own hashtag ('#DubNation',
+    '#GoSpursGo')."""
+    core = str(tag).strip(_EDGE_PUNCT + "@#:. ")[:30]
+    low = core.lower()
+    if not low or low in _DECOR_TAGS or low in _TEAM_SLOGANS:
+        return False
+    pieces = [p for p in re.split(r"[_\d]+", low) if p]
+    runs = [_splits_into(p, _DECOR_PARTS) for p in pieces]
+    if pieces and all(r is not None for r in runs) and any(
+            w in _BET_PARTS for r in runs for w in r):
+        return False
+    if _team_word(core) is not None or _team_word(core.upper()) is not None:
+        return False
+    # A fan's tag made of a team's nickname and a fan's words ("#GoSpursGo",
+    # "#KnicksTape"). Never a city, which names players too ("@PJWashington"),
+    # and never a tag with another word in it ("@SunsDevinBooker").
+    camel = re.findall(r"[A-Z][a-z]+|[A-Z]+(?![a-z])|\d+", core)
+    words = [w.lower() for w in camel if not w.isdigit()]
+    nick = [w for w in words if len(w) >= 4 and teams.from_words(w, cities=False)]
+    return not (nick and "".join(camel).lower() == low.replace("_", "")
+                and all(w in nick or w in _DECOR_PARTS or w in _FAN_WORDS for w in words))
+
+
+def _read_typed(ln: str) -> dict | str | None:
+    """One typed line as {name, team, opp, stat_type, line, pick, alt_pick,
+    odds, kind, total, stat}; _UNREAD for a line shaped like a pick that holds
+    more than one number ('Bridges o6.5 R+A, hit in 8 of 10'); _RECAP for a
+    pick that reports its result ('Jalen Brunson o25.5 pts - cashed'), and
+    _RECAP_NAMED when that recap names a player; _UNCLEAR for a pick whose
+    side cannot be told (a No that may be the answer or a note's word,
+    _market_answers); None
+    when it is not a player's pick (a team total is not, nor an average).
+    A line whose name was a handle or a hashtag ('@jalenbrunson1 o25.5 pts')
+    names nobody (NAME_BAD), so it never borrows the name above (review 4,
+    B3).
+    `kind` is _typed_name's: NAME_NONE when the line has no name words at all
+    ('over 6.5 Rebs+Asts' under a name on its own line), NAME_BAD when its
+    words are not a full name. `total` marks a nameless line that speaks of a
+    team or game total, which never borrows a name. `alt_pick` is the pick if
+    an ESPN-style 'NO' on the line was the market's No, not New Orleans.
+    Bounded: a line is at most MAX_TEXT_LINE_LEN characters and
+    _TYPED_MAX_TOKENS words, every loop is over those words, and a line is
+    read at most twice (a leading '3pm', _TIP_23)."""
+    tags: list[str] = []
+    s = _clean(ln, tags)
+    got = None
+    tip = _TIP_23.match(s)
+    if tip:
+        # "3pm Jalen Brunson o25.5 pts" is a weekend tip time; "3PM over 4.5
+        # Stephen Curry" reads only with it as the stat (review 3, F11).
+        got = _read_line(_clean(s[tip.end():]))
+        if not (isinstance(got, dict) and got["stat"] is not None):
+            got = None
+    if got is None:
+        got = _read_line(s)
+    if isinstance(got, dict) and got["kind"] == NAME_NONE and any(map(_could_name, tags)):
+        got["kind"] = NAME_BAD          # a handle or hashtag stood where the name goes
+    if isinstance(got, dict) and got["kind"] == NAME_BAD:
+        # "@Jalen Brunson over 25.5 points": the at sign was a mention and the
+        # handle his first name; "hoopspicks: Jalen Brunson ...": a source and
+        # a colon. Read again without them, and kept only when that reading
+        # names a player in full (review 5, A21).
+        raw = _strip_symbols(str(ln)).strip()
+        for again in (re.sub(r"^@\s*(?=[A-Z])", "", raw), _SOURCE_PREFIX.sub("", raw)):
+            if again != raw:
+                alt = _read_line(_clean(again))
+                if isinstance(alt, dict) and alt["kind"] == NAME_OK:
+                    return alt
+    return got
+
+
+def _read_line(s: str) -> dict | str | None:
+    """_read_typed on a line _clean has cleaned."""
+    lead = _LEAD_NUMBER.match(s)
+    if lead and _HAS_LINE.search(s, lead.end()):
+        s = s[lead.end():]                       # "1 Miles Bridges over 6.5": a list number
+    if not _has_digit(s):
+        return None
+    question = "?" in s                          # "Will X record 7+ ...? No"
+    period = _PERIOD.search(" ".join(_PERIOD_NOTE.sub(" ", _unglue_periods(s)).lower().split()))
+    s = _TYPED_SEPS.sub(", ", _join_stat_seps(s))
+    units = _UNITS_FIELD.search(s)
+    if units and _HAS_LINE.search(s, 0, units.start()):
+        s = s[:units.start()]                    # a units column closing the row
+    team = opp = None
+    odds = "standard"
+    extra: list[str] = []          # a side a parenthesis holds
+    numeric: list[str] = []        # a parenthesis holding a number
+    qual: list[str] = []           # a parenthesis that changes the stat
+    adding = False                 # ...by adding one: "(+ assists)", "(and assists)"
+    restate: list[str] = []        # a parenthesis naming a stat outright: "(R+A)"
+    mention: list[str] = []        # ...or among other words: "(his assists are up)"
+    paren_no: list[bool] = []      # an all-caps "(NO)": True when a number comes before it
+    paren_ans: list = []           # a parenthesis answering the market: (value, form)
+    paren_recap = False            # "(cashed)", "(won)": a result (review 5, A10)
+    q_at = s.find("?")
+    for m in _TYPED_PAREN.finditer(s):
+        inner = m.group(1).strip(_EDGE_PUNCT + " ")
+        low = inner.lower()
+        words = low.split()
+        if not words:
+            continue
+        if inner.startswith("@") or (words[0] in _OPP_MARKS and len(words) > 1):
+            code = _team_or_no(inner[1:] if inner.startswith("@") else inner.split(None, 1)[1])
+            opp = code or opp
+        elif _team_word(inner):
+            team = _team_word(inner)
+        elif low in _ODDS_WORDS:
+            odds = _ODDS_WORDS[low]
+        elif inner.rstrip(".!") == "NO" and not (question and 0 <= q_at < m.start()):
+            paren_no.append(_has_digit(s[:m.start()]))
+        elif low.rstrip(".!") in _SIDE_WORDS or low.rstrip(".!") in _SIDE_LETTERS:
+            # "(Over)", "(U)": a letter as its word, so "25.5 (U)" is never
+            # read as "25.5 u", a unit size (review 5, A12).
+            yl = low.rstrip(".!")
+            extra.append({"o": "over", "u": "under"}.get(yl, yl))
+        elif _paren_recap(low):
+            paren_recap = True
+        elif _paren_answer(inner) is not None:
+            # "(No)", "(No.)", "(No, fade)", "(No 2u)", "(answer: No)": the
+            # visitor's answer, weighed once the side is known (review 5, A12;
+            # review 6, A6, B6).
+            paren_ans.append(_paren_answer(inner))
+        else:
+            how, said = _paren_stat(inner)
+            if how in ("add", "qual"):
+                qual.append(said)
+                adding = adding or how == "add"
+            elif how == "stat":
+                restate.append(said)
+            elif how == "mention":
+                mention.append(said)
+            elif _has_digit(inner) and not (
+                    _TYPED_ODDS.match(inner.strip(_SIGN_PUNCT)) or _TYPED_UNITS.match(inner)):
+                numeric.append(inner)
+    s = _TYPED_PAREN.sub(" ", s)
+    if "(" in s:
+        s = s[:s.index("(")]
+    s = s.replace(")", " ")
+    if not _has_digit(s):
+        # "Miles Bridges Rebounds + Assists (Over 6.5)": the line sits in a
+        # parenthesis. Read from there only when it is the one number given.
+        if len(numeric) != 1:
+            return None
+        s = s + " " + numeric[0]
+    toks = _typed_tokens(s + " " + " ".join(extra))
+    if not toks or len(toks) > _TYPED_MAX_TOKENS:
+        return None
+    bare = [t.strip(_EDGE_PUNCT).lower() if t != "@" else "@" for t in toks]
+    used: set[int] = set()
+    nums = []
+    shaped = False                 # a side word or a side letter before a number
+    for i, b in enumerate(bare):
+        if _TYPED_SPREAD.match(toks[i].strip(_SIGN_PUNCT)):
+            return None                                  # "-3.5": a spread, never a line
+        if i + 1 < len(bare) and bare[i + 1] in _UNIT_WORDS and _TYPED_NUM.match(b):
+            used |= {i, i + 1}                           # "2 units"
+            continue
+        plus = _TYPED_PLUS.match(b)
+        if plus:
+            nums.append((i, float(plus.group(1)), "more"))
+        elif _TYPED_NUM.match(b) and not _stat_digit(bare, i):
+            nums.append((i, float(b), None))
+        elif b in _SIDE_WORDS or (b in _SIDE_LETTERS and i + 1 < len(bare)
+                                  and _TYPED_NUM.match(bare[i + 1])):
+            shaped = True
+    if len(nums) != 1:
+        return _UNREAD if len(nums) > 1 and (shaped or any(x[2] for x in nums)) else None
+    k, value, implied = nums[0]
+    used.add(k)
+    if bare[k + 1:k + 2] == ["or"] and k + 2 < len(bare) and bare[k + 2] in _OR_SIDE:
+        implied = _OR_SIDE[bare[k + 2]]                  # "7 or more"
+        used |= {k + 1, k + 2}
+    lead_words = bare[max(0, k - 3):k]
+    if lead_words[-2:] in (["at", "least"], ["at", "most"]):
+        implied = "more" if lead_words[-1] == "least" else "less"
+        used |= {k - 2, k - 1}
+    elif lead_words[-3:] in (["no", "more", "than"], ["no", "less", "than"],
+                             ["no", "fewer", "than"]):
+        implied = "less" if lead_words[-2] == "more" else "more"
+        used |= {k - 3, k - 2, k - 1}
+    sides = {implied} if implied else set()
+    last = len(bare) - 1
+    # A side written as a word or a letter, not implied: beside one, a No is
+    # read only where it plainly answers (_market_answers; review 6, B5, B6).
+    explicit = any(i not in used and (b in _SIDE_WORDS or (b in _SIDE_LETTERS and (
+        i == k - 1 or (i == last and i > k)))) for i, b in enumerate(bare))
+    # The last word that says something, a closer ("LOCK"), a unit size or a
+    # mark aside.
+    end = last
+    while end > k and (end in used or not bare[end].rstrip(".")
+                       or bare[end].rstrip(".") in _POST_TAIL):
+        end -= 1
+    got_answers = _market_answers(toks, bare, k, used, end, explicit)
+    if got_answers is None:
+        return None
+    # A side that cannot be told is said once the line is known to be a pick:
+    # "No, Brunson had 40 last night" is chatter, not an unclear pick (review 7,
+    # B12).
+    unclear = isinstance(got_answers, str)
+    answers, no_at = (set(), []) if unclear else got_answers
+    for val, form, pkind in paren_ans:
+        if val or (form == "alone" and not (pkind == "idiom" and explicit)):
+            answers.add(val)
+        else:
+            unclear = True         # "(no, not a typo)", "(no way)" beside an Over: which side?
+    for i, b in enumerate(bare):
+        if i in used:
+            continue
+        if b in _SIDE_WORDS:
+            sides.add(_SIDE_WORDS[b])
+        elif b in _SIDE_LETTERS and (i == k - 1 or (i == last and i > k)):
+            sides.add(_SIDE_LETTERS[b])
+        elif b in _ODDS_WORDS:
+            odds = _ODDS_WORDS[b]
+        elif b in _NEUTRAL_SIDES:
+            pass                                         # "O/U 6.5": the side, if any, is elsewhere
+        elif "/" in b and set(b.split("/")) & {"over", "under", "o", "u", "more", "less"}:
+            return None                                  # "over/no": no side to read
+        else:
+            continue
+        used.add(i)
+    maybe_no = False               # an ESPN "NO" that may be New Orleans, settled by the roster
+    for after in no_at + paren_no:
+        if after and implied is not None and not explicit:
+            answers.add(False)                           # "7+ R+A (NO)": the market's No
+        else:
+            maybe_no = True                              # "Zion Williamson o22.5 NO" (review 3, F1)
+    if len(sides) > 1 or len(answers) > 1:
+        # "over 25.5 points, no chance he goes under": two sides beside a No
+        # that may be the note's, counted; any other line with two is none.
+        return _UNCLEAR_NAMED if unclear else None
+    pick = next(iter(sides), None)
+    answered = bool(answers)
+    if answers:
+        # A prediction market's Yes or No on the line's own side: "7+ ... No"
+        # is the Under.
+        if pick is None:
+            return None
+        if not answers.pop():
+            pick = _flip(pick)
+    line = value - 0.5 if implied == "more" and value.is_integer() else \
+        value + 0.5 if implied == "less" and value.is_integer() else value
+    if _parse_line(line) is None:
+        return None
+    pre, opp_pre = _strip_opp([toks[i] for i in range(k)
+                               if i not in used and _kept(toks[i], period)])
+    post, opp_post = _strip_opp([t for t in _breaks([toks[i] for i in range(k + 1, len(toks))
+                                                     if i not in used])
+                                 if _kept(t, period)])
+    while pre and pre[-1].strip(_EDGE_PUNCT).lower() in _PRE_TAIL:
+        pre.pop()                                        # "will be", "for a combined"
+    if pick is not None or line % 1 == 0.5:
+        # A closer: "tonight", "LOCK". With no side, only after a line's .5:
+        # "31 points tonight" is a box score (review 4, B9). Never after "+
+        # a", whose "a" may be its article: "points + a lock" (review 6, B2).
+        while post and post[-1].strip(_EDGE_PUNCT).lower() in _POST_TAIL and not (
+                len(post) >= 2 and _ends_in_a(post[:-1])):
+            post.pop()
+    total = any(b in _TOTAL_WORDS for i, b in enumerate(bare) if i not in used)
+    opp = opp_post or opp_pre or opp
+    stat = name = name_team = label = phrase = None
+    kind = NAME_NONE
+    note: list[str] = []           # the words set aside after the stat
+    if post:
+        st = typed_stat(" ".join(post))
+        if st is not None:                               # NAME [side] 6.5 STAT
+            stat, phrase = st, " ".join(post)
+            name, name_team, kind = _typed_name(pre, question=question)
+        elif typed_stat(" ".join(pre)) is not None:      # STAT 6.5 [side] NAME
+            stat, phrase = typed_stat(" ".join(pre)), " ".join(pre)
+            name, name_team, kind = _typed_name(post, question=question)
+        else:
+            if _typed_name(pre, question=question)[2] == NAME_NONE:
+                for j in range(min(len(post) - 1, 6), 0, -1):    # [side] 6.5 STAT for NAME
+                    st_j = typed_stat(" ".join(post[:j]))
+                    if st_j is None:
+                        continue
+                    nm, nt, kd = _typed_name(post[j:], question=question)
+                    if kd == NAME_OK:
+                        stat, phrase, name, name_team, kind = (st_j, " ".join(post[:j]),
+                                                               nm, nt, kd)
+                        break
+            if stat is None and pick is not None:
+                # NAME [side] 6.5 STAT, then a note ("points, second half of a
+                # back to back", "Points lets go"). On a line with a side only:
+                # without one, "12 rebounds, cashed" is a result and "Points
+                # 27.1 avg" an average (review 3, R7).
+                got = _stat_then_note(post)
+                nm, nt, kd = _typed_name(pre, question=question)
+                if got is not None and kd == NAME_OK:
+                    (stat, phrase), name, name_team, kind = got, nm, nt, kd
+                    note = post[len(phrase.split()):]
+            if stat is None and pick is not None and not _names_stat(post):
+                # NAME STAT 6.5 [side], then a note ("- Max play").
+                got = _name_then_stat(pre, question)
+                if got is not None and got[3] == NAME_OK:
+                    stat, name, name_team, kind, phrase = got
+                    note = list(post)
+            if stat is None and (pick is not None or period is not None):
+                # A pick on a stat nothing maps: kept under its own words, so
+                # classify_stat refuses or counts it, never drops it.
+                name, name_team, kind = _typed_name(pre, question=question)
+                label = " ".join(post)
+                note = list(post)
+    else:                                                # NAME STAT [side] 6.5
+        got = _name_then_stat(pre, question)
+        if got is not None:
+            stat, name, name_team, kind, phrase = got
+    if kind == NAME_TEAM or (stat is None and label is None):
+        return None
+
+    def result_word(t: str) -> bool:
+        return t.strip(_EDGE_PUNCT + ".").lower() in _RECAP_WORDS
+
+    def opens_with_result(words: list[str]) -> bool:
+        for n, t in enumerate(words):
+            w = t.strip(_EDGE_PUNCT + ".=<>~").lower()
+            if not w or w in _POST_TAIL or w in _RECAP_SUBJECTS:
+                continue                                 # "=", "LOCK", "that one"
+            return w in _RECAP_WORDS and not _missed_context(words[n:])
+        return False
+
+    hope = any(b.rstrip(".") in _HOPE_WORDS for b in bare)
+    cashes = any(t.strip(_EDGE_PUNCT + ".").lower() == "cashes" for t in pre + note)
+    if (any(result_word(t) for t in pre) or opens_with_result(note) or paren_recap
+            or any(t.strip(_EDGE_PUNCT + ".").lower() in _RECAP_ALWAYS for t in note)
+            or (label is not None and any(result_word(t) for t in note))
+            or (cashes and not hope) or (_result_only(note) and not hope)):
+        # "Jalen Brunson o25.5 pts - cashed", "Cashed: ...", "- that one lost",
+        # "- he cashed it": a result before the line, first in the note or
+        # (cashed) anywhere in it is a recap, counted, never a pick (review 3,
+        # R7; review 4, A7, B7; review 5, A10, B6). Later in a note "won" and
+        # "lost" are context: "over 25.5 points, Knicks lost last night".
+        return _RECAP_NAMED if kind in (NAME_OK, NAME_BAD) else _RECAP
+    if unclear:
+        # Counted, never guessed; one naming nobody belongs to the name line
+        # above, which it keeps (review 7, B13).
+        return _UNCLEAR if kind == NAME_NONE else _UNCLEAR_NAMED
+    if maybe_no and pick is not None and not answered and kind == NAME_NONE:
+        # "NO 7+ assists" under a player's name names no team: the market's
+        # No (review 3, R4).
+        pick, maybe_no = _flip(pick), False
+    alt_pick = _flip(pick) if maybe_no and pick is not None and not answered else None
+    if qual and stat is not None:
+        # "rebounds (offensive)", "threes (3PA)", "points (+ assists)": the
+        # stat written, or none (an unrecognised label), never the stat
+        # without its word.
+        q = " ".join(qual)
+        better = None
+        for cand in ((f"{phrase} {q}",) if adding else (f"{q} {phrase}", f"{phrase} {q}")):
+            better = STAT_MAP.get(label_key(cand)) or typed_stat(cand)
+            if better:
+                break
+        if better is None and not adding:
+            better = typed_stat(q)                       # "(OREB)", "(3PA)" name it outright
+        stat, label = (better, None) if better else (None, f"{phrase} {q}")
+    if restate and stat is not None and any(typed_stat(r) != stat for r in restate):
+        stat, label = None, f"{phrase} ({restate[0]})"   # "points (rebounds)": which is it?
+    if mention and stat is not None and not all(
+            _named_stats(r) <= _STAT_PARTS.get(stat, {stat}) for r in mention):
+        # "points (his assists are up too)": priced as Points it was a lean on
+        # a stat the visitor may not mean (review 5, A7).
+        stat, label = None, f"{phrase} ({mention[0]})"
+    label = STAT_LABEL[stat] if stat is not None else label
+    if period is not None:
+        # A half, quarter or first-minutes line, wherever the period was
+        # written: classify_stat refuses the label as a period prop.
+        label = f"{label} {period.group(0)}"
+    # A NO beside the name scopes the name match to the Pelicans, below any
+    # team written out; resolve_names retries without it.
+    hint = "NOP" if maybe_no and name else None
+    return {"name": name, "team": team or name_team or hint, "opp": opp,
+            "stat_type": label[:MAX_LABEL_LEN], "line": line, "pick": pick,
+            "alt_pick": alt_pick, "odds": odds, "kind": kind,
+            "total": total and name is None, "stat": stat}
+
+
+def _name_only(ln: str) -> tuple[str, str | None, str | None, str | None] | None:
+    """(name, team, opponent, period) for a player's name alone on its line,
+    which names the picks after it: 'Jalen Brunson', 'Jalen Brunson (NYK)',
+    'Jalen Brunson vs Heat', 'Jalen Brunson - NYK @ MIA', 'Jalen Brunson
+    props:', 'Jalen Brunson @ Heat 7:30 PM' (a tip time or a date is set
+    aside, as in a heading: review 3, F10). A period on the line ('Jalen
+    Brunson (1Q)', 'Jalen Brunson 1Q:', '1Q: Jalen Brunson') is the period of
+    the picks under it, which were priced as full-game lines (review 5,
+    A3)."""
+    s = _clean(ln)
+    team = per = None
+    for m in _TYPED_PAREN.finditer(s):
+        inner = m.group(1)
+        team = team or _team_word(inner) or next(
+            (t for t in map(_team_word, re.split(r"[,;/]", inner)) if t), None)
+        per = per or _named_period(_PERIOD_NOTE.sub(" ", inner))
+    s = _noise_sub(_HEADING_NOISE, _TYPED_PAREN.sub(" ", s))
+    per = per or _named_period(_PERIOD_NOTE.sub(" ", s))
+    s = _drop_period(s).strip(_EDGE_PUNCT + " ")
+    if not s or _has_digit(s):
+        return None
+    toks, opp = _strip_opp(_typed_tokens(s))
+    while toks and toks[-1].strip(_EDGE_PUNCT).lower() in _TOUT_NOUNS:
+        toks.pop()
+    name, name_team, _kind = _typed_name(toks, strict=True)
+    return (name, team or name_team, opp, per) if name else None
+
+
+_FULL_GAME = re.compile(r"\bfull[\s\-]*game\b", re.IGNORECASE)
+# A word that cancels the period right after it: "No 1Q props today", "not
+# betting the 1H", "My full-game picks (no 1Q or 1H)" (review 4, B2). Only
+# right before it: "1Q props, no parlays:" and "No doubt 1Q locks:" are
+# labels, and so is "Not your usual 1Q props:" (review 5, A1, B1).
+_NEGATIONS = frozenset({"no", "not", "non", "without"})
+# Words a negation reaches the period across: "not betting the 1H", "no more
+# 1Q props", "no 1Q or 1H". Of the words ending in "ing", only the verbs
+# whose object is the period: "No more waiting, 1Q props:" and "No fading
+# the 1Q:" are labels (review 6, A3).
+_NEG_REACH = frozenset({"the", "a", "an", "any", "more", "of", "or", "and", "&", "nor", "/"})
+_NEG_VERBS = frozenset({"betting", "playing", "taking", "doing", "touching", "chasing",
+                        "posting"})
+# After a negated period, the words that make it the period's picks it denies.
+_CANCEL_NEXT = frozenset({"", "props", "prop", "picks", "pick", "plays", "play", "bets", "bet",
+                          "lines", "line", "locks", "lock", "action", "today", "tonight",
+                          "tomorrow", "for", "or", "and", "nor", "&", "/", "either", "this",
+                          "here", "yet", "anymore", "please", "only", "games", "game", "at",
+                          "all"})
+# After a period, on a line that also says "full game": the period comes
+# later, and the section is the full game ("Full game picks, 1H later:").
+_DEFERRED = frozenset({"later", "tomorrow", "soon"})
+# Words that make a line naming a period a remark about a game, not the label
+# of a section: "Q4 Brunson is different", "the Suns have been awful in the
+# first half", "1H recap: 3-1" (review 4, A6, B2). Never on a line that ends
+# with a colon or names the picks ("1Q props no one is talking about:").
+_REMARK_WORDS = frozenset({
+    "is", "are", "was", "were", "been", "has", "have", "had", "went", "goes", "blew", "blown",
+    "hit", "lost", "won", "cashed", "missed", "scored", "dropped", "did", "does", "got",
+    "looked", "looks", "struggled", "struggles", "dominated", "averaged", "averages", "recap",
+    "recaps", "results", "yesterday", "isn't", "wasn't", "aren't", "weren't", "doesn't",
+    "didn't", "owns", "loves", "kills", "torches", "cooks", "dominates"})
+# Of those, the ones that make a remark wherever they sit: a result or a
+# recap ("1H recap: 3-1", "Brunson went off in the 4th quarter"). The rest
+# ("is", "has", "looks") make one only with a subject other than the period:
+# "Q4 Brunson is different" and "the Suns have been awful in the first half"
+# are remarks, while "1Q is the move", "1Q looks juicy tonight" and "What I
+# have for the 1Q" label quarter picks, which were priced as full-game lines
+# (review 6, B4).
+_REMARK_STRONG = frozenset({
+    "went", "blew", "blown", "hit", "lost", "won", "cashed", "missed", "scored", "dropped",
+    "struggled", "dominated", "averaged", "recap", "recaps", "results", "yesterday"})
+# A line's first word that opens a sentence and names no one ("What I have for
+# the 1Q", "Tonight is a 1Q night").
+_REMARK_OPENERS = frozenset({
+    "what", "how", "here", "here's", "heres", "tonight", "today", "tomorrow", "my", "the", "this",
+    "these", "those", "some", "our", "all", "top", "best", "free", "big", "late", "early",
+    "main", "full", "quick", "more", "any", "every", "why", "when", "where", "who", "which", "if",
+    "so", "and", "but", "also", "just", "only", "no", "not", "yes", "ok", "okay", "lets", "let's",
+    "i", "i'm", "im", "we", "we're", "it", "it's", "its", "there", "there's", "that", "that's"})
+# Words that stand for a player or a team as a remark's subject.
+_REMARK_PRONOUNS = frozenset({"he", "he's", "hes", "she", "they", "they're", "his", "their"})
+_REMARK_PHRASE = re.compile(r"\blast\s+(?:night|game|time|week)\b"
+                            r"|^\W*(?:what|how)\s+(?:a|an|about)\b", re.IGNORECASE)
+# A line saying the period's picks are posted elsewhere ("2H plays coming later
+# in the discord", "Live 2H bets in my discord"): a remark even beside "plays"
+# or "bets", since those picks are not the ones under it (review 4, B2).
+_ELSEWHERE = re.compile(r"\b(?:in|on)\s+(?:the|my|our)\s+(?:discord|telegram|patreon|group\s+chat"
+                        r"|chat|channel)\b", re.IGNORECASE)
+# A pick line that names no player in full is counted in a board paste only
+# when it is this short: a board square run together onto one line (name,
+# TEAM - POS, name again, matchup, line, label, buttons) is always longer.
+_SHORT_PICK_WORDS = 10
+
+
+def _drop_period(s: str) -> str:
+    """s without the period markers in it ('Magic @ Suns 1H' is 'Magic @
+    Suns'), nor the notes that only look like one ('2nd half of a
+    back-to-back'), its case kept. Linear: one _PERIOD pass over a line whose
+    spaces are already single."""
+    s = " ".join(_PERIOD_NOTE.sub(" ", str(s)).split())
+    low = s.lower()
+    if len(low) != len(s):
+        return s                         # a letter whose lower case is longer: left as is
+    keep, at = [], 0
+    for m in _PERIOD.finditer(low):
+        keep.append(s[at:m.start()])
+        at = m.end()
+    keep.append(s[at:])
+    return " ".join(" ".join(keep).split())
+
+
+def _negated(before: list[str]) -> bool:
+    """A negation right before a period, across at most three _NEG_REACH
+    words, _NEG_VERBS or other period words ('no 1Q', 'not betting the 1H',
+    'no 1Q or 1H'), and never across a mark: 'no doubt 1Q', 'not your usual
+    1Q', 'No more waiting, 1Q props:' and 'No 2H, 1H props:' name their period
+    (review 6, A3, B4). `before` keeps its punctuation."""
+    for n, raw in enumerate(reversed(before)):
+        if raw[-1:] in ",;:.!?" or set(raw) <= _DASHES:
+            return False                             # a mark between it and the period
+        w = raw.strip(_EDGE_PUNCT + ".")
+        if w in _NEGATIONS:
+            return True
+        if n >= 3 or not (w in _NEG_REACH or w in _NEG_VERBS or _PERIOD_TOKEN.match(w)):
+            return False
+    return False
+
+
+def _named_period(text: str) -> str | None:
+    """The first period the text names that no negation cancels ('No 1Q props
+    today, 1H only' names 1H) and that, beside 'full game', is not put off
+    for later; None when there is none. At most four periods are looked at."""
+    low = _unglue_periods(" ".join(str(text).lower().split()))[:MAX_LABEL_LEN]
+    full = _FULL_GAME.search(low) is not None
+    for n, m in enumerate(_PERIOD.finditer(low)):
+        if n >= 4:
+            break
+        before = low[:m.start()].split()[-4:]
+        nxt = low[m.end():].split()[:2]
+        after = {w.strip(_EDGE_PUNCT + ".") for w in nxt}
+        head = nxt[0].strip(_EDGE_PUNCT + ".") if nxt else ""
+        # A negation cancels the period only when it denies the period's
+        # picks ("No 1Q props today", "no 1Q or 1H", "Not betting the 1H
+        # tonight"), never another word ("No 1Q unders, only overs:", "No 1Q
+        # parlays:", review 7, A7).
+        if (_negated(before) and (head in _CANCEL_NEXT or _PERIOD_TOKEN.match(head))) or (
+                full and after & _DEFERRED):
+            continue
+        return m.group(0)
+    return None
+
+
+def _remark(text: str) -> bool:
+    """Words of a remark about a game, not of a section's label: a result or
+    a recap word (_REMARK_STRONG), 'last night', 'What a ...', or another of
+    _REMARK_WORDS with a subject that is not the period: a team, a pronoun,
+    or a capitalised word that is not the line's sentence opener ('Q4
+    Brunson is different', 'Brunson owns the fourth quarter')."""
+    raw = [w.strip(_EDGE_PUNCT + ".") for w in str(text).split()][:_TYPED_MAX_TOKENS]
+    raw = [w for w in raw if w]
+    words = {w.lower() for w in raw}
+    if words & _REMARK_STRONG or _REMARK_PHRASE.search(str(text)) is not None:
+        return True
+    if not words & _REMARK_WORDS:
+        return False
+    # In Title Case ("1Q Is The Move") a capital says nothing of a name.
+    alpha = [w for w in raw if w[:1].isalpha()]
+    title = len(alpha) >= 3 and sum(w[:1].isupper() for w in alpha) >= 0.6 * len(alpha)
+    for w in raw:
+        low = w.lower()
+        if _PERIOD_TOKEN.match(w) or _PERIOD.search(low) or low in _TOUT_NOUNS:
+            continue
+        if low in _REMARK_PRONOUNS or (w[:1].isupper() and _team_word(w) is not None):
+            return True
+        if not title and w[:1].isupper() and not (
+                low in _PLAIN_WORDS or low in _REMARK_OPENERS or low in _REMARK_WORDS):
+            return True
+    return False
+
+
+def _label_paren(m: re.Match) -> str:
+    """A parenthesis on a label line, as _section_period reads it. One whose
+    first item names a period stays, as that item alone: "Tonight's picks
+    (1Q, been hitting)", "Card (1H, cashed yesterday)" were remarks, and
+    their quarter picks were priced as full-game lines (review 6, B4). One
+    that is a remark or cancels its period is set aside ("Suns (blew a 2H
+    lead last night):", "(no 1Q or 1H)"); any other stays ("(1Q, 7 PM)")."""
+    inner = m.group(1)
+    if _PERIOD.search(" ".join(inner.lower().split())) and not _named_period(inner):
+        # "(no 1Q or 1H)", "(1H later, full game now)": the parenthesis puts
+        # its period off as a whole, before its first item is read (review 7,
+        # B20).
+        return " "
+    first: list[str] = []
+    for w in inner.split()[:_TYPED_MAX_TOKENS]:
+        if set(w) <= _DASHES:
+            break
+        first.append(w)
+        if w[-1:] in ",;":
+            break
+    head = " ".join(first).strip(",; ")
+    if len(first) <= 3 and _named_period(head):
+        return f"({head})"
+    if _remark(inner) or (_PERIOD.search(" ".join(inner.lower().split()))
+                          and not _named_period(inner)):
+        return " "
+    return m.group(0)
+
+
+def _section_period(ln: str, strict: bool = False) -> str | None:
+    """The period a section label or a heading names ('1Q props:', 'First
+    quarter picks', '1Q Locks', '## 1Q props', 'Magic @ Suns (1H)'), or None.
+    Refusing is the safe side, so a line that names a period is the label of
+    the section under it unless the period is cancelled ('No 1Q props today',
+    'Full game picks, 1H later:') or the line reads as a remark (_remark:
+    'What a 4th quarter!', 'Q4 Brunson is different'). A line ending with a
+    colon or naming the picks (_TOUT_NOUNS) is never a remark: round 4's
+    shape test missed '1Q Locks' and '1Q props I like', and their quarter
+    picks were priced as full-game lines (review 4, A6, B2; review 5, A1,
+    B1). A parenthesis that is a remark or cancels its period is set aside
+    first ('Suns (blew a 2H lead last night):'), one holding a tip time or a
+    network is not ('(1Q, 7 PM)', review 5, B4), and one whose first item is
+    the period is kept as that item ('Card (1H, cashed yesterday)', review 6,
+    B4; _label_paren). `strict` (lines inside
+    a board paste): only a label ending with a colon or naming the picks,
+    since a square's own label ('1Q Points') and a board's period tabs ('1Q')
+    do neither."""
+    s = _unglue_periods(_TYPED_PAREN.sub(_label_paren, _clean(ln)))
+    s = " ".join(_PERIOD_NOTE.sub(" ", s).split())[:MAX_LABEL_LEN]
+    colon = s.endswith(":")
+    tout = any(w.strip(_EDGE_PUNCT + ".#").lower() in _TOUT_NOUNS
+               for w in s.replace(":", " ").split())
+    if strict and not (colon or tout):
+        return None
+    found = _named_period(s)
+    if found is None or (not colon and (_ELSEWHERE.search(s) or (not tout and _remark(s)))):
+        return None
+    return found
+
+
+def _says_name(ln: str, name) -> bool:
+    """The line names the player by his surname ("Brunson o25.5 pts - cashed"
+    under "Jalen Brunson"), a suffix such as "Jr." aside, outside any
+    parenthesis, and with no other first name before it: "Jaylin Williams"
+    under "Jalen Williams" is another player (review 7, B9)."""
+    parts = [p.strip(".").lower() for p in str(name or "").split()]
+    parts = [p for p in parts if p and p not in _NAME_PARTICLES]
+    if not parts:
+        return False
+    words = [_POSSESSIVE.sub("", w.strip(_EDGE_PUNCT + ".")) for w in
+             _TYPED_PAREN.sub(" ", _clean(ln)).split()[:_TYPED_MAX_TOKENS]]
+    for i, w in enumerate(words):
+        if w.lower() == parts[-1]:
+            prev = words[i - 1] if i else ""
+            return not (prev[:1].isupper() and prev.isalpha() and prev.lower() != parts[0])
+    return False
+
+
+def _names_team(ln: str, pair) -> bool:
+    """The line names one of the teams in `pair`, a word or two at a time
+    ("Magic players:", "Orlando side:", "Golden State starters:")."""
+    words = _clean(ln).replace(":", " ").split()[:_TYPED_MAX_TOKENS]
+    return any(_team_word(" ".join(words[i:i + n])) in pair
+               for n in (1, 2) for i in range(len(words) - n + 1))
+
+
+def parse_typed_lines(text: str, board: bool = False) -> pd.DataFrame:
+    """Parse a typed list of picks (see the block comment above). Linear in
+    the paste and bounded: lines come through _board_lines (capped, never
+    materialised whole), at most MAX_TYPED_LINES of them and MAX_TYPED_WORDS
+    words (5,000 lines of 40 junk words cost seconds, review P8), and each is
+    read once. A line that is not a pick is skipped; one that reads as a pick but
+    names no player in full is counted in attrs['typed_noname'] (and, when
+    it has a side and at most _SHORT_PICK_WORDS words, in
+    attrs['typed_noname_pick'], which a board paste reports), and one
+    shaped like a pick that holds more than one number in
+    attrs['typed_unread'], and a pick reporting its result in
+    attrs['typed_recap']. Errors cost the line (attrs['skipped_error']).
+    attrs['typed_headings'] lists the team headings, which typed_games reads
+    to name a game. A period a section label names ('1Q props:') is written
+    onto the picks under it, across the headings under it, until a section
+    label that names none; a heading's own ('Magic @ Suns (1H)') holds over
+    the game's own team headings under it ('Magic:', 'Suns:', 'ORL-PHX') and
+    its sub-labels naming one of them ('Magic players:'), and ends at any
+    other (review 4, B2; review 5, B4; review 6, A13, B9). A name line's
+    period ('Jalen Brunson (1Q)', 'Main Slate 1H props:') is a label's:
+    every pick under it takes it, named or not (review 5, A3; review 6, A1).
+    Picks given a period from above are counted in attrs['typed_period_label']
+    (and those with a side in attrs['typed_period_label_pick']), a pick whose
+    side cannot be told in attrs['typed_unclear'], and a nameless pick with
+    no name line above it in attrs['typed_noname'] (review 6, B10, B12).
+    `board` (the lines of a board paste, _with_typed_picks): a square's own
+    label ('1Q Points') is no section label (_section_period's strict)."""
+    attrs = _new_attrs()
+    attrs["typed_headings"] = []
+    attrs["typed_noname_pick"] = 0
+    attrs["typed_period_label_pick"] = 0
+    rows: list[dict] = []
+    heading: str | None = None            # the team of the last team heading
+    game: tuple[str, ...] | None = None   # the pair of the last game heading
+    loose: tuple[str, ...] | None = None  # the pair of the last loosely joined heading
+    pending: tuple | None = None          # (name, team, opp, period) alone on a line above
+    period: str | None = None             # the period of the section label or heading above
+    period_head = False                   # ...named by a heading: it ends at the next one
+    period_pair: tuple | None = None      # ...a game heading's, which its own teams keep
+    period_name = False                   # ...a name line's, which its own "full game" ends
+    pending_full = False                  # the name line above says "full game"
+    words_read = 0
+    for n_read, ln in enumerate(_board_lines(str(text), attrs)):
+        if (n_read >= MAX_TYPED_LINES or words_read >= MAX_TYPED_WORDS
+                or len(rows) >= MAX_ROWS_PER_PASTE):
+            attrs["truncated"] += 1
+            break
+        words_read += len(ln.split())
+        try:
+            parts = _heading_parts(ln)
+            if parts is not None:
+                head, is_loose = parts
+                if len(head) == 2 and not is_loose:
+                    heading, game, loose = None, head, None
+                else:
+                    # A team heading, or two teams a joiner may only group
+                    # ("Knicks & Nets", "ORL-PHX"): a team heading each, and
+                    # the schedule says whether the two are one game
+                    # (typed_games; review 3, R6; review 4, B4).
+                    heading = head[0] if len(head) == 1 else None
+                    game = game if game and set(head) <= set(game) else None
+                    loose = head if len(head) == 2 else (
+                        loose if loose and heading in loose else None)
+                    for h in head:
+                        if h not in attrs["typed_headings"]:
+                            attrs["typed_headings"].append(h)
+                named = _section_period(ln)
+                if named is not None:
+                    period, period_head, period_name = named, True, False
+                    period_pair = head if len(head) == 2 else None
+                elif period_head and not ((len(head) == 1 or is_loose) and period_pair
+                                          and set(head) <= set(period_pair)):
+                    # "Knicks @ Cavs (1Q)", then "Knicks:" and "Cavs:": the
+                    # game's own teams keep its period (review 5, B4).
+                    period, period_head, period_pair = None, False, None
+                pending = None
+                continue
+            got = _read_typed(ln)
+            if got in (_RECAP, _RECAP_NAMED):
+                named = _section_period(ln, strict=board)
+                if named is not None:
+                    # "Q1 props, cashed all 3 last night": a brag that labels
+                    # the quarter picks under it (review 6, B4).
+                    period, period_head, heading, game, loose = named, False, None, None, None
+                    period_pair = pending = None
+                    period_name = False
+                    continue
+                # "Jalen Brunson o25.5 pts - cashed": a result, counted (review 4,
+                # A7). One naming another player ends the name line above, as a
+                # pick would, so the next nameless line is never lent the name
+                # across it (review 5, A11, B7); "Over 6.5 assists - cashed", or
+                # "Brunson o25.5 pts - cashed" under his own name line, keeps it
+                # (review 6, B10).
+                attrs["typed_recap"] += 1
+                if got == _RECAP_NAMED and not (pending and _says_name(ln, pending[0])):
+                    pending = None
+                continue
+            if got in (_UNCLEAR, _UNCLEAR_NAMED):
+                # A pick whose Yes or No may be the answer or a note's word:
+                # counted, never guessed (review 6). One naming nobody keeps
+                # the name line above, as a nameless pick would (review 7,
+                # B13).
+                attrs["typed_unclear"] += 1
+                if got == _UNCLEAR_NAMED:
+                    pending = None
+                continue
+            if isinstance(got, str):
+                attrs["typed_unread"] += 1
+                pending = None
+                continue
+            if got is None or (got["pick"] is None and got["stat"] is None
+                               and _PERIOD.search(str(got["stat_type"]).lower())):
+                # Not a pick: a name line, a section label, or a period's
+                # reading with no side or stat ("First 5 minutes props:",
+                # "Tonight's First 5 Minutes Props", whose digit made it
+                # pick-shaped: review 5, A8), even beside words that read as a
+                # name: "What I Like 1Q 7 PM:", "Jalen Brunson (1Q, 7 PM)" and
+                # "Main Slate 1Q 3 picks:" were filed as refused rows, and the
+                # quarter picks under them priced as full game (review 7, A1).
+                pending = _name_only(ln)
+                pending_full = pending is not None and bool(_FULL_GAME.search(ln))
+                if pending is not None:
+                    if pending[3]:
+                        # "Jalen Brunson (1Q)", "Jalen Brunson 1Q props", "Main
+                        # Slate 1H props:": a name line naming a period labels
+                        # every pick under it, named or not, as a section label
+                        # does; only its nameless picks were refused, and the
+                        # named ones were priced as full-game lines (review 6,
+                        # A1, B1).
+                        period, period_head, period_pair = pending[3], False, None
+                        period_name = True
+                    elif pending_full and period_name:
+                        # "Josh Hart (full game)" ends a name line's period. A
+                        # label's or a heading's goes on past his block, and
+                        # only his own picks are full game (pending_full):
+                        # ending it put the later quarter picks at full game
+                        # (review 7, B2).
+                        period, period_head, period_pair = None, False, None
+                        period_name = False
+                else:
+                    named = _section_period(ln, strict=board)
+                    if named is not None:
+                        # "1Q props:": the picks under it are that period's,
+                        # refused as if it were written on each (review 3, R2).
+                        period, period_head, heading, game, loose = named, False, None, None, None
+                        period_pair, period_name = None, False
+                    elif ln.rstrip().endswith(":"):
+                        # "Bonus play:", "Parlay:": a section of its own, so the
+                        # team heading above no longer groups what follows. Under
+                        # "Magic @ Warriors (1H)", "Magic players:" is still that
+                        # game's, and its half (review 6, B9).
+                        # "Magic full game:" says otherwise (review 7, B22).
+                        own = bool(period_head and period_pair and _names_team(ln, period_pair)
+                                   and not _FULL_GAME.search(ln))
+                        heading = None
+                        if not own:
+                            game = loose = period = period_pair = None
+                            period_head = False
+                    elif _FULL_GAME.search(ln):
+                        period, period_head, period_pair = None, False, None
+                continue
+            name, team, opp = got["name"], got["team"], got["opp"]
+            full_here = False             # lent by a name line that says "full game"
+            if name is None and got["kind"] == NAME_NONE and pending and not got["total"] \
+                    and (got["stat"] is None
+                         or got["line"] <= _TYPED_PLAUSIBLE.get(got["stat"], MAX_LINE_VALUE)):
+                # Lent from the name line above, and it stays lent to the next.
+                name, team, opp = pending[0], team or pending[1], opp or pending[2]
+                full_here = pending_full
+            else:
+                pending = None
+            if name is None:
+                # Counted when it named someone, just not in full ("Bridges
+                # over 6.5"), and when it is a player's pick with no name line
+                # above it ("Over 2.5 threes" after a recap of another player:
+                # it vanished without a word, review 6, B10). A line with no
+                # name and no stat is a game total or a stray, as on the board,
+                # and a board paste's squares name nobody either.
+                bad = got["kind"] == NAME_BAD
+                orphan = (not board and got["kind"] == NAME_NONE and not got["total"]
+                          and got["pick"] is not None and got["stat"] is not None
+                          and got["line"] <= _TYPED_PLAUSIBLE.get(got["stat"], MAX_LINE_VALUE))
+                attrs["typed_noname"] += int(bad or orphan)
+                attrs["typed_noname_pick"] += int(bad and got["pick"] is not None
+                                                  and len(ln.split()) <= _SHORT_PICK_WORDS)
+                continue
+            label = got["stat_type"]
+            if period and not full_here and not _PERIOD.search(label.lower()):
+                # The period of the label, heading or name line above, which
+                # the report names (typed_period_label, review 6, B12).
+                label = f"{label} {period}"[:MAX_LABEL_LEN]
+                attrs["typed_period_label"] += 1
+                attrs["typed_period_label_pick"] += int(got["pick"] is not None)
+            rows.append({
+                "name": name, "team": team or heading, "position": None,
+                "stat_type": label, "line": got["line"], "start_time": None,
+                "direction": "", "odds_type": got["odds"], "opp": opp,
+                "is_combo": "+" in name, "league": None, "source": TYPED_SOURCE,
+                "pick": got["pick"], "alt_pick": got["alt_pick"],
+                "pair": " ".join(game) if game else None,
+                "pair_loose": " ".join(loose) if loose and not game else None,
+            })
+        except Exception as e:  # noqa: BLE001 - one bad line costs one line
+            logger.warning("typed-list line failed (%s)", type(e).__name__)
+            attrs["skipped_error"] += 1
+    return _frame(rows, attrs)
+
+
+def _tipped(g: dict, now_et) -> bool:
+    return bool(g["final"]) or (g["tip"] is not None and g["tip"] <= now_et)
+
+
+def _tipped_within(g: dict, now_et, hours: float) -> bool:
+    return (g["tip"] is not None and g["tip"] <= now_et
+            and (now_et - g["tip"]).total_seconds() <= hours * 3600)
+
+
+def _is_true(v) -> bool:
+    return v is True or v is np.True_
+
+
+def _heading_games(heads: set, games: list[dict], now_et, want: set, pairs=()
+                   ) -> tuple[dict[str, str], dict[str, str], set]:
+    """({team: opponent} for heading teams whose list is a game that has
+    tipped, {team: opponent} for heading teams paired on a game to come,
+    the loosely joined `pairs` the schedule makes one game), by typed_games's
+    rules."""
+    if len(heads) < 2:
+        return {}, {}, set()
+    today = now_et.date().isoformat()
+    yday = (now_et.date() - dt.timedelta(days=1)).isoformat()
+    last: dict[str, dict] = {}                # each team's latest recent game that has tipped
+    nxt: dict[str, dict] = {}                 # each team's next game still to come in `want`
+    plays_today: set[str] = set()
+    mine = [g for g in games if g["home"] in heads or g["away"] in heads]
+    for g in sorted(mine, key=lambda g: (g["tip"] is None, g["tip"] or now_et)):
+        for t in (g["home"], g["away"]):
+            if t not in heads:
+                continue
+            if _tipped(g, now_et):
+                if g["date"] in (today, yday) or _tipped_within(g, now_et, TYPED_LATE_HOURS):
+                    last[t] = g
+            else:
+                if g["date"] == today:
+                    plays_today.add(t)
+                if g["date"] in want and t not in nxt:
+                    nxt[t] = g
+
+    def other(g: dict, t: str) -> str:
+        return g["away"] if g["home"] == t else g["home"]
+
+    # "ORL-PHX" on one line names their game when the latest game of both,
+    # or the next of both, is against each other: routed as "@" is, so last
+    # night's list stays late after noon too (review 4, B4). Not by the
+    # latest when both play again today: that list is today's, as it is for
+    # two team headings (review 5, B9).
+    pinned = {p for p in pairs if len(p) == 2 and (
+        (last.get(p[0]) is not None and last.get(p[0]) is last.get(p[1])
+         and not set(p) <= plays_today)
+        or (nxt.get(p[0]) is not None and nxt.get(p[0]) is nxt.get(p[1])))}
+
+    upcoming = {t: other(g, t) for t, g in nxt.items()
+                if other(g, t) in heads and nxt.get(other(g, t)) is g}
+    late: dict[str, str] = {}
+    for t, g in last.items():
+        o = other(g, t)
+        if o not in heads or last.get(o) is not g:
+            continue
+        if upcoming.get(t, o) != o or upcoming.get(o, t) != t:
+            continue                 # a game to come pairs one of them with ANOTHER heading
+        recent = _tipped_within(g, now_et, TYPED_LATE_HOURS) or g["date"] == today
+        # Last night's game, the morning after: that game's list sent late,
+        # even when one of the two plays again today (a back-to-back, review
+        # 3, F3), unless both do (the list is today's). From noon it is a
+        # list for their next games (review 3, R5).
+        morning = (g["date"] == yday and now_et.hour < TYPED_MORNING_AFTER_HOUR
+                   and not {t, o} <= plays_today)
+        if recent or morning:
+            late[t] = o
+    return late, {t: o for t, o in upcoming.items() if t not in late}, pinned
+
+
+def typed_games(df: pd.DataFrame, schedule: pd.DataFrame, now=None, dates=None,
+                headings=()) -> pd.DataFrame:
+    """A typed line's team, opponent and pick, after its name is matched.
+
+    The roster's team wins over a heading's: a heading only groups the list,
+    so a player listed under the wrong team (a "Bonus" section, a forgotten
+    heading) is filed under his own game, and his match is not reported as
+    'another team'. An ESPN 'NO' before the number (alt_pick) was New
+    Orleans for a Pelican and the market's No for anyone else.
+
+    Then the game, when the line did not name one: the other team of its
+    game heading, or a game two TEAM HEADINGS pair (_heading_games):
+      - their latest game, when it was against each other and tipped today
+        or within TYPED_LATE_HOURS, or tipped yesterday and it is not yet
+        TYPED_MORNING_AFTER_HOUR (noon ET), unless both teams play again
+        today. The list is that game's, sent late, and its lines are
+        'tipped' (column `late`): the first list, pasted at 1:13 AM or the
+        next morning, is reported as late, never filed under each team's
+        next game. From noon the next day it is a list for their next
+        games (review 3, R5).
+      - else their next game in `dates`, when it is the NEXT game of both.
+    A late pairing gives way when either team's next game pairs it with
+    ANOTHER heading team (a list for tomorrow, sent the night two of its
+    teams played), and never to a rematch of the same two. Two headings
+    whose next games are against other teams name nothing, so tonight's list
+    is never moved to a game the two play later in the week. Two teams one
+    loose heading joins ("ORL-PHX", `pair_loose`) are a game heading when
+    their latest game, or their next, is against each other, routed as "@"
+    is, noon or not (review 4, B4). Rows from the feed or the board are
+    returned as they are."""
+    if df is None or df.empty or "source" not in df.columns:
+        return df
+    typed = df["source"].astype(str).eq(TYPED_SOURCE).to_numpy()
+    if not typed.any():
+        return df
+    out = df.copy()
+    now_et = to_et(now or now_utc())
+    if dates is None:
+        d0 = now_et.date()
+        dates = [d0, d0 + pd.Timedelta(days=1)]
+    want = {str(pd.Timestamp(d).date()) for d in dates}
+    heads = {h for h in (teams.canonical(x) for x in headings or ()) if h}
+    loose_col = out["pair_loose"] if "pair_loose" in out.columns else pd.Series(dtype=object)
+    pairs = {tuple(sorted(p.split())) for p in loose_col.dropna()
+             if isinstance(p, str) and len(p.split()) == 2}
+    late, upcoming, pinned = _heading_games(
+        heads, _schedule_frame(schedule).to_dict(orient="records"), now_et, want, pairs)
+    for c in ("team", "team_code", "opp", "how", "pick", "late"):
+        if c not in out.columns:
+            out[c] = None
+        out[c] = out[c].astype(object)
+    for pos in np.flatnonzero(typed):
+        i = out.index[pos]
+        rec = out.loc[i]
+        rt = teams.canonical(rec.get("roster_team"))
+        tc = teams.canonical(rec.get("team_code"))
+        matched = str(rec.get("match")) == "matched"
+        alt = pick_of(rec.get("alt_pick"))
+        if matched and alt is not None and rt != "NOP":
+            out.at[i, "pick"] = alt                  # "NO" was the market's No
+        if matched and rt and tc and rt != tc:
+            out.at[i, "team"] = rt
+            out.at[i, "team_code"] = rt
+            how = str(rec.get("how") or "")
+            if how.endswith("+other_team"):
+                out.at[i, "how"] = how[:-len("+other_team")]
+            tc = rt
+        team = tc or rt
+        opp = rec.get("opp")
+        if not team or (isinstance(opp, str) and opp):
+            continue
+        pair = rec.get("pair")
+        sides = pair.split() if isinstance(pair, str) else []
+        joined = rec.get("pair_loose")
+        if len(sides) != 2 and isinstance(joined, str) \
+                and tuple(sorted(joined.split())) in pinned:
+            sides = joined.split()          # "ORL-PHX": the game the schedule pairs them on
+        if len(sides) == 2:
+            out.at[i, "opp"] = (sides[1] if team == sides[0] else sides[0]) \
+                if team in sides else None
+            continue
+        if team in late:
+            out.at[i, "opp"] = late[team]
+            out.at[i, "late"] = True
+        elif team in upcoming:
+            out.at[i, "opp"] = upcoming[team]
+    return out
+
+
+def _useful_rows(df: pd.DataFrame) -> int:
+    """Rows whose label names a stat (priced or refused), not junk."""
+    if df is None or df.empty:
+        return 0
+    return sum(_classify_row(s, n, c, lg)[1] != "unmapped" for s, n, c, lg in
+               df[["stat_type", "name", "is_combo", "league"]].itertuples(index=False))
+
+
+def _picked(df: pd.DataFrame) -> np.ndarray:
+    """Rows that carry the visitor's own pick (a typed line's written side)."""
+    if df is None or "pick" not in df.columns:
+        return np.zeros(0 if df is None else len(df), dtype=bool)
+    return df["pick"].map(pick_of).notna().to_numpy(dtype=bool)
+
+
+def _with_typed_picks(board: pd.DataFrame, t: str) -> pd.DataFrame:
+    """A board paste with the visitor's own picks typed into it keeps both:
+    the squares as board rows, and each typed line that names a side as a
+    pick (review 2, P10 and I2: the picks were dropped without a word). A
+    typed reading with no side is left out: on board text it is a square the
+    board rows already hold."""
+    try:
+        typed = parse_typed_lines(t, board=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("typed-list parse failed (%s); keeping the board", type(e).__name__)
+        return board
+    mine = typed[typed["pick"].map(pick_of).notna().to_numpy()] if not typed.empty \
+        else typed
+    out = pd.concat([board, mine], ignore_index=True) if not mine.empty else board.copy()
+    out.attrs = dict(board.attrs)
+    # The typed lines it could not read are counted, as when the list is
+    # pasted alone (review 3, F13): only lines with a side, since a square's
+    # words are no pick and name no player in full.
+    out.attrs["typed_noname"] = int(typed.attrs.get("typed_noname_pick", 0) or 0)
+    out.attrs["typed_unread"] = int(typed.attrs.get("typed_unread", 0) or 0)
+    out.attrs["typed_recap"] = int(typed.attrs.get("typed_recap", 0) or 0)
+    out.attrs["typed_unclear"] = int(typed.attrs.get("typed_unclear", 0) or 0)
+    out.attrs["typed_period_label"] = int(typed.attrs.get("typed_period_label_pick", 0) or 0)
+    out.attrs["typed_headings"] = list(typed.attrs.get("typed_headings") or [])
+    return out
+
+
 def parse_any(text) -> pd.DataFrame:
-    """Feed JSON or board text, whichever the paste is. NEVER raises.
+    """Feed JSON, board text or a typed list, whichever the paste is. NEVER raises.
+    Board text is read as board text first; the typed reader then adds the
+    picks typed into it (_with_typed_picks), or reads the whole paste when
+    the board parser finds no square naming a stat.
 
     Deliberately broad excepts: everything here is untrusted paste, the
     contract is "return what you could parse", and it runs before the page
@@ -827,10 +3598,26 @@ def parse_any(text) -> pd.DataFrame:
                 attrs["json_shape"] = "unreadable feed"
                 return _frame([], attrs)
     try:
-        return parse_prizepicks_board(t)
+        board = parse_prizepicks_board(t)
     except Exception as e:  # noqa: BLE001
         logger.warning("board-text parse failed (%s); returning nothing", type(e).__name__)
-        return _frame([], attrs)
+        board = _frame([], attrs)
+    if _useful_rows(board):
+        return _with_typed_picks(board, t)
+    # Board text puts the number and the label on lines of their own, so a
+    # paste with no square naming a stat may be a typed list ("Name over 6.5
+    # Stat"), even when a stray number line in a copied post ("12", then
+    # "Reposts") gave the board parser a junk square.
+    try:
+        typed = parse_typed_lines(t)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("typed-list parse failed (%s); returning nothing", type(e).__name__)
+        return board
+    if _useful_rows(typed) or (board.empty and not typed.empty):
+        return typed
+    for k in ("typed_noname", "typed_unread", "typed_recap", "typed_unclear"):
+        board.attrs[k] = int(typed.attrs.get(k, 0) or 0)
+    return board
 
 
 # ── Names -> PERSON_ID ───────────────────────────────────────────────────────
@@ -875,6 +3662,12 @@ def resolve_names(lines: pd.DataFrame, roster: pd.DataFrame,
         try:
             team = teams.canonical(rec.get("team"))
             m = idx.get(str(rec.get("name") or ""), team=team)
+            if (m.value is None and m.how == "none" and team is not None
+                    and str(rec.get("source") or "") == TYPED_SOURCE):
+                # A heading only groups a typed list, so 'Steph Curry' under
+                # 'Suns:' is still Stephen Curry, and typed_games files him
+                # under his own team (review 2, P14).
+                m = idx.get(str(rec.get("name") or ""), team=None)
             pid = None if m.value is None else int(m.value)
         except Exception as e:  # noqa: BLE001 - one bad row costs one row (audit)
             logger.warning("resolve_names: row failed (%s)", type(e).__name__)
@@ -1002,12 +3795,30 @@ def _route_one(rec: dict, games_all: list[dict], by_team: dict, want: set,
             return None, None, "tipped", None, None
         return (d, (g["game_id"] if g is not None else None), "start_time", _utc_iso(tip),
                 (bool(g["projectable"]) if g is not None else None))
+    if str(rec.get("source") or "") == TYPED_SOURCE and (
+            _is_true(rec.get("late")) or (opp is not None and any(
+                opp in (g["home"], g["away"]) and _tipped_within(g, now_et, TYPED_LATE_HOURS)
+                for g in games))):
+        # A typed list naming a game that tipped within the last few hours,
+        # or whose two headings typed_games found to be a game that has
+        # tipped (`late`), is that game's list, sent late, even when the two
+        # teams meet again tomorrow. A board square for a started game is
+        # live, never pasted.
+        return None, None, "tipped", None, None
     cands = [g for g in games if g["date"] in want and not g["final"]
              and (g["tip"] is None or g["tip"] > now_et)
              and (opp is None or opp in (g["home"], g["away"]))]
     if cands:
         g = min(cands, key=lambda g: (g["date"], g["tip"] or now_et))
         return g["date"], g["game_id"], "team_schedule", _utc_iso(g["tip"]), bool(g["projectable"])
+    if opp is not None:
+        # The line names its game (a matchup line, a typed list's headings),
+        # and that game, today's or last night's, has already started.
+        recent = {now_et.date().isoformat(), (now_et.date() - dt.timedelta(days=1)).isoformat()}
+        if any(opp in (g["home"], g["away"]) and g["date"] in recent
+               and (g["final"] or (g["tip"] is not None and g["tip"] <= now_et))
+               for g in games):
+            return None, None, "tipped", None, None
     return None, None, "unrouted", None, None
 
 
@@ -1096,31 +3907,127 @@ PERIOD_REPASTE_RATIO = 0.6
 PERIOD_REPASTE_MIN_DROP = 2.0
 
 
-def _period_repastes(out: pd.DataFrame) -> np.ndarray:
-    """Rows of `out` (in recency order, with _key and _rank) that are a
-    standard line far below the standard line held before them."""
+def _period_repastes(out: pd.DataFrame, exempt=None) -> tuple[np.ndarray, np.ndarray]:
+    """(held, below_pick): rows of `out` (in recency order, with _key and
+    _rank) that are a standard line far below the standard line held before
+    them, and of those the ones held for a typed pick's number alone.
+    `exempt` rows (the visitor's own picks) are never held: a typed pick
+    names its own number, and a period written on it was refused at the
+    paste (review 2, I3). The board's own line is the standard; with none, a
+    typed pick's number is, so a quarter square pasted below a typed
+    full-game pick is held (review 3, R3). A pick never moves the board's
+    standard: the full-game board re-pasted after a Demon typed above it is
+    the same board, set aside for the pick, never held (review 4, A8, B5)."""
     held = np.zeros(len(out), dtype=bool)
+    below_pick = np.zeros(len(out), dtype=bool)
     if "line" not in out.columns:
-        return held
+        return held, below_pick
     lines = pd.to_numeric(out["line"], errors="coerce").to_numpy(dtype=float)
     std = (np.asarray(out["_rank"]) == 0) if "_rank" in out.columns else np.ones(len(out), bool)
-    current: dict[str, float] = {}
+    skip = np.zeros(len(out), dtype=bool) if exempt is None else np.asarray(exempt, dtype=bool)
+    board: dict[str, float] = {}
+    picks: dict[str, float] = {}
     for i, k in enumerate(out["_key"].to_numpy()):
         x = lines[i]
         if not std[i] or not math.isfinite(x):
             continue
-        prev = current.get(k)
-        if (prev is not None and x < PERIOD_REPASTE_RATIO * prev
-                and prev - x >= PERIOD_REPASTE_MIN_DROP):
-            held[i] = True                   # keep the full-game line
+        if skip[i]:
+            picks[k] = x                     # a pick is never held, and sets no board standard
             continue
-        current[k] = x
-    return held
+        ref = board.get(k)
+        mine = ref is None
+        if mine:
+            ref = picks.get(k)
+        if (ref is not None and x < PERIOD_REPASTE_RATIO * ref
+                and ref - x >= PERIOD_REPASTE_MIN_DROP):
+            held[i], below_pick[i] = True, mine      # keep the full-game line (or the pick)
+            continue
+        board[k] = x
+    return held, below_pick
 
 
-def collapse_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
-    """One line per (game date, player, stat): standard first, then Goblin,
-    then Demon; among equals, the NEWEST paste wins.
+def _carry_same_line(out: pd.DataFrame, skip=None) -> None:
+    """In place, oldest to newest: a row of the SAME line (game date, player,
+    stat, number and odds type) as an older one takes what the older one knew
+    and it does not. A typed pick survives a board re-paste of its square, and
+    a square's offered sides ('More only') survive a typed pick on it. Sides
+    are carried only into a row that carries a pick, since a typed pick has
+    none of its own: between board and feed rows the newest paste says what
+    it offers, as before (review 2, I9). `skip` rows (held back as period
+    lines) neither give nor take. A moved line carries neither: a pick made
+    at 6.5 is not a pick at 7.5."""
+    if "pick" not in out.columns or "line" not in out.columns:
+        return
+    has_dir = "direction" in out.columns
+    lines = pd.to_numeric(out["line"], errors="coerce").to_numpy(dtype=float)
+    odds = out["odds_type"].astype(str).str.lower().to_numpy() if "odds_type" in out.columns \
+        else np.full(len(out), "standard", dtype=object)
+    skip = np.zeros(len(out), dtype=bool) if skip is None else np.asarray(skip, dtype=bool)
+    picks = out["pick"].to_numpy(dtype=object).copy()
+    dirs = out["direction"].to_numpy(dtype=object).copy() if has_dir else None
+    last_pick: dict[tuple, str] = {}
+    last_dir: dict[tuple, str] = {}
+    for i, key in enumerate(out["_key"].to_numpy()):
+        if skip[i] or not math.isfinite(lines[i]):
+            continue
+        k = (key, round(float(lines[i]), 3), odds[i])
+        if pick_of(picks[i]) is None and k in last_pick:
+            picks[i] = last_pick[k]
+        elif pick_of(picks[i]) is not None:
+            last_pick[k] = picks[i]
+        if has_dir:
+            d = dirs[i] if isinstance(dirs[i], str) else ""
+            if d.strip() == "" and k in last_dir and pick_of(picks[i]) is not None:
+                dirs[i] = last_dir[k]
+            elif d.strip().lower() in ("both", "more", "less"):
+                last_dir[k] = d
+    out["pick"] = pd.Series(picks, index=out.index, dtype=object)
+    if has_dir:
+        out["direction"] = pd.Series(dirs, index=out.index, dtype=object)
+
+
+def _set_aside_for_picks(ranked: pd.DataFrame, kept: pd.DataFrame, new_from) -> pd.DataFrame:
+    """Of collapse_alt_lines's sorted rows, per (date, player, stat) whose
+    kept row is a typed pick: the board or feed line that would have won
+    without it, when it came in at row `new_from` or later and sits at
+    another number. The same number merged into the pick instead."""
+    picks = kept[kept["_mine"] == 0]
+    if picks.empty or "line" not in ranked.columns:
+        return ranked.iloc[0:0]
+    rivals = ranked[ranked["_mine"] == 1].drop_duplicates("_key", keep="first")
+    rivals = rivals[rivals["_key"].isin(picks["_key"])]
+    if "game_date" in rivals.columns:
+        # A line placed on no game never showed: it is reported as unrouted,
+        # never as set aside for a pick on the same empty date (review 4, B12).
+        d = rivals["game_date"]
+        rivals = rivals[d.notna() & ~d.astype(str).isin(["", "None", "nan", "NaT"])]
+    if new_from is not None:
+        rivals = rivals[rivals["_ord"] >= new_from]
+    if rivals.empty:
+        return rivals
+    mine = pd.Series(pd.to_numeric(picks["line"], errors="coerce").to_numpy(dtype=float),
+                     index=picks["_key"].to_numpy())
+    theirs = pd.to_numeric(rivals["line"], errors="coerce").to_numpy(dtype=float)
+    ours = rivals["_key"].map(mine).to_numpy(dtype=float)
+    return rivals[~np.isclose(theirs, ours, equal_nan=True)]
+
+
+def _line_name(rec: dict) -> str:
+    stat = rec.get("stat")
+    label = STAT_LABEL.get(stat) if isinstance(stat, str) else None
+    return f"{rec.get('name') or ''} {label or rec.get('stat_type') or ''}".strip()[:60]
+
+
+def collapse_alt_lines(df: pd.DataFrame, new_from: int | None = None) -> pd.DataFrame:
+    """One line per (game date, player, stat): the visitor's own pick first,
+    then standard, then Goblin, then Demon; among equals, the NEWEST paste
+    wins.
+
+    A typed pick outranks the board's line for the same player and stat
+    because it is the bet the visitor asked about: a Goblin typed after the
+    board, or a board pasted after the list at another number, no longer
+    makes the pick vanish while the paste says "loaded" (review 2, I3). The
+    same number merges into one row (_carry_same_line).
 
     Position in the frame is recency: callers merge as concat([existing,
     batch]), so a later row is a newer paste. Without `_ord` the sort was on
@@ -1133,11 +4040,24 @@ def collapse_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
     Except a suspected period line (PERIOD_REPASTE_RATIO above): it never
     replaces the full-game line it sits far below. How many were held back is
     `attrs['period_held']` on the result, and per game date
-    `attrs['period_held_by_date']`, so the paste report can say so.
+    `attrs['period_held_by_date']`, so the paste report can say so; those
+    held below a typed pick's number alone are `period_held_pick` (named in
+    `period_held_pick_names`), whose report names the pick (review 4, A8).
 
     Safe for the record because the record's FREEZE_KEYS are (game_id,
     person_id, stat), WITHOUT the line, and first seen wins: the pick made at
     24.5 stays frozen as the evidence it is, and the board moves to 26.5.
+
+    Before the newest row wins, _carry_same_line hands it what an older row
+    of the same number knew (a typed pick, a square's offered sides). The
+    visitor's own picks are never held back as period lines.
+
+    A board or feed line a typed pick outranks at ANOTHER number is set
+    aside and counted, `attrs['pick_kept']` (per date in
+    `pick_kept_by_date`, named in `pick_kept_names`), so the paste report
+    never calls it loaded (review 3, R8). Only lines from row `new_from` on
+    count (the paste being merged; every row when None): a pick typed over
+    an older board line replaces it, as any newer paste does.
     """
     if df is None or df.empty:
         return df
@@ -1146,18 +4066,29 @@ def collapse_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
     out["_rank"] = out["odds_type"].map(lambda o: _ODDS_RANK.get(str(o).lower(), 3)) \
         if "odds_type" in out.columns else 0
     out["_ord"] = np.arange(len(out))
-    held = _period_repastes(out)
+    held, below_pick = _period_repastes(out, exempt=_picked(out))
+    _carry_same_line(out, skip=held)
+    out["_mine"] = np.where(_picked(out), 0, 1)
     held_dates = (out.loc[held, "game_date"].astype(str).value_counts()
                   if "game_date" in out.columns else pd.Series(dtype=int))
-    out = (out[~held]
-           .sort_values(["_key", "_rank", "_ord"], ascending=[True, True, False],
-                        kind="mergesort")
-           .drop_duplicates("_key", keep="first")
-           .sort_values("_ord", kind="mergesort")
-           .drop(columns=["_key", "_rank", "_ord"])
+    below_names = [_line_name(r) for r in out[below_pick].head(8).to_dict(orient="records")]
+    ranked = out[~held].sort_values(["_key", "_mine", "_rank", "_ord"],
+                                    ascending=[True, True, True, False], kind="mergesort")
+    kept = ranked.drop_duplicates("_key", keep="first")
+    aside = _set_aside_for_picks(ranked, kept, new_from)
+    out = (kept.sort_values("_ord", kind="mergesort")
+           .drop(columns=["_key", "_mine", "_rank", "_ord"])
            .reset_index(drop=True))
     out.attrs["period_held"] = int(held.sum())
     out.attrs["period_held_by_date"] = {str(k): int(v) for k, v in held_dates.items()}
+    out.attrs["period_held_pick"] = int(below_pick.sum())
+    out.attrs["period_held_pick_names"] = below_names
+    aside_dates = (aside["game_date"].astype(str).value_counts()
+                   if "game_date" in aside.columns else pd.Series(dtype=int))
+    out.attrs["pick_kept"] = int(len(aside))
+    out.attrs["pick_kept_by_date"] = {str(k): int(v) for k, v in aside_dates.items()}
+    out.attrs["pick_kept_names"] = [_line_name(r) for r in
+                                    aside.head(8).to_dict(orient="records")]
     return out
 
 
@@ -1232,6 +4163,9 @@ def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
 
       kept = comparable + sum(not_comparable.values()) + unrouted
 
+    and `tipped` (with `tipped_names`) counts the unrouted lines whose own
+    game has already started.
+
     `comparable` counts the lines that can reach a board at all (a mapped stat,
     a matched player, an upcoming game the site projects). The confirmation
     counts THOSE, never `kept`: "2 lines loaded" for one unknown name and one
@@ -1243,26 +4177,39 @@ def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
     whether or not they routed; `wrong_board`, that board's name when it holds
     at least WRONG_BOARD_SHARE of the paste (the visitor copied the wrong
     feed), else None; `period_held`, standard lines held back as suspected
-    quarter or half lines (collapse_alt_lines). Names are capped, never
-    escaped here: the page escapes what it renders.
+    quarter or half lines (collapse_alt_lines); `pick_kept` (with
+    `pick_kept_names`), board and feed lines set aside for a typed pick at
+    another number in the same paste. Names are capped, never escaped here:
+    the page escapes what it renders.
     """
     parsed = parse_any(text)
     report = {"parsed": int(len(parsed)), "parse": dict(parsed.attrs),
               "by_date": {}, "unrouted": 0, "unrouted_names": [], "kept": 0,
               "comparable": 0, "comparable_by_date": {},
               "not_comparable": {k: 0 for k in NOT_COMPARABLE},
-              "other_boards": {}, "wrong_board": None, "period_held": 0}
+              "other_boards": {}, "wrong_board": None, "period_held": 0,
+              "pick_kept": 0, "pick_kept_names": []}
     if parsed.empty:
         return parsed, report
     df = _classify_and_resolve(parsed, roster)
+    df = typed_games(df, schedule, now=now, dates=dates,
+                     headings=parsed.attrs.get("typed_headings") or ())
     df = route_lines(df, schedule, now=now, dates=dates)
     df = collapse_alt_lines(df)
     report["period_held"] = int(df.attrs.get("period_held", 0))
+    report["pick_kept"] = int(df.attrs.get("pick_kept", 0))
+    report["pick_kept_names"] = list(df.attrs.get("pick_kept_names") or [])
     vc = df["game_date"].dropna().value_counts()
     report["by_date"] = {str(k): int(v) for k, v in sorted(vc.items())}
     unr = df[df["game_date"].isna()]
     report["unrouted"] = int(len(unr))
     report["unrouted_names"] = sorted({str(x) for x in unr["name"]})[:8]
+    # Of those, the lines whose own game has already started ('tipped'):
+    # said apart from the rest, so a list sent in after the game reads as
+    # late, not as unknown names.
+    tipped = unr[unr["route_how"].astype(str).eq("tipped")]
+    report["tipped"] = int(len(tipped))
+    report["tipped_names"] = sorted({str(x) for x in tipped["name"]})[:8]
     report["kept"] = int(len(df))
 
     other = (df["kind"].astype(str).eq("refused")
@@ -1332,7 +4279,7 @@ BOARD_MAX_BYTES = 64 * 2**20
 # by label and a new one by stat, and a re-paste would stop replacing it.
 BOARD_COLUMNS = ("name", "team_code", "stat_type", "stat", "line", "direction",
                  "odds_type", "opp", "is_combo", "league", "match", "person_id", "how",
-                 "roster_name", "roster_team", "game_date", "game_id", "tip_utc")
+                 "roster_name", "roster_team", "game_date", "game_id", "tip_utc", "pick")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 _clock = time.monotonic
 # The wall clock a board's paste time is read from (DiamondValue's "lines
@@ -1355,6 +4302,11 @@ class _Board:
     period_held: dict = field(default_factory=dict)   # {game_date: lines} held back on
                                                       # the write that made this board
     pasted_utc: object = None   # wall-clock UTC of that write: the last paste, shown
+    pick_kept: dict = field(default_factory=dict)     # {game_date: lines} that write set
+                                                      # aside for a typed pick
+    pick_kept_names: list = field(default_factory=list)
+    period_held_pick: int = 0   # of period_held, the lines held below a typed pick alone
+    period_held_pick_names: list = field(default_factory=list)
 
 
 _BOARDS: "OrderedDict[str, _Board]" = OrderedDict()
@@ -1392,11 +4344,15 @@ def _cap(lines: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 
 def _store_locked(token: str, lines: pd.DataFrame, now: float,
-                  period_held: dict | None = None, pasted_utc=None) -> None:
+                  period_held: dict | None = None, pasted_utc=None,
+                  pick_kept: dict | None = None, pick_kept_names=None,
+                  period_held_pick: int = 0, period_held_pick_names=None) -> None:
     stored, dropped = _cap(lines)
     _BOARDS[token] = _Board(stored, now, int(stored.memory_usage(deep=True).sum()), dropped,
                             dict(period_held or {}),
-                            pasted_utc if pasted_utc is not None else _wall())
+                            pasted_utc if pasted_utc is not None else _wall(),
+                            dict(pick_kept or {}), list(pick_kept_names or [])[:8],
+                            int(period_held_pick or 0), list(period_held_pick_names or [])[:8])
     _BOARDS.move_to_end(token)
     _evict_locked(now)
 
@@ -1431,8 +4387,12 @@ def board_info(token) -> dict | None:
     pasted lines that write held back as suspected quarter or half lines
     against the board's full-game lines (collapse_alt_lines), per game date in
     `period_held_by_date`: counted, so the paste panel can say so instead of
-    changing the board in silence. `pasted_utc` is when that write happened
-    (the visitor's last paste, an aware UTC datetime), for the board to show."""
+    changing the board in silence. `pick_kept` is how many pasted lines that
+    write set aside for a typed pick at another number (per date in
+    `pick_kept_by_date`, named in `pick_kept_names`), and `period_held_pick`
+    how many of the held lines sat below a typed pick alone (named in
+    `period_held_pick_names`). `pasted_utc` is when that write happened (the
+    visitor's last paste, an aware UTC datetime), for the board to show."""
     if not valid_token(token):
         return None
     with _BOARDS_LOCK:
@@ -1441,7 +4401,12 @@ def board_info(token) -> dict | None:
             return None
         return {"rows": int(len(b.lines)), "nbytes": int(b.nbytes), "dropped": int(b.dropped),
                 "period_held": int(sum(b.period_held.values())),
-                "period_held_by_date": dict(b.period_held), "pasted_utc": b.pasted_utc}
+                "period_held_by_date": dict(b.period_held), "pasted_utc": b.pasted_utc,
+                "pick_kept": int(sum(b.pick_kept.values())),
+                "pick_kept_by_date": dict(b.pick_kept),
+                "pick_kept_names": list(b.pick_kept_names),
+                "period_held_pick": int(b.period_held_pick),
+                "period_held_pick_names": list(b.period_held_pick_names)}
 
 
 def add_to_board(token, lines: pd.DataFrame, pasted_utc=None) -> str:
@@ -1461,15 +4426,23 @@ def add_to_board(token, lines: pd.DataFrame, pasted_utc=None) -> str:
         now = _clock()
         _evict_locked(now)
         b = _BOARDS.get(token) if valid_token(token) else None
-        parts = [x for x in ((b.lines if b is not None else None), lines)
-                 if x is not None and not x.empty]
-        merged = collapse_alt_lines(pd.concat(parts, ignore_index=True)) if parts \
+        old = b.lines if b is not None and not b.lines.empty else None
+        parts = [x for x in (old, lines) if x is not None and not x.empty]
+        # The board's rows come first, so the pasted ones start at len(old).
+        merged = collapse_alt_lines(pd.concat(parts, ignore_index=True),
+                                    new_from=len(old) if old is not None else 0) if parts \
             else pd.DataFrame()
         held = dict(merged.attrs.get("period_held_by_date") or {}) if parts else {}
+        kept = dict(merged.attrs.get("pick_kept_by_date") or {}) if parts else {}
+        names = list(merged.attrs.get("pick_kept_names") or []) if parts else []
+        below = int(merged.attrs.get("period_held_pick") or 0) if parts else 0
+        below_names = list(merged.attrs.get("period_held_pick_names") or []) if parts else []
         if b is not None:
             _BOARDS.move_to_end(token, last=False)
         new = secrets.token_urlsafe(24)
-        _store_locked(new, merged, now, period_held=held, pasted_utc=pasted_utc)
+        _store_locked(new, merged, now, period_held=held, pasted_utc=pasted_utc,
+                      pick_kept=kept, pick_kept_names=names, period_held_pick=below,
+                      period_held_pick_names=below_names)
     return new
 
 
@@ -1504,9 +4477,12 @@ def board_count() -> int:
 # fresh one, so a shared link stays read-only. It comes back from a browser,
 # so restore_saved is a second paste box: exact shape, every field through
 # the paste validators, the board's own row cap, and it never raises.
-SAVED_VERSION = 1
+# Version 2 (2026-11-06) adds `pick`, the side a typed list named. A version 1
+# copy, saved before it, still restores: its lines come back with no pick.
+SAVED_VERSION = 2
 SAVED_COLUMNS = ("name", "team_code", "stat_type", "line", "direction", "odds_type",
-                 "opp", "is_combo", "league", "game_date", "game_id", "tip_utc")
+                 "opp", "is_combo", "league", "game_date", "game_id", "tip_utc", "pick")
+SAVED_LAYOUTS = {1: SAVED_COLUMNS[:-1], 2: SAVED_COLUMNS}
 SAVED_MAX_AGE_DAYS = 7     # a copy pasted longer ago than this is dropped whole
 SAVED_AHEAD_DAYS = 3       # PrizePicks posts today and tomorrow; further out is junk
 SAVED_MAX_SKEW_S = 300     # a paste time this far in the future is junk too
@@ -1538,7 +4514,7 @@ def saved_board(lines: pd.DataFrame | None, pasted_utc, save_id: str,
                 today: dt.date, owner: str | None = None) -> dict | None:
     """The browser's copy of a board: {"v", "id", "owner", "cols",
     "pasted_utc", "rows"}, one row per stored line whose own game falls on
-    `today` (ET) or later, in SAVED_COLUMNS order. `save_id` is what the
+    `today` (ET) or later, in the layout of its version (SAVED_LAYOUTS). `save_id` is what the
     browser acknowledges a write with and `owner` names the board (a hash of
     its token, never the token). None when no line qualifies: a board of
     past games has nothing worth keeping."""
@@ -1549,19 +4525,25 @@ def saved_board(lines: pd.DataFrame | None, pasted_utc, save_id: str,
     t = lines[keep]
     if t.empty:
         return None
-    rows = [[_json_value(rec.get(c)) for c in SAVED_COLUMNS]
-            for rec in t.to_dict(orient="records")]
-    return {"v": SAVED_VERSION, "id": str(save_id), "owner": owner,
-            "cols": list(SAVED_COLUMNS), "pasted_utc": _utc_iso(_parse_ts(pasted_utc)),
+    recs = t.to_dict(orient="records")
+    # A board with no typed pick is saved in version 1, which the code before
+    # picks also reads: a rollback, or an older process, keeps such a copy
+    # instead of refusing it and clearing it from the browser.
+    v = SAVED_VERSION if any(pick_of(r.get("pick")) for r in recs) else 1
+    cols = SAVED_LAYOUTS[v]
+    rows = [[_json_value(rec.get(c)) for c in cols] for rec in recs]
+    return {"v": v, "id": str(save_id), "owner": owner,
+            "cols": list(cols), "pasted_utc": _utc_iso(_parse_ts(pasted_utc)),
             "rows": rows}
 
 
-def _saved_row(row, lo: dt.date, hi: dt.date) -> dict | None:
+def _saved_row(row, lo: dt.date, hi: dt.date, cols=SAVED_COLUMNS) -> dict | None:
     """One kept line back as a parsed line (the shape _classify_and_resolve
-    reads), or None. Every field through the paste validators."""
-    if not isinstance(row, list) or len(row) != len(SAVED_COLUMNS):
+    reads), or None. Every field through the paste validators. `cols` is the
+    copy's own layout (SAVED_LAYOUTS)."""
+    if not isinstance(row, list) or len(row) != len(cols):
         return None
-    r = dict(zip(SAVED_COLUMNS, row))
+    r = dict(zip(cols, row))
     name = _text(r["name"], MAX_NAME_LEN)
     if name is None or not _person_like(name):
         return None
@@ -1592,13 +4574,14 @@ def _saved_row(row, lo: dt.date, hi: dt.date) -> dict | None:
             "league": _text(r["league"], 20),
             "game_date": gd,
             "game_id": gid if isinstance(gid, str) and _GAME_ID.match(gid) else None,
-            "tip_utc": _utc_iso(_parse_ts(tip)) if isinstance(tip, str) and len(tip) <= 40 else None}
+            "tip_utc": _utc_iso(_parse_ts(tip)) if isinstance(tip, str) and len(tip) <= 40 else None,
+            "pick": pick_of(r.get("pick"))}
 
 
-def _saved_row_or_none(row, lo: dt.date, hi: dt.date) -> dict | None:
+def _saved_row_or_none(row, lo: dt.date, hi: dt.date, cols=SAVED_COLUMNS) -> dict | None:
     """One bad row costs one row, as at every paste stage."""
     try:
-        return _saved_row(row, lo, hi)
+        return _saved_row(row, lo, hi, cols)
     except Exception:  # noqa: BLE001 - untrusted cell types
         return None
 
@@ -1609,15 +4592,18 @@ def restore_saved(payload, roster: pd.DataFrame, today: dt.date, now: dt.datetim
     ready for add_to_board(None, lines, pasted_utc=...), or None when nothing
     usable comes back. NEVER raises: the payload is whatever a browser sent.
 
-    The whole copy is refused when its shape is wrong, it holds more rows than
+    A copy in any SAVED_LAYOUTS version is read in its own layout. The whole
+    copy is refused when its shape is wrong, it holds more rows than
     a board can (BOARD_MAX_ROWS), or its paste time is unreadable, in the
     future or older than SAVED_MAX_AGE_DAYS. A row is dropped when any field
     fails the paste validators or its game is not between `today` and
     SAVED_AHEAD_DAYS later. Names are resolved again against `roster`."""
     try:
-        if not isinstance(payload, dict) or payload.get("v") != SAVED_VERSION:
+        if not isinstance(payload, dict):
             return None
-        if payload.get("cols") != list(SAVED_COLUMNS):
+        v = payload.get("v")
+        cols = SAVED_LAYOUTS.get(v) if type(v) is int else None
+        if cols is None or payload.get("cols") != list(cols):
             return None
         rows = payload.get("rows")
         if not isinstance(rows, list) or not rows or len(rows) > BOARD_MAX_ROWS:
@@ -1630,7 +4616,8 @@ def restore_saved(payload, roster: pd.DataFrame, today: dt.date, now: dt.datetim
         if age < -SAVED_MAX_SKEW_S or age > SAVED_MAX_AGE_DAYS * 86400:
             return None
         hi = today + dt.timedelta(days=SAVED_AHEAD_DAYS)
-        recs = [r for r in (_saved_row_or_none(row, today, hi) for row in rows) if r is not None]
+        recs = [r for r in (_saved_row_or_none(row, today, hi, cols) for row in rows)
+                if r is not None]
         if not recs:
             return None
         lines = _classify_and_resolve(pd.DataFrame(recs), roster)
@@ -1828,7 +4815,7 @@ TABLE_COLUMNS = [
     "q_more", "q_less", "confidence", "lean", "sides", "odds_type", "tier",
     "tier_edge", "tier_note", "games_prior", "thin", "void_risk", "mu_min",
     "void_note", "source", "how", "pasted_name", "model_version", "as_of",
-    "provisional", "adjusted", "tip_utc", "tie_possible",
+    "provisional", "adjusted", "tip_utc", "tie_possible", "pick",
 ]
 _GAMES_COLS = ("games_prior", "n_games", "games")
 _MIN_COLS = ("mu_min", "min")
@@ -2076,6 +5063,9 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
                 # On the stat's outcome grid, so an exact landing is possible:
                 # whole numbers for counts, tenths for Fantasy (35.5 can tie).
                 "tie_possible": abs(line / step - round(line / step)) < 1e-6,
+                # The side a typed list named: shown beside the lean, never
+                # used to price, rank or hide the line.
+                "pick": pick_of(rec.get("pick")),
             })
         except Exception as e:  # noqa: BLE001 - a bad row is counted, never raised
             meta["errors"] += 1
@@ -2090,7 +5080,13 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
         # counted like any refusal, so board_rows, the card pills and the
         # record never see them (audit 2026-10-09: they used to stay shown,
         # ranked first, More at q near 1, under a notice).
-        held = _period_suspect_rows(table)
+        # The visitor's own picks are never withheld, and lend the suspicion
+        # their players but never their lines: a typed Goblin list sits far
+        # below the medians by design (review 2, I3), while two quarter
+        # squares beside a typed pick are still a quarter board (review 3,
+        # R3). A period written on a pick, or on its section label, was
+        # refused at the paste.
+        held = _period_suspect_rows(table, _picked(table))
         if held.any():
             for label in table.loc[held, "stat_label"]:
                 shown_label = f"{label} (looks like a quarter or half board)"
@@ -2138,26 +5134,49 @@ PERIOD_RATIO = 0.55
 PERIOD_MIN_PLAYERS = 3
 
 
-def _period_group_suspect(t: pd.DataFrame) -> bool:
-    mean = pd.to_numeric(t["mean"], errors="coerce")
-    line = pd.to_numeric(t["line"], errors="coerce")
-    keep = (mean > 2.0) & line.notna()
-    if not keep.any():
+def _period_group_suspect(t: pd.DataFrame, picked=None) -> bool:
+    """PERIOD_MIN_PLAYERS players, and the median player's line/mean ratio
+    under PERIOD_RATIO. The visitor's own picks (`picked`) count as players
+    but never set the ratio, and at least two board players must show it
+    themselves: a pick completes a period board, never makes one. Goblin and
+    Demon rungs sit off the standard number by design, so they count as
+    players but set the ratio only when fewer than two standard players do,
+    and then against a bar twice as strict: two Goblins and a pick are no
+    quarter board (review 4, B6), while a quarter board copied as text with
+    its Goblin rungs and one standard square still is (review 5, B8)."""
+    mean = pd.to_numeric(t["mean"], errors="coerce").to_numpy(dtype=float)
+    line = pd.to_numeric(t["line"], errors="coerce").to_numpy(dtype=float)
+    pk = np.zeros(len(t), dtype=bool) if picked is None else np.asarray(picked, dtype=bool)
+    alt = (t["odds_type"].astype(str).str.lower().isin(["goblin", "demon"]).to_numpy()
+           if "odds_type" in t.columns else np.zeros(len(t), dtype=bool))
+    keep = (mean > 2.0) & np.isfinite(line)
+    pid = pd.Series(t["person_id"].to_numpy(dtype=object))
+
+    def player_ratios(rows: np.ndarray) -> pd.Series:
+        if not rows.any():
+            return pd.Series(dtype=float)
+        return pd.Series(line[rows] / mean[rows]).groupby(pid[rows].to_numpy()).median()
+
+    ratio, bar = player_ratios(keep & ~pk & ~alt), PERIOD_RATIO
+    if len(ratio) < 2:
+        ratio, bar = player_ratios(keep & ~pk), PERIOD_RATIO / 2
+    if len(ratio) < 2 or float(ratio.median()) >= bar:
         return False
-    ratio = (line[keep] / mean[keep]).groupby(t.loc[keep, "person_id"]).median()
-    return len(ratio) >= PERIOD_MIN_PLAYERS and float(ratio.median()) < PERIOD_RATIO
+    return int(pid[keep].dropna().nunique()) >= PERIOD_MIN_PLAYERS
 
 
-def _period_suspect_rows(table: pd.DataFrame) -> np.ndarray:
-    """Rows of a compare() table that belong to a suspected period board."""
+def _period_suspect_rows(table: pd.DataFrame, picked=None) -> np.ndarray:
+    """Rows of a compare() table that belong to a suspected period board,
+    never the visitor's own picks (`picked`)."""
     if table is None or table.empty:
         return np.zeros(0, dtype=bool)
-    if _period_group_suspect(table):
-        return np.ones(len(table), dtype=bool)
+    pk = np.zeros(len(table), dtype=bool) if picked is None else np.asarray(picked, dtype=bool)
+    if _period_group_suspect(table, pk):
+        return ~pk
     mask = np.zeros(len(table), dtype=bool)
     for _gid, idx in table.groupby(table["game_id"].astype(str), sort=False).indices.items():
-        if _period_group_suspect(table.iloc[idx]):
-            mask[idx] = True
+        if _period_group_suspect(table.iloc[idx], pk[idx]):
+            mask[idx] = ~pk[idx]
     return mask
 
 

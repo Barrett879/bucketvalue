@@ -272,9 +272,9 @@ elif TOKEN:
     n = 0 if todays is None else len(todays)
     if n:
         st.markdown(store.render_notice(
-            f"<b>{n} PrizePicks lines saved for {view.strftime('%B %-d')}.</b> The model "
-            "comparison appears here once projections are published for this date; your "
-            "board stays attached to this link until then."), unsafe_allow_html=True)
+            f"<b>{n} {'line' if n == 1 else 'lines'} saved for {view.strftime('%B %-d')}.</b> "
+            "The model comparison appears here once projections are published for this "
+            "date; your board stays attached to this link until then."), unsafe_allow_html=True)
 elif ROSTER is not None and FRAME is not None and len(FRAME) \
         and any(s == "upcoming" for s in states.values()):
     # DiamondValue's empty-board prompt: a paste could still land on this date.

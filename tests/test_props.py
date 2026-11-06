@@ -866,7 +866,9 @@ def test_the_browser_copy_holds_a_pastes_fields_never_a_verdict_or_a_token(
     payload = props.saved_board(props.get_board(token), None, "s1", TODAY)
     text = json.dumps(payload, allow_nan=False)
     assert token not in text
-    assert payload["cols"] == list(props.SAVED_COLUMNS)
+    # No typed pick on a feed board: saved in version 1, which the code before
+    # picks also reads (a rollback keeps the copy).
+    assert payload["v"] == 1 and payload["cols"] == list(props.SAVED_LAYOUTS[1])
     for verdict in ("person_id", "match", "how", "roster_name", "roster_team", "stat"):
         assert verdict not in payload["cols"]
 
@@ -881,13 +883,13 @@ def _row(**over):
     r = {"name": "Nikola Jokic", "team_code": "DEN", "stat_type": "Points", "line": 27.5,
          "direction": "both", "odds_type": "standard", "opp": "GSW", "is_combo": False,
          "league": None, "game_date": "2026-10-21", "game_id": "0022600001",
-         "tip_utc": "2026-10-22T02:00:00+00:00"}
+         "tip_utc": "2026-10-22T02:00:00+00:00", "pick": None}
     r.update(over)
     return [r[c] for c in props.SAVED_COLUMNS]
 
 
 def test_a_kept_board_is_only_games_still_to_come(roster):
-    frame = pd.DataFrame([dict(zip(props.SAVED_COLUMNS, _row(game_date=d)))
+    frame = pd.DataFrame([dict(zip(props.SAVED_COLUMNS, _row(game_date=d, pick="more")))
                           for d in (None, "2026-10-19", "2026-10-20", "2026-10-21")])
     payload = props.saved_board(frame, None, "s1", TODAY)
     assert [r[props.SAVED_COLUMNS.index("game_date")] for r in payload["rows"]] == \
@@ -902,7 +904,8 @@ def test_a_kept_board_is_only_games_still_to_come(roster):
 
 @pytest.mark.parametrize("payload", [
     None, [], "x", 5, {},
-    _kept([_row()], v=2),
+    _kept([_row()], v=3), _kept([_row()], v=True), _kept([_row()], v="2"),
+    _kept([_row()], v=1),                       # version 1 never had a pick column
     _kept([_row()], cols=list(reversed(props.SAVED_COLUMNS))),
     _kept("rows"), _kept([]), _kept([_row()] * (props.BOARD_MAX_ROWS + 1)),
     _kept([_row()], pasted=None), _kept([_row()], pasted="garbage"),
@@ -1785,7 +1788,8 @@ def test_the_keeper_saves_after_a_paste_and_forgets_after_clear_all(board_text, 
     token = _board_param(at)
     board, data = props.get_board(token), _keeper(at)
     kept = data["save"]
-    assert kept["cols"] == list(props.SAVED_COLUMNS) and token not in json.dumps(kept)
+    assert kept["cols"] == list(props.SAVED_LAYOUTS[kept["v"]]) and kept["v"] == 1
+    assert token not in json.dumps(kept)
     assert kept["owner"] == props_ui._owner(token)
     to_come = board["game_date"].map(lambda d: isinstance(d, str) and d >= TODAY.isoformat())
     assert len(kept["rows"]) == int(to_come.sum()) > 0

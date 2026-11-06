@@ -313,10 +313,11 @@ if board is not None:
     elif sum(len(x) for x in mine):
         when = props_ui.paste_time_text(board.meta)
         st.markdown(
-            f'<div class="bv-note"><b>Your PrizePicks lines on this game:</b> '
+            f'<div class="bv-note"><b>Your lines on this game:</b> '
             f"{esc(props_ui.count_header(*mine))}.{' ' + esc(when) if when else ''} A teal "
             "count beside a name is how many lines he has: open him under his team's table "
-            "to compare each line with his median.</div>",
+            "to compare each line with his median."
+            f"{props_ui.hidden_picks_text(mine[1], game_page=True)}</div>",
             unsafe_allow_html=True)
 
 positions = (dict(zip(ROSTER["person_id"].astype("int64"), ROSTER["position"].astype(str)))

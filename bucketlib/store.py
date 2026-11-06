@@ -225,7 +225,7 @@ def render_slate_card(row, date: dt.date, keep: dict, odds: dict | None = None,
     lines_html = ""
     if n_lines > 0:
         unit = "line" if n_lines == 1 else "lines"
-        what = f"{n_lines} of your PrizePicks {unit} shown for this game"
+        what = f"{n_lines} of your lines shown for this game"
         lines_html = (f'<span class="bv-slate-lines" title="{what}" aria-label="{what}">'
                       f'<b>{n_lines}</b><span class="u">{unit}</span></span>')
     title = f"{teams.get(away).full_name} at {teams.get(home).full_name}"

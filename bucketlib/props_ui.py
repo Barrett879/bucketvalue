@@ -146,6 +146,7 @@ PROPS_CSS = """
     letter-spacing: 0.04em; text-transform: uppercase; vertical-align: middle;
     border: 1px solid var(--panel-line); color: var(--fg-4); cursor: help; }
 .bv-pp-tag.void { border-color: var(--amber); color: var(--amber); }
+.bv-pp-tag.pick { border-color: var(--accent-teal); color: var(--accent-teal); }
 .bv-pp-ledger-note { color: var(--fg-5); font-size: 0.74rem; margin: 0.1rem 0 0.4rem; }
 </style>
 """
@@ -347,6 +348,21 @@ def ingest(text, token, roster, schedule, now=None, dates=None) -> tuple[str | N
             if "period_held" in info:
                 report["period_held"] = int(info.get("period_held") or 0)
                 report["period_held_by_date"] = dict(info.get("period_held_by_date") or {})
+                # Of those, the ones held below a typed pick's number alone,
+                # whose message names the pick (review 4, A8, B5).
+                report["period_held_pick"] = int(info.get("period_held_pick") or 0)
+                report["period_held_pick_names"] = list(
+                    info.get("period_held_pick_names") or [])[:8]
+            # Lines the merge set aside for a typed pick at another number
+            # (props.collapse_alt_lines, review 3, R8): counted, never loaded.
+            # The paste's own were never counted as comparable.
+            merged = int(info.get("pick_kept") or 0)
+            report["pick_kept_merge"] = merged
+            report["pick_kept_by_date"] = dict(info.get("pick_kept_by_date") or {})
+            report["pick_kept"] = int(report.get("pick_kept", 0) or 0) + merged
+            names = list(report.get("pick_kept_names") or []) + \
+                list(info.get("pick_kept_names") or [])
+            report["pick_kept_names"] = list(dict.fromkeys(names))[:8]
     except Exception as e:  # noqa: BLE001 - never a traceback on the page
         logger.warning("paste ingest failed (%s: %s)", type(e).__name__, e)
         report["error"] = True
@@ -418,17 +434,48 @@ def _empty_reason(report: dict) -> str:
     if p.get("json_shape"):
         return ("That is JSON, but not the PrizePicks projections feed. Open the "
                 "feed link above and copy the whole page.")
-    return "Nothing readable in that paste. Paste the feed JSON or the board text."
+    if p.get("typed_noname"):
+        one = int(p["typed_noname"]) == 1
+        return (f"{_plural(p['typed_noname'], 'line')} in that paste "
+                f"{'reads like a pick but names' if one else 'read like picks but name'} "
+                "no player in full, so nothing was added. Write each player's first and last "
+                "name, as in Miles Bridges over 6.5 Rebounds + Assists.")
+    if p.get("typed_unread"):
+        one = int(p["typed_unread"]) == 1
+        return (f"{_plural(p['typed_unread'], 'line')} in that paste "
+                f"{'looks like a pick but holds' if one else 'look like picks but hold'} "
+                "more than one number, so nothing was added. Write one pick per line with "
+                "its line as the only number, as in Miles Bridges over 6.5 Rebounds + Assists.")
+    if p.get("typed_unclear"):
+        one = int(p["typed_unclear"]) == 1
+        reads = ("reads like a pick, but which side it takes" if one
+                 else "read like picks, but which side they take")
+        return (f"{_plural(p['typed_unclear'], 'line')} in that paste {reads} "
+                "could not be told (a Yes or No that may belong to a note), so nothing was "
+                "added. Write the side you take, as in Jalen Brunson under 25.5 points.")
+    if p.get("typed_recap"):
+        one = int(p["typed_recap"]) == 1
+        return (f"{_plural(p['typed_recap'], 'line')} in that paste "
+                f"{'reads like a result' if one else 'read like results'}, not "
+                f"{'a pick' if one else 'picks'} (a word such as cashed, missed or won), so "
+                "nothing was added. Paste picks for games still to come, one per line, as in "
+                "Miles Bridges over 6.5 Rebounds + Assists.")
+    return ("Nothing readable in that paste. Paste the feed JSON, the board text, or a "
+            "list with one pick per line, such as Miles Bridges over 6.5 Rebounds + "
+            "Assists.")
 
 
 def toast_count(report: dict | None) -> int:
     """Lines the toast may announce: the ones that can reach a board at all
-    (a mapped stat, a matched player, an upcoming game). Never `kept`, which
-    counts refused, unrecognised and unmatched lines too (audit 2026-10-09)."""
+    (a mapped stat, a matched player, an upcoming game), less those the merge
+    held back as period lines or set aside for a typed pick. Never `kept`,
+    which counts refused, unrecognised and unmatched lines too (audit
+    2026-10-09)."""
     if not report or report.get("error"):
         return 0
     held = int(report.get("period_held", 0) or 0)
-    return max(0, int(report.get("comparable", 0) or 0) - held)
+    aside = int(report.get("pick_kept_merge", 0) or 0)
+    return max(0, int(report.get("comparable", 0) or 0) - held - aside)
 
 
 _WHY_WORDS = {"not priced": "not priced (period props, Dunks, two-player squares and the like)",
@@ -467,41 +514,93 @@ def report_messages(report: dict | None) -> list[tuple[str, str]]:
         return [("warning", _empty_reason(report))]
     view = report.get("view_date")
     held_by = report.get("period_held_by_date") or {}
-    by_date = {d: int(n) - int(held_by.get(d, 0) or 0)
+    kept_by = report.get("pick_kept_by_date") or {}
+    by_date = {d: int(n) - int(held_by.get(d, 0) or 0) - int(kept_by.get(d, 0) or 0)
                for d, n in (report.get("comparable_by_date") or {}).items()}
     by_date = {d: n for d, n in by_date.items() if n > 0}
     here = int(by_date.get(view, 0)) if view else 0
     held = int(report.get("period_held", 0) or 0)
+    below = min(held, int(report.get("period_held_pick", 0) or 0))
     wrong = report.get("wrong_board")
-    if held:
-        out.append(("warning", f"{_plural(held, 'line')} sat far below the full-game line "
-                    "already on your board, so they were held back: that looks like a "
-                    "quarter or half board. Paste the full-game board."))
+    if held - below:
+        one = held - below == 1
+        out.append(("warning", f"{_plural(held - below, 'line')} sat far below the full-game "
+                    f"line already on your board, so {'it was' if one else 'they were'} held "
+                    "back: that looks like a quarter or half board. Paste the full-game board."))
+    if below:
+        # Below a typed pick's number with no board line to go by: a quarter
+        # square, or the full-game board under a Demon typed above it. Which
+        # it is cannot be told, so the message says both (review 4, A8, B5).
+        names = ", ".join(md_escape(x) for x in (report.get("period_held_pick_names") or []))
+        one = below == 1
+        if one:
+            said = (f"1 line sat far below the pick you typed for the same player and stat"
+                    f"{f' ({names})' if names else ''}, so it was held back and the board keeps "
+                    "your pick. If that paste is the full-game board, type the pick again at "
+                    "the board's number to compare it.")
+        else:
+            # Each held line under its own pick (review 5, A20).
+            said = (f"{below} lines sat far below the picks you typed for the same players "
+                    f"and stats{f' ({names})' if names else ''}, so they were held back and the "
+                    "board keeps your picks. If that paste is the full-game board, type those "
+                    "picks again at the board's numbers to compare them.")
+        out.append(("warning", said))
     if comparable <= 0 and wrong:
         out.append(("warning", f"That is the {md_escape(wrong)} board, not the full-game NBA "
                     "board, so nothing in it can be compared. Open the NBA board (or the "
                     "feed link above) and copy that."))
+    aside = int(report.get("pick_kept", 0) or 0)
+    also = None                    # the other lines' reasons, said after the set-aside ones
     if comparable > 0:
         if here:
-            out.append(("success", f"{_plural(comparable, 'line')} loaded. {here} are for "
-                        f"{_fmt_date(view)}: see Model vs the board on the slate and on "
-                        "each game page."))
+            out.append(("success", f"{_plural(comparable, 'line')} loaded. {here} "
+                        f"{'is' if here == 1 else 'are'} for {_fmt_date(view)}: see Model vs "
+                        "the board on the slate and on each game page."))
         else:
             out.append(("success", f"{_plural(comparable, 'line')} loaded."))
         if why:
             out.append(("info", f"Also in that paste and not compared: {why}."))
-    elif report.get("nonempty") and not wrong and not held:
+    elif report.get("nonempty") and not wrong and (held or aside):
+        # Every comparable line was held back or set aside: their message
+        # says why, and the paste's other lines are still explained
+        # (review 4, B11).
+        also = f"Also in that paste and not compared: {why}." if why else None
+    elif report.get("nonempty") and not wrong:
         head = f"None of the {_plural(kept, 'line')} in that paste can be compared"
         out.append(("warning", f"{head}: {why}." if why else f"{head}."))
+    if aside:
+        # A board line a typed pick outranks at another number (review 3, R8).
+        names = ", ".join(md_escape(x) for x in (report.get("pick_kept_names") or []))
+        one = aside == 1
+        out.append(("info" if comparable > 0 else "warning",
+                    f"{_plural(aside, 'line')} in that paste {'was' if one else 'were'} set "
+                    "aside for a pick you typed for the same player and stat at another "
+                    f"number ({names}). The board keeps your pick's number; type the pick "
+                    "again at the board's number to compare that line instead."))
+    if also:
+        out.append(("info", also))
     for d, n in sorted(by_date.items()):
         if d != view:
             out.append(("info", f"{_plural(int(n), 'line')} saved for {_fmt_date(d)}, "
                         "step the date to see them."))
-    if unrouted:
-        names = ", ".join(md_escape(x) for x in (report.get("unrouted_names") or []))
-        out.append(("info", f"{_plural(unrouted, 'line')} could not be placed on an "
-                    f"upcoming game ({names}). A name with no team, or a player whose "
-                    "game has already tipped, cannot be filed."))
+    tipped = min(int(report.get("tipped", 0) or 0), unrouted)
+    if tipped:
+        names = ", ".join(md_escape(x) for x in (report.get("tipped_names") or []))
+        one = tipped == 1
+        out.append(("info", f"{_plural(tipped, 'line')} {'is' if one else 'are'} for a game "
+                    f"that has already started ({names}), so {'it' if one else 'they'} "
+                    "cannot be compared. A line has to be pasted before its game tips."))
+    if unrouted - tipped:
+        late = set(report.get("tipped_names") or []) if tipped else set()
+        rest = [x for x in (report.get("unrouted_names") or []) if x not in late]
+        names = ", ".join(md_escape(x) for x in rest)
+        # A third reason since typed lists (review 3, R6): a matchup written
+        # on the list ("@ Heat", "Knicks vs Nets") that the schedule does
+        # not have coming up.
+        out.append(("info", f"{_plural(unrouted - tipped, 'line')} could not be placed on an "
+                    f"upcoming game{f' ({names})' if names else ''}. A name with no team, "
+                    "a player whose game has already tipped, or a matchup that is not on "
+                    "the upcoming schedule cannot be filed."))
     dropped = int(report.get("dropped_by_cap", 0) or 0)
     if dropped:
         out.append(("warning", f"Your board is at its limit of {props.BOARD_MAX_ROWS} lines, "
@@ -517,6 +616,55 @@ def report_messages(report: dict | None) -> list[tuple[str, str]]:
     if p.get("skipped_noname"):
         out.append(("info", f"{_plural(p['skipped_noname'], 'line')} carried no player "
                     "name (a team code where the name should be) and were skipped."))
+    if p.get("typed_noname"):
+        one = int(p["typed_noname"]) == 1
+        out.append(("info", f"{_plural(p['typed_noname'], 'line')} "
+                    f"{'reads like a pick but names' if one else 'read like picks but name'} "
+                    "no player in full (first and last name), so "
+                    f"{'it was' if one else 'they were'} skipped."))
+    if p.get("typed_unread"):
+        one = int(p["typed_unread"]) == 1
+        out.append(("info", f"{_plural(p['typed_unread'], 'line')} "
+                    f"{'looks like a pick but holds' if one else 'look like picks but hold'} "
+                    "more than one number, so "
+                    f"{'it was' if one else 'they were'} skipped. Write one pick per line "
+                    "with its line as the only number."))
+    if p.get("typed_unclear"):
+        # "No, I like Jalen Brunson over 25.5 points", "over 25.5 points, no
+        # for real": a Yes or No that may be the answer or a note's, never
+        # guessed (review 6, B5, B6).
+        one = int(p["typed_unclear"]) == 1
+        reads = ("reads like a pick, but which side it takes" if one
+                 else "read like picks, but which side they take")
+        out.append(("info", f"{_plural(p['typed_unclear'], 'line')} {reads} "
+                    "could not be told (a Yes or No that may belong to a note), so "
+                    f"{'it was' if one else 'they were'} skipped. Write the side you take, "
+                    "as in Jalen Brunson under 25.5 points."))
+    n = min(int(p.get("typed_period_label") or 0), int(nc.get("not priced", 0) or 0))
+    if n:
+        # A label, heading or name line naming a period refuses every pick
+        # under it, which is the safe side; the report says so, since the
+        # picks may be full-game ones under a remark (review 6, B12). Never
+        # more of them than the paste's own "not priced" count, and the
+        # first minutes said too (review 7, A13).
+        one = n == 1
+        out.append(("info", f"{_plural(n, 'line')} sat under a line that names a quarter, a "
+                    "half or the first minutes (such as 1Q props), so "
+                    f"{'it was' if one else 'they were'} read as "
+                    f"{'a pick' if one else 'picks'} for that period, which is not priced. "
+                    f"If {'it is' if one else 'they are'} for the full game, take the period off "
+                    "that line and paste again."))
+    if p.get("typed_recap"):
+        # "Jalen Brunson o25.5 pts - cashed": a result, never filed as a pick
+        # for the next game (review 4, A7, B7). Wherever the word sat, and with
+        # advice only for a pick wrongly taken as a result (review 5, B12).
+        one = int(p["typed_recap"]) == 1
+        out.append(("info", f"{_plural(p['typed_recap'], 'line')} "
+                    f"{'reads like a result' if one else 'read like results'}, not "
+                    f"{'a pick' if one else 'picks'} (a word such as cashed, missed or won), "
+                    f"so {'it was' if one else 'they were'} skipped. "
+                    f"{'If it is' if one else 'If any is'} a pick for a game still to come, "
+                    "type it without that word to compare it."))
     if p.get("truncated"):
         out.append(("info", "The paste was cut short at its size limit, so some of it "
                     "was not read. Paste one board or one feed page at a time."))
@@ -688,11 +836,17 @@ def _paste_panel(view_date, schedule, roster, now, dates) -> None:
             "2. Select all and copy.<br>"
             "3. Paste below and click <b>Add these lines</b>. Each line lands on the "
             "date of its own game, so an evening copy of tomorrow's board files "
-            "itself under tomorrow.",
+            "itself under tomorrow.<br>"
+            "Your own list works too, one pick per line, such as <i>Miles Bridges over "
+            "6.5 Rebounds + Assists</i>. A team on a line of its own (<i>Suns:</i>) says "
+            "whose players follow, and the Over or Under you wrote shows beside the model's "
+            "lean as your pick.",
             unsafe_allow_html=True)
-    st.text_area("Paste the feed JSON or the board text", height=150, key=PASTE_KEY,
-                 placeholder=("Paste the copied feed page here, or the board text:\n"
-                              "Nikola Jokic\nDEN - C\n27.5\nPoints\nLess\nMore"))
+    st.text_area("Paste the feed JSON, the board text or your own list", height=150,
+                 key=PASTE_KEY,
+                 placeholder=("Paste the copied feed page here, the board text:\n"
+                              "Nikola Jokic\nDEN - C\n27.5\nPoints\nLess\nMore\n"
+                              "or your own list:\nMiles Bridges over 6.5 Rebounds + Assists"))
     token = board_token()
     has_own = token is not None or bool((st.session_state.get(PASTE_KEY) or "").strip())
     c_add, c_clear = st.columns([2.4, 1], gap="small")
@@ -773,6 +927,22 @@ def _sides_tag(sides) -> str:
     return ""
 
 
+def _pick_tag(r) -> str:
+    """The side a typed list named ("Pick: More"), beside the model's lean and
+    never in place of it: the lean is still the row's colour and its own
+    column. Worded for anyone who opens the board, since a shared link shows
+    the sharer's picks to someone who did not make them (review 2, I12)."""
+    side = props.pick_of(r.get("pick"))
+    if side is None:
+        return ""
+    word = "More" if side == "more" else "Less"
+    lean = r.get("lean")
+    said = (f"The model leans {lean}." if lean in ("More", "Less")
+            else "The model has no lean on this line.")
+    tip = f"The pick in the pasted list: {word}. {said}"
+    return f'<span class="bv-pp-tag pick" title="{esc(tip)}">Pick: {word}</span>'
+
+
 def _void_tag(r) -> str:
     """Reboot: PrizePicks voids a More pick if the player leaves in the first
     half and does not return. Nothing measures how often by role yet (an exit
@@ -806,7 +976,8 @@ def _stat_cell(r) -> str:
     return (f'<span class="st"{tip}>{esc(label)}'
             f'{_tier_badge(r.get("tier"), r.get("tier_edge"))}'
             f'{_odds_badge(r.get("odds_type"))}{_sides_tag(r.get("sides"))}'
-            f'{_SRC_BADGE.get(str(r.get("source") or ""), "")}{_void_tag(r)}</span>')
+            f'{_SRC_BADGE.get(str(r.get("source") or ""), "")}{_void_tag(r)}'
+            f'{_pick_tag(r)}</span>')
 
 
 def _lean_cls(lean) -> str:
@@ -986,6 +1157,42 @@ def odds_footnote(table) -> str:
         "offer is left out.")
 
 
+def hidden_picks_text(hidden, game_page: bool = False) -> str:
+    """The typed picks among the hidden rows, or ''. The board hides a coin
+    flip and a lean the line does not offer; a reader looking for a pick
+    there is told which it was, and why, said of the model's lean, since the
+    pick itself may be the side the line offers (review 3, R9). On the slate
+    it follows the hidden-lines note (' The pasted pick among them: Miles
+    Bridges Rebs+Asts (picked More; the model has no lean on it).'); the
+    Game page has no such note, so it says the pick is not shown (review 2,
+    I11). Escaped HTML."""
+    if hidden is None or not len(hidden) or "pick" not in hidden:
+        return ""
+    mine = hidden[hidden["pick"].map(props.pick_of).notna()]
+    if mine.empty:
+        return ""
+    named = ", ".join(
+        f"{esc(r.get('player'))} {esc(props.STAT_LABEL.get(r.get('stat'), r.get('stat') or ''))}"
+        f" (picked {'More' if props.pick_of(r.get('pick')) == 'more' else 'Less'}; "
+        f"{_hidden_why(r)})"
+        for r in mine.head(6).to_dict(orient="records"))
+    more = ", and others" if len(mine) > 6 else ""
+    one = len(mine) == 1
+    if game_page:
+        return f" Not shown here: the pasted {'pick' if one else 'picks'} {named}{more}."
+    return f" The pasted {'pick' if one else 'picks'} among them: {named}{more}."
+
+
+def _hidden_why(r) -> str:
+    """Why a typed pick's row is hidden, said of the model's lean: on a
+    More-only square a More pick is playable, and the model's Less is what
+    the line does not offer."""
+    lean = r.get("lean")
+    if lean in ("More", "Less"):
+        return f"the model leans {lean}, a side this line does not offer"
+    return "the model has no lean on it"
+
+
 def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
     """Every explanation the board owes the reader, as escaped HTML blocks."""
     meta = meta or {}
@@ -1047,11 +1254,12 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
         off = len(hidden) - even
         bits = []
         if off:
-            bits.append(f"{off} lean a side the line does not offer")
+            bits.append(f"{off} {'leans' if off == 1 else 'lean'} a side the line does not offer")
         if even:
-            bits.append(f"{even} sit on a coin flip with no lean")
+            bits.append(f"{even} {'sits' if even == 1 else 'sit'} on a coin flip with no lean")
         out.append(_note(f"<b>{_plural(len(hidden), 'line')} hidden:</b> "
-                         + " and ".join(bits) + ". There is no pick to show on those."))
+                         + " and ".join(bits) + ". There is no pick to show on those."
+                         + hidden_picks_text(hidden)))
     if void is not None and len(void):
         names = sorted({str(x) for x in void["player"]})
         out.append(_note(
@@ -1177,7 +1385,7 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
         return 0
     period = int(meta.get("period_withheld", 0) or 0) if meta.get("period_board_suspect") else 0
     if n[0]:
-        st.success(f"{_plural(posted, 'PrizePicks line')} on file for "
+        st.success(f"{_plural(posted, 'line')} on file for "
                    f"{md_escape(scope_label)}, {n[0]} shown.")
     elif matched == 0 and not period:
         st.markdown(none_matched_html(posted, scope_label), unsafe_allow_html=True)
