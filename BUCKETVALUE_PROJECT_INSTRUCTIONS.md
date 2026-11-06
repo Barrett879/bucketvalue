@@ -276,8 +276,15 @@ percentiles. Targets that fail ship a labelled baseline.
   (a new Streamlit session), so a visitor's board lives SERVER-SIDE in an in-process
   LRU store keyed by an unguessable `?board=` token carried by every minted URL (nav,
   cards, back links, share); mark-outs live in the URL as `?out=pid,pid`. Never on
-  disk, never frozen. Test: paste on `/`, follow a card, the /Game line count equals
-  the card pill.
+  the server's disk, never frozen. Test: paste on `/`, follow a card, the /Game line
+  count equals the card pill.
+- **A visitor's board survives a reload, a bare link and a restart** (Barrett,
+  2026-11-05: "I have to reenter them every time I refresh"): after THEIR paste, the
+  page keeps a copy in THEIR browser (localStorage, props_ui.board_keeper) and, when
+  a page opens with no live board, brings it back under a fresh token
+  (props.restore_saved: the copy is a second paste box, re-validated and re-matched;
+  lines for games already played are dropped). Never on the server's disk; a board
+  opened from someone else's link is never copied; Clear all removes the copy.
 - `/`: nav (wordmark, Home, About; right cluster Update lines, Share, theme toggle);
   masthead (NBA PROJECTIONS kicker; tiles: games, first tip ET, injury reports filed
   X/30 with as-of time); date bar (chevrons, date, Yesterday/Today/Tomorrow; the
@@ -310,7 +317,7 @@ percentiles. Targets that fail ship a labelled baseline.
   footnote, hidden-side counts, "N of M lines" header and refusal reasons, GAP column
   not a percentage, green banner + toast after a paste, each line routed to its own
   game's ET date with a "lines saved for <date>, step the date" pointer, visitor
-  Clear all (session only), VPN warning, FEED_URL as a link only. GridironValue's
+  Clear all (the link and this browser's copy), VPN warning, FEED_URL as a link only. GridironValue's
   FREEZE_KEYS comment is false (says it includes `line`); do not copy it.
 - Preseason dates: "Preseason: no projections". Empty dates: "Next slate <date>".
   Cup knockout placeholders render as TBD.

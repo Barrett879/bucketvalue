@@ -18,6 +18,15 @@ headless = true
 # app.py, which is where Streamlit expects them, so the flag is all that was
 # missing.
 enableStaticServing = true
+# The largest websocket message, in MB (Streamlit's default is 200). A full
+# PrizePicks slate pasted pretty-printed is ~11.5M characters (~6,000 lines),
+# so 24 fits ~12,000 lines; props.MAX_PASTE_CHARS sits just under it so an
+# oversized paste gets the panel's own message, not a dropped connection.
+# The board keeper (props_ui) puts a JSON-valued widget on every page, which
+# Streamlit parses and copies before any app code runs: a hostile '[],[],...'
+# message costs ~43 bytes of memory per character, so the 200 MB default
+# would let one message exhaust the host (review 2026-11-05).
+maxMessageSize = 24
 
 [browser]
 gatherUsageStats = false

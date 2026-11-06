@@ -9,8 +9,11 @@ DiamondValue's paste flow, with BucketValue's two structural differences:
    is a full page load, a fresh Streamlit session, so st.session_state cannot
    carry a paste from the slate to a game page. props.new_board / add_to_board
    keep it in an in-process LRU under an unguessable token, and every minted
-   URL carries the token (keep_params). Never on disk, never frozen, never seen
-   by another visitor.
+   URL carries the token (keep_params). Never on the server's disk, never
+   frozen; seen only by whoever holds the link. Since 2026-11-05 the visitor's
+   OWN browser also keeps a copy (board_keeper, localStorage), so a reload, a
+   bare link or a server restart brings the lines back (Barrett: "I have to
+   reenter them every time I refresh").
 2. ONE DEFINITION. board_view() runs compare() and props.board_rows() once;
    the card pills, the board ledger and the per-player rows all read its four
    frames, so a pill can never promise more lines than the game page shows.
@@ -22,7 +25,9 @@ The accuracy record is LOCAL ONLY and is not imported or called from here.
 """
 from __future__ import annotations
 
+import hashlib
 import math
+import secrets
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -30,13 +35,106 @@ import streamlit as st
 
 from . import props, simprov
 from .cache import logger
-from .util import SENTINEL, esc, fmt_tip, to_et
+from .util import SENTINEL, esc, fmt_tip, now_utc, to_et, today_et
 
 PASTE_KEY = "bv_pp_paste"
 REPORT_KEY = "bv_pp_report"
 TOAST_KEY = "bv_pp_toast"
 EXPIRED_KEY = "bv_pp_expired"
 TOP_N = 25
+
+# ── The browser's copy of the visitor's board (props.saved_board) ─────────────
+# One hidden st.components.v2 component (no iframe: its JS runs in the page and
+# reads and writes ONE localStorage key of this site's own origin). The page
+# talks to it through `data`; it answers through one-shot triggers, read from
+# the mount's return value on the run they arrive with (inside an
+# on_*_change callback the value is NOT readable in Streamlit 1.59: measured).
+#
+# board_keeper runs at the TOP of a page, before the nav and every widget, so a
+# board it restores is on the link for that whole run: no st.rerun(), which
+# mid-script would drop the state of every widget registered later in the
+# page (review 2026-11-05).
+#   save    after a paste that made a NEW board (never for a board only
+#           opened from someone else's link), and again after a restore so
+#           the copy follows the fresh token. Resent until acknowledged
+#           ("saved") or refused ("failed": storage blocked or full).
+#   clear   after Clear all, naming the board on screen by a hash of its
+#           token (never the token), plus the copy this session restored it
+#           from: the browser removes its copy only when the copy is that
+#           board's, so Clear all on a friend's link leaves the visitor's own
+#           copy alone. Resent until acknowledged.
+#   want    while the link carries no live board: one id per session (and a
+#           new one each time a board dies mid-session), answered once per id
+#           and only when the browser holds a copy ("restore"), so a visitor
+#           without one costs nothing.
+# An answer counts only while its request is outstanding: Streamlit lets a
+# hand-built client hold any value in the component's state, which the result
+# merges over the one-shot triggers.
+KEEPER_KEY = "bv_board_keeper"      # the component's key (Streamlit owns this state entry)
+KEEP_SAVE = "bv_keep_save"          # pending save payload
+KEEP_CLEAR = "bv_keep_clear"        # pending clear {"id", "owner"}
+KEEP_SENT = "bv_keep_sent"          # runs a pending save or clear has been sent
+KEEP_RESEND = 4                     # give up on an unacknowledged write after this many runs
+KEEP_DONE = "bv_keep_done"          # the browser answered this session's restore request
+KEEP_NONCE = "bv_keep_nonce"        # this session's id for its restore request
+KEEP_FAILED = "bv_keep_failed"      # the browser would not keep the board
+KEEP_RESTORED = "bv_keep_restored"  # lines brought back (for the toast)
+KEEP_ADOPTED = "bv_keep_adopted"    # owner of the copy this session restored
+KEEPER_STORAGE_KEY = "bucketvalue.board.v1"
+KEEPER_JS = """
+// BucketValue keeps the visitor's pasted board in THIS browser so a reload
+// brings it back (props_ui.board_keeper). One storage key of this site's own
+// origin; no network. Each id is handled once per page load, because
+// Streamlit calls this again whenever `data` changes. Clear runs before
+// restore, so a Clear all can never be undone by a pending restore request.
+const KEY = 'bucketvalue.board.v1';
+const seen = new Set();
+function storage() {
+  try { return window.localStorage; } catch (e) { return null; }
+}
+function readCopy(store) {
+  try {
+    const raw = store ? store.getItem(KEY) : null;
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return { unreadable: true };
+  }
+}
+export default function(component) {
+  const { data, setTriggerValue } = component;
+  const d = data || {};
+  const store = storage();
+  if (d.clear && d.clear.id && !seen.has('c:' + d.clear.id)) {
+    seen.add('c:' + d.clear.id);
+    const copy = readCopy(store);
+    const owner = (copy && copy.owner !== undefined) ? copy.owner : null;
+    const owners = Array.isArray(d.clear.owners) ? d.clear.owners : [];
+    try {
+      if (store && copy && (copy.unreadable || owners.indexOf(owner) >= 0)) {
+        store.removeItem(KEY);
+      }
+    } catch (e) { /* nothing to remove */ }
+    setTriggerValue('cleared', d.clear.id);
+  }
+  if (d.save && d.save.id && !seen.has('s:' + d.save.id)) {
+    seen.add('s:' + d.save.id);
+    try {
+      if (!store) { throw new Error('no storage'); }
+      store.setItem(KEY, JSON.stringify(d.save));
+      setTriggerValue('saved', d.save.id);
+    } catch (e) {
+      // A failed write must not leave an OLDER copy to come back later.
+      try { if (store) { store.removeItem(KEY); } } catch (e2) { /* blocked */ }
+      setTriggerValue('failed', String((e && e.name) || 'Error').slice(0, 60));
+    }
+  }
+  if (d.want && !seen.has('w:' + d.want)) {
+    seen.add('w:' + d.want);
+    const copy = readCopy(store);
+    if (copy) { setTriggerValue('restore', copy); }
+  }
+}
+"""
 
 # Additions to the theme for this module only. Tokens come from theme.py.
 PROPS_CSS = """
@@ -257,12 +355,13 @@ def ingest(text, token, roster, schedule, now=None, dates=None) -> tuple[str | N
 
 def _on_add(view_date, schedule, roster, now, dates) -> None:
     text = st.session_state.get(PASTE_KEY) or ""
-    token = board_token()
-    token, report = ingest(text, token, roster, schedule, now=now, dates=dates)
+    before = board_token()
+    token, report = ingest(text, before, roster, schedule, now=now, dates=dates)
     report["view_date"] = str(pd.Timestamp(view_date).date())
     st.session_state[REPORT_KEY] = report
-    if token and props.get_board(token) is not None:
+    if token and token != before and props.get_board(token) is not None:
         st.query_params["board"] = token
+        _queue_save(token)
     n = toast_count(report)
     if n:
         st.session_state[TOAST_KEY] = n
@@ -272,15 +371,30 @@ def _on_add(view_date, schedule, roster, now, dates) -> None:
 
 
 def _on_clear() -> None:
-    """Visitor-only: drops the board token from THIS visitor's link. The
-    board itself is not deleted: anyone else holding the link (it rides in
-    every URL, Share included) keeps it, and it ages out of the in-process
-    store. Nothing on disk is touched."""
+    """Visitor-only: drops the board token from THIS visitor's link and this
+    browser's copy (board_keeper). The board itself is not deleted: anyone
+    else holding the link (it rides in every URL, Share included) keeps it,
+    and it ages out of the in-process store. Nothing on the server's disk is
+    touched."""
+    token = board_token()
     st.session_state[PASTE_KEY] = ""
     st.session_state.pop(REPORT_KEY, None)
     st.session_state.pop(TOAST_KEY, None)
+    st.session_state[KEEP_FAILED] = False
     if "board" in st.query_params:
         del st.query_params["board"]
+    # ...and this browser's copy, if the copy is this board's, or the next
+    # load would bring the lines back.
+    st.session_state[KEEP_SAVE] = None
+    if token is not None:
+        # This board's copy: saved under this token, or the copy this session
+        # restored it from (its re-save may not have reached the browser yet).
+        owners = [_owner(token)]
+        adopted = st.session_state.get(KEEP_ADOPTED)
+        if isinstance(adopted, str):
+            owners.append(adopted)
+        st.session_state[KEEP_CLEAR] = {"id": secrets.token_hex(8), "owners": owners}
+        st.session_state[KEEP_SENT] = 0
 
 
 def _empty_reason(report: dict) -> str:
@@ -433,14 +547,136 @@ def render_update_lines_popover(view_date, schedule, roster, now=None, dates=Non
     placed = st.session_state.pop(TOAST_KEY, None)
     if placed:
         st.toast(f"{_plural(int(placed), 'line')} loaded")
+    back = st.session_state.pop(KEEP_RESTORED, None)
+    if back:
+        st.toast(f"Your {_plural(int(back), 'saved line')} are back" if int(back) != 1
+                 else "Your saved line is back")
     return token
+
+
+def _owner(token) -> str:
+    """The board a browser copy belongs to: a short hash of its token, so the
+    copy never holds the token itself."""
+    return hashlib.sha256(str(token).encode()).hexdigest()[:16]
+
+
+def _queue_save(token) -> None:
+    """Send `token`'s board to this browser (resent until acknowledged). A
+    board of past games only has nothing to keep."""
+    info = props.board_info(token) or {}
+    payload = props.saved_board(props.get_board(token), info.get("pasted_utc"),
+                                secrets.token_hex(8), today_et(), owner=_owner(token))
+    st.session_state[KEEP_SAVE] = payload
+    st.session_state[KEEP_SENT] = 0
+    st.session_state[KEEP_FAILED] = False
+
+
+def _rearm_restore() -> None:
+    """A board died mid-session (a restart, a deploy's purge, the 18-hour
+    limit): ask the browser again, under a NEW id (the JS answers each id
+    once per page load)."""
+    st.session_state[KEEP_DONE] = False
+    st.session_state[KEEP_NONCE] = secrets.token_hex(6)
+
+
+def _comparable(lines: pd.DataFrame) -> int:
+    """The lines that can show on a board (what the paste toast counts)."""
+    if lines is None or lines.empty:
+        return 0
+    ok = lines["kind"].astype(str).eq("ok") & lines["match"].astype(str).eq("matched")
+    return int((ok & lines["game_date"].notna()).sum())
+
+
+def _noop() -> None:
+    """A trigger reaches the mount's result only when an on_<event>_change
+    callable is passed; the page reads the answer from the result itself."""
+
+
+def _keeper_answers(res, roster, token) -> str | None:
+    """Act on the browser's answers on this run; returns the link's board
+    token afterwards (a restore puts a fresh one on it). Each answer counts
+    only while the request it answers is outstanding."""
+    pend = st.session_state.get(KEEP_SAVE)
+    saved = res.get("saved")
+    if saved and isinstance(pend, dict) and saved == pend.get("id"):
+        st.session_state[KEEP_SAVE] = None
+    clear = st.session_state.get(KEEP_CLEAR)
+    cleared = res.get("cleared")
+    if cleared and isinstance(clear, dict) and cleared == clear.get("id"):
+        st.session_state[KEEP_CLEAR] = None
+    if res.get("failed") and isinstance(pend, dict):
+        st.session_state[KEEP_SAVE] = None
+        st.session_state[KEEP_FAILED] = True
+    copy = res.get("restore")
+    if copy is None or st.session_state.get(KEEP_DONE) or token is not None:
+        return token
+    st.session_state[KEEP_DONE] = True
+    got = props.restore_saved(copy, roster, today_et(), now_utc())
+    owner = copy.get("owner") if isinstance(copy, dict) else None
+    owner = owner if isinstance(owner, str) and len(owner) <= 64 else None
+    if got is None:                     # nothing usable left: drop it from the browser
+        st.session_state[KEEP_CLEAR] = {"id": secrets.token_hex(8), "owners": [owner]}
+        st.session_state[KEEP_SENT] = 0
+        return None
+    lines, pasted, _dropped = got
+    token = props.add_to_board(None, lines, pasted_utc=pasted)
+    st.query_params["board"] = token
+    st.session_state[KEEP_RESTORED] = _comparable(lines)
+    st.session_state[KEEP_ADOPTED] = owner
+    _queue_save(token)                  # the copy follows the fresh token
+    return token
+
+
+def keeper_data(token) -> dict | None:
+    """What the keeper tells the browser on this run (and the run counter
+    that bounds the resends). Separate from the mount so a test can read it."""
+    data = {}
+    for key, field_ in ((KEEP_SAVE, "save"), (KEEP_CLEAR, "clear")):
+        pend = st.session_state.get(key)
+        if pend:
+            data[field_] = pend
+    if data:
+        sent = int(st.session_state.get(KEEP_SENT) or 0) + 1
+        st.session_state[KEEP_SENT] = sent
+        if sent > KEEP_RESEND:          # never acknowledged: stop resending
+            st.session_state[KEEP_SAVE] = None
+            st.session_state[KEEP_CLEAR] = None
+            data = {}
+    if token is None and not st.session_state.get(KEEP_DONE):
+        data["want"] = st.session_state.setdefault(KEEP_NONCE, secrets.token_hex(6))
+    return data or None
+
+
+def board_keeper(roster) -> str | None:
+    """Mount the browser keeper. Pages call it at the TOP, after the roster
+    loads and before the nav or any widget, on EVERY run (an unmounted
+    component loses its state). Returns the link's live board token, with a
+    restored board already on the link. A token the server no longer knows
+    is dropped here and the restore re-armed. Hidden by theme CSS
+    (.st-key-bv_board_keeper); registered inside the run, as AppTest needs."""
+    raw = st.query_params.get("board")
+    token = board_token()
+    if raw and token is None:
+        st.session_state[EXPIRED_KEY] = True
+        del st.query_params["board"]
+        _rearm_restore()
+    keeper = st.components.v2.component("bv_board_keeper", js=KEEPER_JS)
+    res = keeper(key=KEEPER_KEY, data=keeper_data(token), on_saved_change=_noop,
+                 on_cleared_change=_noop, on_failed_change=_noop, on_restore_change=_noop)
+    if roster is None:
+        return token
+    return _keeper_answers(res, roster, token)
 
 
 def _paste_panel(view_date, schedule, roster, now, dates) -> None:
     if st.session_state.pop(EXPIRED_KEY, False):
-        st.info("Your earlier lines have expired (a pasted board is kept for about "
-                "18 hours, and a site restart clears it). Paste again to bring "
-                "them back.")
+        st.info("Your earlier lines are no longer on this link (the site keeps a pasted "
+                "board for about 18 hours, and a restart clears it). If this browser "
+                "kept a copy they come back on their own; otherwise paste again.")
+    if st.session_state.get(KEEP_FAILED):
+        st.caption("This browser would not keep a copy of your lines (its storage is blocked "
+                   "or full), so opening the site without this link, or after a restart, "
+                   "will need a fresh paste.")
     with st.container(border=True):
         st.markdown("**Copy the PrizePicks board and paste it here**")
         st.markdown(
@@ -475,12 +711,14 @@ def _paste_panel(view_date, schedule, roster, now, dates) -> None:
         st.caption(f"{_plural(len(board), 'line')} on your board across every date.")
     st.caption(
         "A paste ADDS to your board, so stat tabs can come in one at a time, and "
-        "alt-line ladders collapse to one line per player and stat. Your board "
-        "lives only in this visit's link: it is never saved to disk and never "
-        "enters any accuracy record, but anyone you send the link to sees it. "
-        "Clear all takes it off your link only. Nothing here fetches from "
-        "PrizePicks: their API blocks server requests and their terms prohibit "
-        "automated access.")
+        "alt-line ladders collapse to one line per player and stat. When you add "
+        "lines, this browser keeps a copy of your board, so they come back when you "
+        "reload or return, until the day of their games has passed. They are never "
+        "saved on our server and never enter any accuracy record, but anyone you send "
+        "the link to sees them. Clear all removes them from your link and from this "
+        "browser. Nothing "
+        "here fetches from PrizePicks: their API blocks server requests and their "
+        "terms prohibit automated access.")
 
 
 # ── Cells ────────────────────────────────────────────────────────────────────

@@ -309,6 +309,9 @@ COMMON_CSS = """
        `> [data-testid="stVerticalBlock"]` child selector matches nothing.
        On narrow screens it falls back into the page flow so it cannot overlap
        the nav links. */
+    /* The browser keeper (props_ui.board_keeper) has nothing to show: hidden,
+       and its JS still runs (display:none stops no effect). */
+    .st-key-bv_board_keeper { display: none !important; }
     .st-key-bv_nav_actions {
         position: fixed;
         top: 1.5rem; right: 5.4rem;

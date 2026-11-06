@@ -49,7 +49,13 @@ try:
     date = dt.date.fromisoformat(str(qp.get("date")))
 except ValueError:
     date = None
-TOKEN = props_ui.board_token()
+try:
+    ROSTER = live.roster().value
+except RuntimeError:
+    ROSTER = None
+# The keeper runs first, before the nav and every widget: a board this
+# browser kept comes back onto the link for this whole run.
+TOKEN = props_ui.board_keeper(ROSTER)
 MARKS = store.parse_out(qp.get("out"))
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
         **store.view_params(TOKEN, MARKS)}
@@ -77,10 +83,6 @@ except RuntimeError as e:
 # The paste popover and Share live in the nav on this page too. A paste here
 # can mint a NEW token, so every link below is rebuilt from it (the back link
 # and the footer included).
-try:
-    ROSTER = live.roster().value
-except RuntimeError:
-    ROSTER = None
 with st.container(key="bv_nav_actions"):
     if ROSTER is not None:
         _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), date})

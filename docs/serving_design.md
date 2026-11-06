@@ -15,7 +15,10 @@ in parallel agree. The spec (BUCKETVALUE_PROJECT_INSTRUCTIONS.md, sections 3.5,
   columns; Streamlit Cloud has ~1 GB). The BOT runs it and commits per-date
   history-feature rows; the app adds only the volatile parts (injury context,
   lines, mark-outs) and runs the models.
-- The bot writes ONLY under `state/`. The app writes nothing to disk.
+- The bot writes ONLY under `state/`. The app writes nothing to disk. (A
+  visitor's pasted board is copied to THAT visitor's browser, localStorage, by
+  props_ui.board_keeper, so a reload or a restart brings it back; the server
+  still keeps it only in memory.)
 - Freeze per game at tip: no process ever rewrites a projection row for a game
   whose tip has passed.
 - Accuracy stays local (Barrett). The record is derived LOCALLY from the git
@@ -268,8 +271,9 @@ fixed by area. What changed in the contract:
 - **Props**: lines for games the site never projects are counted "not
   projected", another league's lines "other board"; a period board is withheld,
   and a re-paste can never replace a full-game line with a period line; adding
-  lines mints a NEW token, so a shared link is read-only for everyone else; the
-  record refuses mark-out-adjusted rows and rows without a model version.
+  lines mints a NEW token, so a shared link is read-only for everyone else, and a
+  board restored from the visitor's browser gets a NEW token too; the record
+  refuses mark-out-adjusted rows and rows without a model version.
 
 ## 9. Amendments after the 2026-11-02 rehearsal (the 2026-27 box lists actives only)
 

@@ -9,6 +9,7 @@ real MLB paste. The clock is pinned to 11pm ET on opening night, 2026-10-20.
 from __future__ import annotations
 
 import ast
+import datetime as dt
 import json
 import logging
 import math
@@ -812,6 +813,143 @@ def test_a_board_keeps_the_time_of_the_paste_that_made_it(monkeypatch):
         assert props_ui.paste_time_text(meta) == ""
 
 
+# ── The board kept in the visitor's browser (Barrett, 2026-11-05) ────────────
+TODAY = dt.date(2026, 10, 20)          # the ET date at NOW (11pm Oct 20)
+
+
+def _through_the_browser(payload):
+    """What survives localStorage: JSON out (a NaN fails here, as JSON.parse
+    would fail on it), JSON back in."""
+    return json.loads(json.dumps(payload, allow_nan=False))
+
+
+def _date_ledger(lines, date, projections):
+    table, _meta = props.compare(props.lines_for_date(lines, date),
+                                 props.MeanDispersionProvider(projections), projections)
+    cols = ["player", "stat", "line", "model", "lean", "game_id", "sides", "odds_type"]
+    return [x[cols].sort_values(cols[:3]).reset_index(drop=True)
+            for x in props.board_rows(table)]
+
+
+def test_a_board_kept_in_the_browser_comes_back_as_the_same_board(
+        feed_text, board_text, roster, schedule, projections, no_reliability, monkeypatch):
+    """Both paste formats: save, through JSON, restore with the paste path's
+    own verdicts, store under a fresh token. Every date's board (shown,
+    hidden, thin, void) is the one the visitor pasted, and so is the paste
+    time."""
+    for text in (feed_text, board_text):
+        monkeypatch.setattr(props, "_wall", lambda: NOW - dt.timedelta(minutes=30))
+        lines, _ = props.prepare_paste(text, roster, schedule, now=NOW)
+        token = props.add_to_board(None, lines)
+        original, info = props.get_board(token), props.board_info(token)
+        # The clock moves on before the restore: a restamp would show it.
+        monkeypatch.setattr(props, "_wall", lambda: NOW + dt.timedelta(hours=2))
+        payload = _through_the_browser(
+            props.saved_board(original, info["pasted_utc"], "s1", TODAY))
+        lines2, pasted, dropped = props.restore_saved(payload, roster, TODAY, NOW)
+        assert dropped == 0 and pasted == info["pasted_utc"]
+        back = props.add_to_board(None, lines2, pasted_utc=pasted)
+        assert back != token and props.board_info(back)["pasted_utc"] == info["pasted_utc"]
+        restored = props.get_board(back)
+        dates = sorted(set(original["game_date"].dropna()))
+        assert dates and dates == sorted(set(restored["game_date"].dropna()))
+        for date in dates:
+            for a, b in zip(_date_ledger(restored, date, projections),
+                            _date_ledger(original, date, projections)):
+                pd.testing.assert_frame_equal(a, b, check_dtype=False)
+
+
+def test_the_browser_copy_holds_a_pastes_fields_never_a_verdict_or_a_token(
+        feed_text, roster, schedule):
+    lines, _ = props.prepare_paste(feed_text, roster, schedule, now=NOW)
+    token = props.add_to_board(None, lines)
+    payload = props.saved_board(props.get_board(token), None, "s1", TODAY)
+    text = json.dumps(payload, allow_nan=False)
+    assert token not in text
+    assert payload["cols"] == list(props.SAVED_COLUMNS)
+    for verdict in ("person_id", "match", "how", "roster_name", "roster_team", "stat"):
+        assert verdict not in payload["cols"]
+
+
+def _kept(rows, pasted="2026-10-21T02:00:00+00:00", **over):
+    base = {"v": props.SAVED_VERSION, "id": "s1", "cols": list(props.SAVED_COLUMNS),
+            "pasted_utc": pasted, "rows": rows}
+    return {**base, **over}
+
+
+def _row(**over):
+    r = {"name": "Nikola Jokic", "team_code": "DEN", "stat_type": "Points", "line": 27.5,
+         "direction": "both", "odds_type": "standard", "opp": "GSW", "is_combo": False,
+         "league": None, "game_date": "2026-10-21", "game_id": "0022600001",
+         "tip_utc": "2026-10-22T02:00:00+00:00"}
+    r.update(over)
+    return [r[c] for c in props.SAVED_COLUMNS]
+
+
+def test_a_kept_board_is_only_games_still_to_come(roster):
+    frame = pd.DataFrame([dict(zip(props.SAVED_COLUMNS, _row(game_date=d)))
+                          for d in (None, "2026-10-19", "2026-10-20", "2026-10-21")])
+    payload = props.saved_board(frame, None, "s1", TODAY)
+    assert [r[props.SAVED_COLUMNS.index("game_date")] for r in payload["rows"]] == \
+        ["2026-10-20", "2026-10-21"]
+    assert props.saved_board(frame.iloc[:2], None, "s1", TODAY) is None   # nothing to come
+    # Restored a day later, yesterday's line is gone; four days out is junk.
+    lines, _p, dropped = props.restore_saved(
+        _kept(payload["rows"] + [_row(game_date="2026-10-25")]), roster,
+        dt.date(2026, 10, 21), NOW + dt.timedelta(days=1))
+    assert list(lines["game_date"]) == ["2026-10-21"] and dropped == 2
+
+
+@pytest.mark.parametrize("payload", [
+    None, [], "x", 5, {},
+    _kept([_row()], v=2),
+    _kept([_row()], cols=list(reversed(props.SAVED_COLUMNS))),
+    _kept("rows"), _kept([]), _kept([_row()] * (props.BOARD_MAX_ROWS + 1)),
+    _kept([_row()], pasted=None), _kept([_row()], pasted="garbage"),
+    _kept([_row()], pasted="2026-10-22T03:00:00+00:00"),        # a day in the future
+    _kept([_row()], pasted="2026-10-01T03:00:00+00:00"),        # older than a week
+    _kept([None, 5, "x", [1, 2], {"a": 1}]),                    # no row survives
+])
+def test_a_kept_board_from_the_browser_is_refused_whole_when_its_shape_is_wrong(
+        payload, roster):
+    assert props.restore_saved(payload, roster, TODAY, NOW) is None
+
+
+def test_a_kept_board_from_the_browser_is_a_second_paste_box(roster):
+    """Each field through the paste validators: a bad name, label, line or
+    date drops the row; a bad team, game id, tip, side or odds type is
+    blanked as a paste would blank it. Never raises."""
+    bad_rows = [_row(name=n) for n in ({"x": 1}, None, "x" * 500, "1234 5678", 12345)]
+    bad_rows += [_row(stat_type=v) for v in (5, None, "x" * 500)]
+    bad_rows += [_row(line=v) for v in (float("inf"), -1, 1e9, True, "abc", None)]
+    bad_rows += [_row(game_date=v) for v in ("9999-12-31", "2026-13-45", 20261021, None,
+                                             "2026-10-21T00:00")]
+    blanked = _row(team_code="X" * 50, opp={"a": 1}, game_id="DROP TABLE", tip_utc="garbage",
+                   direction="sideways", odds_type=["demon"], is_combo="yes", league=7)
+    unhashable = _row(direction=[], name="Jamal Murray")       # blanked, never the whole copy
+    lines, _p, dropped = props.restore_saved(
+        _kept([_row()] + bad_rows + [blanked, unhashable]), roster, TODAY, NOW)
+    assert dropped == len(bad_rows) and len(lines) == 3
+    assert lines.iloc[2]["direction"] == ""
+    b = lines.iloc[1]
+    assert b["team_code"] is None and b["opp"] is None and b["game_id"] is None
+    assert b["tip_utc"] is None and b["direction"] == "" and b["odds_type"] == "standard"
+    assert not bool(b["is_combo"]) and b["league"] == "7"
+    good = lines.iloc[0]
+    assert good["match"] == "matched" and good["stat"] == "pts"     # verdicts re-derived
+
+
+def test_a_full_board_fits_in_a_browsers_storage():
+    """localStorage holds about 5 MB per site, counted in UTF-16 (2 bytes a
+    character): a board at the row cap must stay well under 2.5M characters."""
+    frame = pd.DataFrame([dict(zip(props.SAVED_COLUMNS, _row(
+        name="Shai Gilgeous-Alexander", stat_type="Pts+Rebs+Asts", line=44.5 + i % 10)))
+        for i in range(props.BOARD_MAX_ROWS)])
+    text = json.dumps(props.saved_board(frame, NOW, "s1", TODAY), allow_nan=False,
+                      separators=(",", ":"))
+    assert len(text) < 2_000_000, len(text)
+
+
 def test_an_unknown_or_expired_token_gets_a_new_board(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(props, "_clock", lambda: clock[0])
@@ -1576,6 +1714,339 @@ props_ui.render_board(view.shown, view.hidden, view.thin, view.void, "Wed Oct 21
     assert not at.exception
     assert props.get_board(other) is not None, "Clear all touched another visitor"
     assert not at.query_params.get("board")
+
+
+_KEEP = _SETUP + """
+import streamlit as st
+token = props_ui.board_keeper(roster)
+# A keyed widget the page registers AFTER the keeper (app.py's date picker,
+# the player search): no answer from the browser may wipe its value.
+st.session_state.setdefault("probe", "as the page set it")
+st.text_input("probe", key="probe")
+token = props_ui.render_update_lines_popover(dt.date(2026, 10, 20), sched, roster, now=NOW)
+view = props_ui.board_view(token, "2026-10-21", props.MeanDispersionProvider(proj), proj)
+props_ui.render_board(view.shown, view.hidden, view.thin, view.void, "Wed Oct 21",
+                      meta=view.meta)
+"""
+
+
+@pytest.fixture()
+def pinned_clock(monkeypatch):
+    """The keeper's dates and the paste time on the fixture's evening."""
+    monkeypatch.setattr(props_ui, "today_et", lambda: TODAY)
+    monkeypatch.setattr(props_ui, "now_utc", lambda: NOW)
+    monkeypatch.setattr(props, "_wall", lambda: NOW - dt.timedelta(minutes=5))
+
+
+def _keeper(at) -> dict:
+    """What the page told the browser on the last run ({} for nothing)."""
+    el = at.get("bidi_component")
+    assert len(el) == 1, "the keeper mounts exactly once"
+    raw = el[0].proto.json
+    return json.loads(raw) if raw else {}
+
+
+def _board_param(at):
+    tok = at.query_params.get("board")
+    return tok[0] if isinstance(tok, list) else tok
+
+
+def _send(at, widget_id, **value):
+    from streamlit.proto.WidgetStates_pb2 import WidgetStates  # noqa: F401
+    ws = at._tree.get_widget_states()
+    w = ws.widgets.add()
+    w.id = widget_id
+    for k, v in value.items():
+        setattr(w, k, v)
+    return at._run(ws)
+
+
+def _browser_says(at, event, value):
+    """Run the app as if the keeper's JS had called setTriggerValue(event,
+    value): the trigger travels as the component's events widget, exactly as
+    the browser sends it (AppTest runs no JS)."""
+    cid = at.get("bidi_component")[0].proto.id
+    return _send(at, "$$STREAMLIT_INTERNAL_KEY_" + cid + "__events",
+                 json_trigger_value=json.dumps([{"event": event, "value": value}]))
+
+
+def _paste(at, text):
+    at.text_area(key=props_ui.PASTE_KEY).input(text)
+    at.button(key="bv_pp_add").click()
+    return at.run()
+
+
+def test_the_keeper_saves_after_a_paste_and_forgets_after_clear_all(board_text, pinned_clock):
+    at = _apptest(_KEEP)
+    at.run()
+    assert not at.exception and "want" in _keeper(at) and "save" not in _keeper(at)
+    at = _paste(at, board_text)
+    assert not at.exception, at.exception
+    token = _board_param(at)
+    board, data = props.get_board(token), _keeper(at)
+    kept = data["save"]
+    assert kept["cols"] == list(props.SAVED_COLUMNS) and token not in json.dumps(kept)
+    assert kept["owner"] == props_ui._owner(token)
+    to_come = board["game_date"].map(lambda d: isinstance(d, str) and d >= TODAY.isoformat())
+    assert len(kept["rows"]) == int(to_come.sum()) > 0
+    assert "want" not in data                       # a live board: nothing to ask for
+    at = _browser_says(at, "saved", kept["id"])     # acknowledged: stop sending
+    at.run()
+    assert "save" not in _keeper(at)
+    at.button(key="bv_pp_clear").click()
+    at.run()
+    data = _keeper(at)
+    assert data["clear"]["owners"] == [props_ui._owner(token)]
+    assert "save" not in data and not _board_param(at)
+    at = _browser_says(at, "cleared", data["clear"]["id"])
+    at.run()
+    assert "clear" not in _keeper(at)
+
+
+def test_the_keeper_brings_a_kept_board_back_in_the_same_run(
+        board_text, roster, schedule, pinned_clock, monkeypatch):
+    lines, _ = props.prepare_paste(board_text, roster, schedule, now=NOW)
+    token = props.add_to_board(None, lines)
+    kept = _through_the_browser(props.saved_board(
+        props.get_board(token), props.board_info(token)["pasted_utc"], "s1", TODAY,
+        owner="0123456789abcdef"))
+    monkeypatch.setattr(props, "_wall", lambda: NOW + dt.timedelta(minutes=1))  # later reload
+    with props._BOARDS_LOCK:
+        props._BOARDS.clear()                       # the server restarted
+    at = _apptest(_KEEP)
+    at.query_params["board"] = token                # the old link no longer resolves
+    at.run()
+    assert not _board_param(at) and "want" in _keeper(at)
+    at.text_input(key="probe").input("the visitor's own value")
+    at.run()
+    at = _browser_says(at, "restore", kept)
+    assert not at.exception, at.exception
+    back = _board_param(at)
+    assert props.valid_token(back) and back != token and props.get_board(back) is not None
+    assert props.board_info(back)["pasted_utc"] == NOW - dt.timedelta(minutes=5)
+    assert "Model vs the board" in " ".join(m.value for m in at.markdown)    # this same run
+    showable = props_ui._comparable(props.restore_saved(kept, roster, TODAY, NOW)[0])
+    assert 0 < showable < len(kept["rows"])          # the toast counts what can show
+    assert [str(t.value) for t in at.toast] == [f"Your {showable} saved lines are back"]
+    assert at.text_input(key="probe").value == "the visitor's own value"     # nothing wiped
+    at.run()
+    data = _keeper(at)
+    assert "want" not in data and data["save"]["owner"] == props_ui._owner(back)
+    at.button(key="bv_pp_clear").click()            # before the re-save is acknowledged
+    at.run()
+    assert set(_keeper(at)["clear"]["owners"]) == {props_ui._owner(back), "0123456789abcdef"}
+
+
+def test_a_copy_with_nothing_usable_is_dropped_from_the_browser(pinned_clock):
+    at = _apptest(_KEEP)
+    at.run()
+    at = _browser_says(at, "restore", {"v": 99, "owner": "o1", "rows": "junk"})
+    assert not at.exception and not _board_param(at)
+    at.run()
+    data = _keeper(at)
+    assert data["clear"]["owners"] == ["o1"] and "want" not in data
+
+
+def test_the_keeper_asks_once_per_session_and_again_when_a_board_dies(pinned_clock):
+    at = _apptest(_KEEP)
+    wants = []
+    for _ in range(3):
+        at.run()
+        wants.append(_keeper(at).get("want"))
+    assert wants[0] and len(set(wants)) == 1         # one id, which the browser answers once
+    live = props.new_board(pd.DataFrame([_line()]))
+    at.query_params["board"] = live
+    at.run()
+    assert "want" not in _keeper(at)
+    with props._BOARDS_LOCK:
+        props._BOARDS.clear()                       # the board dies mid-session
+    at.run()
+    again = _keeper(at).get("want")
+    assert again and again != wants[0] and not _board_param(at)
+
+
+def test_an_unacknowledged_save_stops_and_a_refusal_is_said(board_text, pinned_clock):
+    at = _apptest(_KEEP)
+    at.run()
+    at = _paste(at, board_text)
+    sent = 1
+    for _ in range(props_ui.KEEP_RESEND + 3):       # bounded: a broken bound fails, never hangs
+        if "save" not in _keeper(at):
+            break
+        at.run()
+        sent += 1
+    assert "save" not in _keeper(at) and sent == props_ui.KEEP_RESEND + 1
+    at = _paste(at, board_text)
+    at.text_input(key="probe").input("the visitor's own value")
+    at.run()
+    at = _browser_says(at, "failed", "QuotaExceededError")
+    assert any("would not keep a copy" in str(c.value) for c in at.caption)   # this same run
+    assert at.text_input(key="probe").value == "the visitor's own value"
+    at.run()
+    assert "save" not in _keeper(at)
+
+
+def test_a_board_only_opened_from_a_friends_link_is_never_kept(
+        board_text, feed_text, roster, schedule, pinned_clock):
+    lines, _ = props.prepare_paste(feed_text, roster, schedule, now=NOW)
+    friend = props.add_to_board(None, lines)
+    assert props.saved_board(props.get_board(friend), NOW, "x", TODAY)   # it HAS lines to keep
+    at = _apptest(_KEEP)
+    at.query_params["board"] = friend
+    at.run()
+    at.button(key="bv_pp_add").click()              # Add with an empty box
+    at.run()
+    assert _board_param(at) == friend and "save" not in _keeper(at)
+    at.button(key="bv_pp_clear").click()            # names only the friend's board
+    at.run()
+    assert _keeper(at)["clear"]["owners"] == [props_ui._owner(friend)]
+    at = _apptest(_KEEP)                            # lines added to it make a board of one's own
+    at.query_params["board"] = friend
+    at.run()
+    at = _paste(at, board_text)
+    mine = _board_param(at)
+    assert mine != friend and _keeper(at)["save"]["owner"] == props_ui._owner(mine)
+    assert props.get_board(friend) is not None      # the friend's board is untouched
+
+
+def test_a_forged_answer_counts_only_while_its_request_is_outstanding(
+        board_text, roster, schedule, pinned_clock):
+    """A hand-built client can hold any value in the component's STATE, which
+    the result merges over the one-shot triggers, on every run."""
+    at = _apptest(_KEEP)
+    at.run()
+    cid = at.get("bidi_component")[0].proto.id
+    at = _send(at, cid, json_value=json.dumps({"failed": 1}))     # no save is pending
+    assert not at.exception
+    assert not any("would not keep a copy" in str(c.value) for c in at.caption)
+    lines, _ = props.prepare_paste(board_text, roster, schedule, now=NOW)
+    t0 = props.add_to_board(None, lines)
+    kept = _through_the_browser(props.saved_board(props.get_board(t0), NOW, "s1", TODAY))
+    at = _apptest(_KEEP)
+    at.run()
+    at = _browser_says(at, "restore", kept)
+    first, boards = _board_param(at), props.board_count()
+    cid = at.get("bidi_component")[0].proto.id
+    at.query_params.pop("board", None)              # even with the link stripped...
+    at = _send(at, cid, json_value=json.dumps({"restore": kept}))
+    for _ in range(3):
+        at.run()
+    assert props.board_count() == boards            # ...a held copy is never restored twice
+    assert first and not _board_param(at)
+
+
+def test_a_copy_never_replaces_a_live_board_and_a_stale_ack_is_ignored(
+        board_text, roster, schedule, pinned_clock):
+    lines, _ = props.prepare_paste(board_text, roster, schedule, now=NOW)
+    token = props.add_to_board(None, lines)
+    kept = _through_the_browser(props.saved_board(props.get_board(token), NOW, "s1", TODAY))
+    live = props.new_board(pd.DataFrame([_line()]))
+    at = _apptest(_KEEP)
+    at.query_params["board"] = live
+    at.run()
+    boards = props.board_count()
+    at = _browser_says(at, "restore", kept)          # a late answer from another load
+    assert not at.exception and _board_param(at) == live and props.board_count() == boards
+    at = _apptest(_KEEP)
+    at.run()
+    at = _paste(at, board_text)
+    pending = _keeper(at)["save"]["id"]
+    at = _browser_says(at, "saved", "an-older-save")  # not the write still pending
+    at.run()
+    assert _keeper(at)["save"]["id"] == pending
+
+
+def test_the_keepers_script_touches_one_storage_key_and_nothing_else():
+    """The JS runs in the page, so it is held to what it is for: one
+    localStorage key, answers through setTriggerValue, no network."""
+    js = props_ui.KEEPER_JS
+    assert f"'{props_ui.KEEPER_STORAGE_KEY}'" in js
+    for banned in ("fetch(", "XMLHttpRequest", "WebSocket", "sendBeacon", "://", "eval(",
+                   "document.cookie", "innerHTML", "sessionStorage", "indexedDB"):
+        assert banned not in js, banned
+    assert js.count("window.localStorage") == 1      # reached once, through storage()
+
+
+_JS_RUNNER = r"""
+const store = new Map();
+let failNext = false;
+globalThis.window = { get localStorage() { return {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => {
+    if (failNext) { failNext = false; const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    store.set(k, String(v));
+  },
+  removeItem: (k) => { store.delete(k); },
+}; } };
+const KEY = 'bucketvalue.board.v1';
+let page = 0;
+async function load() { page += 1; return (await import('./keeper.mjs?page=' + page)).default; }
+function call(keeper, data) {
+  const out = [];
+  keeper({ data, setTriggerValue: (n, v) => out.push([n, v]) });
+  return out;
+}
+const R = {};
+let k = await load();
+R.save = call(k, { save: { v: 1, id: 's1', owner: 'o1', rows: [1] } });
+R.save_again = call(k, { save: { v: 1, id: 's1', owner: 'o1', rows: [1] } });
+k = await load();
+R.want = call(k, { want: 'n1' });
+R.want_again = call(k, { want: 'n1' });
+R.want_new = call(k, { want: 'n2' });
+k = await load();
+R.clear_other = call(k, { clear: { id: 'c1', owners: ['someone-else'] }, want: 'n3' });
+k = await load();
+R.clear_mine = call(k, { clear: { id: 'c2', owners: ['o1'] }, want: 'n4' });
+R.after_clear = store.has(KEY);
+k = await load();
+call(k, { save: { v: 1, id: 's2', owner: 'o2', rows: [2] } });
+failNext = true;
+R.failed = call(k, { save: { v: 1, id: 's3', owner: 'o3', rows: [3] } });
+R.after_fail = store.has(KEY);
+store.set(KEY, '{not json');
+k = await load();
+R.unreadable = call(k, { want: 'n5' });
+R.clear_unreadable = call(k, { clear: { id: 'c3', owners: [null] } });
+R.after_unreadable = store.has(KEY);
+console.log(JSON.stringify(R));
+"""
+
+
+def test_the_keepers_script_in_a_javascript_engine(tmp_path):
+    """KEEPER_JS itself, under node with a stub localStorage (each import is a
+    new page load). Skipped where node is absent; GitHub's runners have it."""
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed here")
+    (tmp_path / "keeper.mjs").write_text(props_ui.KEEPER_JS)
+    (tmp_path / "run.mjs").write_text(_JS_RUNNER)
+    out = subprocess.run([node, str(tmp_path / "run.mjs")], capture_output=True, text=True,
+                         timeout=60, cwd=tmp_path)
+    assert out.returncode == 0, out.stderr
+    r = json.loads(out.stdout)
+    assert r["save"] == [["saved", "s1"]] and r["save_again"] == []      # once per id
+    assert r["want"][0][0] == "restore" and r["want"][0][1]["owner"] == "o1"
+    assert r["want_again"] == [] and r["want_new"][0][0] == "restore"
+    assert r["clear_other"][0] == ["cleared", "c1"] and r["clear_other"][1][0] == "restore"
+    assert r["clear_mine"] == [["cleared", "c2"]] and r["after_clear"] is False   # clear first
+    assert r["failed"] == [["failed", "QuotaExceededError"]] and r["after_fail"] is False
+    assert r["unreadable"] == [["restore", {"unreadable": True}]]
+    assert r["clear_unreadable"] == [["cleared", "c3"]] and r["after_unreadable"] is False
+
+
+def test_the_paste_cap_sits_under_the_websocket_cap():
+    """The keeper puts a JSON widget on every page; Streamlit parses it before
+    any app code at ~43 bytes a character, so the default 200 MB message cap
+    is lowered. The paste box must still fit a full pretty-printed slate and
+    refuse an oversized paste with its own message, not a dropped socket."""
+    import tomllib
+    cfg = tomllib.loads((REPO / ".streamlit" / "config.toml").read_text())
+    mb = cfg["server"]["maxMessageSize"]
+    assert mb <= 32
+    assert props.MAX_PASTE_CHARS < mb * 1_000_000 * 0.95
+    assert props.MAX_PASTE_CHARS > 1.5 * 11_500_000
 
 
 def test_render_board_with_nothing_pasted_renders_nothing():

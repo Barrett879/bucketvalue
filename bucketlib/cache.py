@@ -56,8 +56,10 @@ MODELS_DIR = REPO_ROOT / "models"
 # ── Read-only deployments ────────────────────────────────────────────────────
 # READ_ONLY means SHARED, not "no disk". On Streamlit Community Cloud the cache
 # directory is the repo checkout, served to every visitor by one process. A
-# visitor's paste must live in st.session_state, and anything that would write
-# the shared record (saved boards, frozen projections, clears) must refuse.
+# visitor's paste lives in the in-process board store (props) and in that
+# visitor's own browser (props_ui.board_keeper), never in this directory, and
+# anything that would write the shared record (frozen projections, clears)
+# must refuse.
 # The record changes only through a commit made locally. Set
 # BUCKETVALUE_READONLY=1 in the host's secrets; leave it unset locally.
 READ_ONLY = os.environ.get("BUCKETVALUE_READONLY", "").strip().lower() in (

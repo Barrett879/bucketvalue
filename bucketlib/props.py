@@ -63,6 +63,7 @@ never wired into a public page. The board is a view; the record is evidence.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 import re
@@ -84,7 +85,6 @@ from .cache import DATA_DIR, logger
 from .names import NameIndex
 from .names import normalize as normalize_name
 from .pmf import Pmf
-from .util import now_utc
 from .tables import STATE_TYPES
 from .util import UTC, now_utc, season_end_year, season_for_date, to_et
 
@@ -117,7 +117,7 @@ FEED_URL = ("https://api.prizepicks.com/projections?"
 # 32M-character paste of short lines takes 1.3 s and 33 MB; a hostile flat JSON
 # array is refused by MAX_JSON_COMMAS before json builds it (unbounded at 32M
 # it took 7.3 s and 143 MB). A realistic line has ~43 commas and ~18 objects.
-MAX_PASTE_CHARS = 32_000_000
+MAX_PASTE_CHARS = 22_000_000      # under the websocket cap (.streamlit/config.toml)
 MAX_JSON_CONTAINERS = 400_000     # ~22,000 realistic lines
 MAX_JSON_COMMAS = 2_500_000       # ~58,000 realistic lines; a flat array stays small
 MAX_TEXT_LINES = 150_000          # a square is 5-12 lines; 10,000 squares fit
@@ -1194,6 +1194,33 @@ def _board_name(league) -> str:
     return " ".join(str(league or "").split()).upper()[:20]
 
 
+def _classify_and_resolve(df: pd.DataFrame, roster: pd.DataFrame) -> pd.DataFrame:
+    """Each line's stat verdict (stat, kind, refusal), its team code, and its
+    name resolved against the roster (match, person_id, how, roster_name,
+    roster_team), in input order. The paste path's own verdicts: prepare_paste
+    runs it on a parse, restore_saved on a board the visitor's browser kept,
+    so a restored line is judged exactly as a pasted one."""
+    df = df.copy()
+    df["_i"] = np.arange(len(df))           # paste order IS recency for collapse
+    kinds = [_classify_row(*r) for r in
+             df[["stat_type", "name", "is_combo", "league"]].itertuples(index=False)]
+    df["stat"] = [k[0] for k in kinds]
+    df["kind"] = [k[1] for k in kinds]
+    df["refusal"] = [k[2] for k in kinds]
+    df["team_code"] = [teams.canonical(t) if isinstance(t, str) else None for t in df["team"]]
+    combo = df["kind"].eq("refused") & df["refusal"].eq(REFUSE_COMBO)
+    resolved, unresolved = resolve_names(df[~combo], roster)
+    parts = []
+    if not resolved.empty:
+        parts.append(resolved.assign(match="matched"))
+    if not unresolved.empty:
+        parts.append(unresolved.rename(columns={"reason": "match"}))
+    if combo.any():
+        parts.append(df[combo].assign(match="refused", how="combo"))
+    df = pd.concat(parts, ignore_index=True) if parts else df
+    return df.sort_values("_i", kind="mergesort").drop(columns="_i").reset_index(drop=True)
+
+
 def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
                   dates=None) -> tuple[pd.DataFrame, dict]:
     """parse -> classify -> resolve names -> route -> collapse.
@@ -1227,25 +1254,7 @@ def prepare_paste(text, roster: pd.DataFrame, schedule: pd.DataFrame, now=None,
               "other_boards": {}, "wrong_board": None, "period_held": 0}
     if parsed.empty:
         return parsed, report
-    df = parsed.copy()
-    df["_i"] = np.arange(len(df))           # paste order IS recency for collapse
-    kinds = [_classify_row(*r) for r in
-             df[["stat_type", "name", "is_combo", "league"]].itertuples(index=False)]
-    df["stat"] = [k[0] for k in kinds]
-    df["kind"] = [k[1] for k in kinds]
-    df["refusal"] = [k[2] for k in kinds]
-    df["team_code"] = [teams.canonical(t) if isinstance(t, str) else None for t in df["team"]]
-    combo = df["kind"].eq("refused") & df["refusal"].eq(REFUSE_COMBO)
-    resolved, unresolved = resolve_names(df[~combo], roster)
-    parts = []
-    if not resolved.empty:
-        parts.append(resolved.assign(match="matched"))
-    if not unresolved.empty:
-        parts.append(unresolved.rename(columns={"reason": "match"}))
-    if combo.any():
-        parts.append(df[combo].assign(match="refused", how="combo"))
-    df = pd.concat(parts, ignore_index=True) if parts else df
-    df = df.sort_values("_i", kind="mergesort").drop(columns="_i").reset_index(drop=True)
+    df = _classify_and_resolve(parsed, roster)
     df = route_lines(df, schedule, now=now, dates=dates)
     df = collapse_alt_lines(df)
     report["period_held"] = int(df.attrs.get("period_held", 0))
@@ -1294,11 +1303,12 @@ def lines_for_date(lines: pd.DataFrame | None, date) -> pd.DataFrame:
     return lines[lines["game_date"].astype(str) == d].reset_index(drop=True)
 
 
-# ── The visitor's board: in-process, token-keyed, never on disk ──────────────
+# ── The visitor's board: in-process, token-keyed, never on the server's disk ─
 # Every internal link is a full page load (a new Streamlit session), so
 # st.session_state cannot carry a paste from the slate to a game page. The
 # board lives HERE, in this process, keyed by an unguessable token that rides
-# in ?board=. It is never written to disk and never frozen. Bounded by an LRU
+# in ?board=. It is never written to disk and never frozen (the visitor's
+# browser keeps its own copy: saved_board below). Bounded by an LRU
 # with a sliding TTL, a board cap and a total-row cap, because one process
 # serves every visitor and a hostile one could otherwise fill memory.
 #
@@ -1382,10 +1392,11 @@ def _cap(lines: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 
 def _store_locked(token: str, lines: pd.DataFrame, now: float,
-                  period_held: dict | None = None) -> None:
+                  period_held: dict | None = None, pasted_utc=None) -> None:
     stored, dropped = _cap(lines)
     _BOARDS[token] = _Board(stored, now, int(stored.memory_usage(deep=True).sum()), dropped,
-                            dict(period_held or {}), _wall())
+                            dict(period_held or {}),
+                            pasted_utc if pasted_utc is not None else _wall())
     _BOARDS.move_to_end(token)
     _evict_locked(now)
 
@@ -1433,12 +1444,14 @@ def board_info(token) -> dict | None:
                 "period_held_by_date": dict(b.period_held), "pasted_utc": b.pasted_utc}
 
 
-def add_to_board(token, lines: pd.DataFrame) -> str:
+def add_to_board(token, lines: pd.DataFrame, pasted_utc=None) -> str:
     """COPY ON WRITE: store `token`'s board plus `lines` (collapsing the
     ladder, newest winning) under a NEW token and return it. The board under
     `token` is left exactly as it was, so a visitor who opened someone else's
     link can add lines without changing the board that link shows. An
-    unknown, expired or malformed `token` starts from nothing.
+    unknown, expired or malformed `token` starts from nothing. `pasted_utc`
+    (a board the visitor's browser kept, restore_saved) keeps that board's own
+    paste time; otherwise the write is stamped now.
 
     The superseded board moves to the eviction end of the LRU: it is usually
     the same visitor's previous copy, dead weight once their URL carries the
@@ -1456,7 +1469,7 @@ def add_to_board(token, lines: pd.DataFrame) -> str:
         if b is not None:
             _BOARDS.move_to_end(token, last=False)
         new = secrets.token_urlsafe(24)
-        _store_locked(new, merged, now, period_held=held)
+        _store_locked(new, merged, now, period_held=held, pasted_utc=pasted_utc)
     return new
 
 
@@ -1474,6 +1487,157 @@ def clear_board(token) -> None:
 def board_count() -> int:
     with _BOARDS_LOCK:
         return len(_BOARDS)
+
+
+# ── The visitor's board, kept in THEIR browser (Barrett, 2026-11-05) ────────
+# "I have to reenter them every time I refresh": the board above lives in this
+# process, so a link without ?board= (a bookmark, a new tab) or a restart (a
+# reboot, or freshen's purge on a deploy) loses it. The page keeps a copy in
+# the visitor's own browser (props_ui.board_keeper, localStorage) and brings
+# it back when the link carries no live board. Nothing is written on the
+# server, and the copy never reaches another visitor.
+#
+# The copy carries what a PASTE carries plus the game each line was routed
+# to, never the verdicts compare trusts (person_id, match, how, roster_*):
+# restore_saved re-derives those through the paste path's own
+# _classify_and_resolve. It never carries a token either: a restore mints a
+# fresh one, so a shared link stays read-only. It comes back from a browser,
+# so restore_saved is a second paste box: exact shape, every field through
+# the paste validators, the board's own row cap, and it never raises.
+SAVED_VERSION = 1
+SAVED_COLUMNS = ("name", "team_code", "stat_type", "line", "direction", "odds_type",
+                 "opp", "is_combo", "league", "game_date", "game_id", "tip_utc")
+SAVED_MAX_AGE_DAYS = 7     # a copy pasted longer ago than this is dropped whole
+SAVED_AHEAD_DAYS = 3       # PrizePicks posts today and tomorrow; further out is junk
+SAVED_MAX_SKEW_S = 300     # a paste time this far in the future is junk too
+_DIRECTIONS = frozenset({"both", "more", "less", ""})
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_GAME_ID = re.compile(r"^\d{8,12}$")
+
+
+def _json_value(v):
+    """A stored cell as a plain JSON value: None for missing and non-finite,
+    never NaN (JSON.parse rejects a bare NaN)."""
+    if v is None or isinstance(v, str):
+        return v
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        return float(v) if math.isfinite(float(v)) else None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
+def saved_board(lines: pd.DataFrame | None, pasted_utc, save_id: str,
+                today: dt.date, owner: str | None = None) -> dict | None:
+    """The browser's copy of a board: {"v", "id", "owner", "cols",
+    "pasted_utc", "rows"}, one row per stored line whose own game falls on
+    `today` (ET) or later, in SAVED_COLUMNS order. `save_id` is what the
+    browser acknowledges a write with and `owner` names the board (a hash of
+    its token, never the token). None when no line qualifies: a board of
+    past games has nothing worth keeping."""
+    if lines is None or lines.empty or "game_date" not in lines.columns:
+        return None
+    floor = today.isoformat()
+    keep = lines["game_date"].map(lambda d: isinstance(d, str) and d >= floor)
+    t = lines[keep]
+    if t.empty:
+        return None
+    rows = [[_json_value(rec.get(c)) for c in SAVED_COLUMNS]
+            for rec in t.to_dict(orient="records")]
+    return {"v": SAVED_VERSION, "id": str(save_id), "owner": owner,
+            "cols": list(SAVED_COLUMNS), "pasted_utc": _utc_iso(_parse_ts(pasted_utc)),
+            "rows": rows}
+
+
+def _saved_row(row, lo: dt.date, hi: dt.date) -> dict | None:
+    """One kept line back as a parsed line (the shape _classify_and_resolve
+    reads), or None. Every field through the paste validators."""
+    if not isinstance(row, list) or len(row) != len(SAVED_COLUMNS):
+        return None
+    r = dict(zip(SAVED_COLUMNS, row))
+    name = _text(r["name"], MAX_NAME_LEN)
+    if name is None or not _person_like(name):
+        return None
+    label = r["stat_type"]
+    if not isinstance(label, str) or len(label) > MAX_LABEL_LEN:
+        return None
+    line = _parse_line(r["line"])
+    if line is None:
+        return None
+    gd = r["game_date"]
+    if not isinstance(gd, str) or not _ISO_DATE.match(gd):
+        return None
+    try:
+        day = dt.date.fromisoformat(gd)
+    except ValueError:
+        return None
+    if not lo <= day <= hi:
+        return None
+    team, opp = r["team_code"], r["opp"]
+    gid, tip, side = r["game_id"], r["tip_utc"], r["direction"]
+    return {"name": name,
+            "team": teams.canonical(team) if isinstance(team, str) and len(team) <= 30 else None,
+            "stat_type": label.strip(), "line": line,
+            "direction": side if isinstance(side, str) and side in _DIRECTIONS else "",
+            "odds_type": (_text(r["odds_type"], 20) or "standard").lower(),
+            "opp": teams.canonical(opp) if isinstance(opp, str) and len(opp) <= 30 else None,
+            "is_combo": r["is_combo"] is True,
+            "league": _text(r["league"], 20),
+            "game_date": gd,
+            "game_id": gid if isinstance(gid, str) and _GAME_ID.match(gid) else None,
+            "tip_utc": _utc_iso(_parse_ts(tip)) if isinstance(tip, str) and len(tip) <= 40 else None}
+
+
+def _saved_row_or_none(row, lo: dt.date, hi: dt.date) -> dict | None:
+    """One bad row costs one row, as at every paste stage."""
+    try:
+        return _saved_row(row, lo, hi)
+    except Exception:  # noqa: BLE001 - untrusted cell types
+        return None
+
+
+def restore_saved(payload, roster: pd.DataFrame, today: dt.date, now: dt.datetime
+                  ) -> tuple[pd.DataFrame, dt.datetime, int] | None:
+    """(lines, pasted_utc, rows dropped) from the browser's copy of a board,
+    ready for add_to_board(None, lines, pasted_utc=...), or None when nothing
+    usable comes back. NEVER raises: the payload is whatever a browser sent.
+
+    The whole copy is refused when its shape is wrong, it holds more rows than
+    a board can (BOARD_MAX_ROWS), or its paste time is unreadable, in the
+    future or older than SAVED_MAX_AGE_DAYS. A row is dropped when any field
+    fails the paste validators or its game is not between `today` and
+    SAVED_AHEAD_DAYS later. Names are resolved again against `roster`."""
+    try:
+        if not isinstance(payload, dict) or payload.get("v") != SAVED_VERSION:
+            return None
+        if payload.get("cols") != list(SAVED_COLUMNS):
+            return None
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows or len(rows) > BOARD_MAX_ROWS:
+            return None
+        stamp = payload.get("pasted_utc")
+        pasted = _parse_ts(stamp) if isinstance(stamp, str) and len(stamp) <= 40 else None
+        if pasted is None:
+            return None
+        age = (now - pasted).total_seconds()
+        if age < -SAVED_MAX_SKEW_S or age > SAVED_MAX_AGE_DAYS * 86400:
+            return None
+        hi = today + dt.timedelta(days=SAVED_AHEAD_DAYS)
+        recs = [r for r in (_saved_row_or_none(row, today, hi) for row in rows) if r is not None]
+        if not recs:
+            return None
+        lines = _classify_and_resolve(pd.DataFrame(recs), roster)
+        return lines, pasted.astimezone(UTC), len(rows) - len(recs)
+    except Exception as e:  # noqa: BLE001 - a browser's copy must never raise into the page
+        logger.warning("restore_saved: refused (%s)", type(e).__name__)
+        return None
 
 
 # ── Per-stat reliability ─────────────────────────────────────────────────────

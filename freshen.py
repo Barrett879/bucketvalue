@@ -15,7 +15,9 @@ of every source file) when it is imported. When the code on disk differs from
 that, ensure() drops the package and every submodule from sys.modules, so the
 imports that follow load the code on disk. The common path is one stat() per
 source file; the hash runs only when an mtime moved. Module state goes with a
-purge (in-process pasted boards, live-feed caches), as it would on a reboot.
+purge (in-process pasted boards, live-feed caches), as it would on a reboot; a
+visitor's board comes back from the copy in their browser
+(props_ui.board_keeper).
 
 The scripts drop THIS module from sys.modules before importing it, so it is
 never stale itself.

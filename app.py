@@ -91,8 +91,10 @@ try:
 except RuntimeError:
     ROSTER = None
 # Every internal link is a full page load (a new Streamlit session), so a
-# visitor's pasted board travels as ?board=<token> on every minted URL.
-TOKEN = props_ui.board_token()
+# visitor's pasted board travels as ?board=<token> on every minted URL. The
+# keeper runs first, before the nav and every widget: a board this browser
+# kept comes back onto the link for this whole run (props_ui.board_keeper).
+TOKEN = props_ui.board_keeper(ROSTER)
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
         **store.view_params(TOKEN, MARKS)}
 render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS)})
