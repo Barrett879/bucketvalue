@@ -2558,6 +2558,10 @@ def test_review_7_a_letter_that_may_be_an_article_is_never_assists(text):
     # A corrected answer (B8).
     "Will Jalen Brunson score 26+ points? No... actually yes",
     "Will Jalen Brunson score 26+ points? Yes. No wait, no", "Jalen Brunson 26+ points No, wait, yes",
+    # ...and with no mark at all: "wait" and "actually" open the correction
+    # (found by mutation: without them each of these showed a side).
+    "Jalen Brunson 26+ points No wait yes", "Josh Hart 9+ rebounds no actually lock it",
+    "Jalen Brunson over 25.5 points No actually yes", "Josh Hart under 8.5 rebounds nah wait he's cooking",
 ])
 def test_review_7_a_side_turned_by_its_own_words_is_counted(text):
     df = props.parse_typed_lines(text)
@@ -2663,6 +2667,21 @@ def test_review_7_labels_and_their_spellings(label, priced, roster, schedule):
         assert report["comparable"] == 2, label
     else:
         assert report["not_comparable"].get("not priced") == 2 and report["comparable"] == 0, label
+
+
+@pytest.mark.parametrize("name_line", [
+    "Jalen Brunson (1Qprops)", "Jalen Brunson (FirstQuarter)", "Jalen Brunson (1Q_props)",
+    "Jalen Brunson (Q1props)", "Jalen Brunson (1H_picks)",
+])
+def test_a_glued_period_in_a_name_lines_parenthesis_labels_the_picks(name_line):
+    """A name line's parenthesis with its period glued to the next word
+    ('(1Qprops)', '(FirstQuarter)') labels every pick under it as '(1Q)'
+    does (review 7, A3). _named_period unglues it; without that the quarter
+    picks under it were priced as full game (found by mutation)."""
+    df = props.parse_typed_lines(f"{name_line}\nOver 6.5 points\nJosh Hart over 8.5 rebounds\n")
+    assert len(df) == 2 and all(props._PERIOD.search(s.lower()) for s in df["stat_type"]), \
+        (name_line, list(df["stat_type"]))
+    assert df.attrs["typed_period_label"] == 2, name_line
 
 
 def test_the_period_label_note_advises_taking_the_period_off():
