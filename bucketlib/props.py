@@ -1,8 +1,12 @@
-"""PrizePicks lines for BucketValue: paste, parse, match, route, compare, grade.
+"""Player lines for BucketValue: paste, parse, match, route, compare, grade.
 
 HOW LINES GET IN, AND WHY THERE IS NO SCRAPER
 ---------------------------------------------
-A visitor pastes them. That is the whole ingestion path, and it is deliberate:
+Two ways, and neither is a scraper. A licensed odds feed (The Odds API, Barrett
+2026-11-09) brings DraftKings, FanDuel, BetMGM, PrizePicks and Underdog lines:
+bucketlib.live fetches it and the page hands this module a DataFrame
+(prepare_feed, compare_books, feed_board). And a visitor pastes a PrizePicks
+board or a typed list, the backup. Nothing ever fetches PrizePicks itself:
 
   1. api.prizepicks.com returns HTTP 403 to server-side requests behind
      Cloudflare bot management (verified on both siblings), and rejects VPN
@@ -12,12 +16,12 @@ A visitor pastes them. That is the whole ingestion path, and it is deliberate:
      spider, or other automatic device, process, or means to access the Site
      or App". Solving (1) would not solve (2).
 
-So the visitor opens the feed (FEED_URL) or the board in their own browser and
-pastes what they see, or pastes a list of picks typed by hand or copied from a
-picks post ("Oso Ighodaro over 7.5 Points + Rebounds", parse_typed_lines).
-This module parses it. **Do not add a fetcher here.**
-tests/test_props.py parses this module's imports and fails if it, or anything
-it imports from bucketlib, imports a network library.
+So for a paste the visitor opens the feed (FEED_URL) or the board in their own
+browser and pastes what they see, or pastes a list of picks typed by hand or
+copied from a picks post (parse_typed_lines). This module parses it and never
+fetches anything. **Do not add a fetcher here.** tests/test_props.py parses
+this module's imports and fails if it, or anything it imports from bucketlib,
+imports a network library or the live layer.
 
 THINGS THAT ARE EASY TO GET WRONG (each was a shipped bug on a sibling)
 -----------------------------------------------------------------------
@@ -94,7 +98,7 @@ from .util import UTC, now_utc, season_end_year, season_for_date, to_et
 
 VERSION = "v1"
 
-# ── The feed link. A LINK the visitor opens, never a request this code makes ──
+# -- The feed link. A LINK the visitor opens, never a request this code makes --
 # TODO(first real NBA paste): 7 is the NBA league id by REPUTATION only; nobody
 # has observed it from this project. DiamondValue's MLB id (2) turned out right
 # but was doubted once because the board was empty mid-game, so verify against
@@ -106,7 +110,7 @@ NBA_LEAGUE_ID = 7
 FEED_URL = ("https://api.prizepicks.com/projections?"
             f"league_id={NBA_LEAGUE_ID}&per_page=1000&game_mode=pickem")
 
-# ── Paste-box limits. Each bounds work an anonymous visitor can cause ────────
+# -- Paste-box limits. Each bounds work an anonymous visitor can cause --------
 # MEASURED (audit 2026-10-09): at a 20 MB cap one paste of short lines took
 # peak memory from 116 to 536 MB, because every line became a Python string at
 # once. The board parser now reads lines lazily and stops at MAX_TEXT_LINES,
@@ -131,7 +135,7 @@ MAX_NAME_LEN = 80
 MAX_LABEL_LEN = 80
 MAX_TEXT_LINE_LEN = 300           # board-text lines longer than this are not squares
 
-# ── Leans ────────────────────────────────────────────────────────────────────
+# -- Leans --------------------------------------------------------------------
 # A side's probability with ties excluded inside this distance of a coin flip
 # is "Even": no side is leaned and the row is never pickable.
 EVEN_BAND = 0.01
@@ -145,7 +149,7 @@ MIN_GAMES = 5
 # on 6): (1/payout)^(1/legs).
 BREAKEVEN_LO, BREAKEVEN_HI = 54.7, 58.5
 
-# ── Stats ────────────────────────────────────────────────────────────────────
+# -- Stats --------------------------------------------------------------------
 FANTASY_WEIGHTS = {"pts": 1.0, "reb": 1.2, "ast": 1.5, "stl": 3.0, "blk": 3.0,
                    "tov": -1.0}
 
@@ -168,7 +172,7 @@ COMBO_STATS = frozenset({"pr", "pa", "ra", "pra", "stocks", "fantasy"})
 # Grid step of each stat's outcome. Fantasy lands on tenths.
 STAT_STEP = {s: (0.1 if s == "fantasy" else 1.0) for s in STAT_FORMULA}
 
-# ── Fantasy Score: the formula on the numbers shown (Barrett, 2026-11-05) ────
+# -- Fantasy Score: the formula on the numbers shown (Barrett, 2026-11-05) ----
 # The pages print each stat's mid-p median to a tenth (util.fmt_num), and
 # Fantasy Score is PrizePicks' formula on THOSE numbers, so it always adds up
 # from the row a visitor reads. A median of a sum is not the sum of the
@@ -242,7 +246,7 @@ def label_key(label) -> str:
     """Case-, spacing-, hyphen- and plus-tolerant key for a stat label.
     '3-PT Made', '3PT Made' and '3 pt made' all become '3ptmade';
     'Pts + Rebs + Asts' becomes 'pts+rebs+asts'."""
-    s = str(label or "")[:MAX_LABEL_LEN].lower().replace("＋", "+")
+    s = str(label or "")[:MAX_LABEL_LEN].lower().replace("\uff0b", "+")
     return re.sub(r"[\s\-_.]+", "", s)
 
 
@@ -338,7 +342,7 @@ def classify_stat(stat_type, name=None, is_combo=False, league=None
     return None, "unmapped", "stat not mapped to a projected quantity"
 
 
-# ── Names that are not people ────────────────────────────────────────────────
+# -- Names that are not people ------------------------------------------------
 _GLUE = {"vs", "vs.", "@", "at", "v", "/", "-"}
 # Characters no player name carries but JSON, markup and key=value text do. A
 # JSON line like `"name": "Nikola Jokic"` is otherwise "person-like".
@@ -367,7 +371,7 @@ def _person_like(name) -> bool:
     return any(sum(ch.isalpha() for ch in t) >= 2 for t in toks)
 
 
-# ── Which sides a line offers ────────────────────────────────────────────────
+# -- Which sides a line offers ------------------------------------------------
 # The last-resort default when neither the feed nor the board says. Kept
 # permissive on purpose: hiding a real pick is worse than showing one the market
 # may not offer. One place, so changing the rule is a one-line edit, and it
@@ -428,7 +432,7 @@ def is_pickable(lean, sides) -> bool:
     return sides == "both" or sides == lean
 
 
-# ── Parsing ──────────────────────────────────────────────────────────────────
+# -- Parsing ------------------------------------------------------------------
 # `pick`, `pair` and `pair_loose` come from a typed list only
 # (parse_typed_lines): the side the visitor wrote, the game its game heading
 # names, and the two teams a loose heading joins ("ORL-PHX"), a game only
@@ -650,7 +654,7 @@ def _is_stat_label(text: str) -> bool:
 
 
 # Every separator str.splitlines() honours. A run of anything else is a line.
-_TEXT_LINE = re.compile(r"[^\r\n\x0b\x0c\x1c\x1d\x1e\x85  ]+")
+_TEXT_LINE = re.compile(r"[^\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]+")
 
 
 def _board_lines(text: str, attrs: dict) -> list[str]:
@@ -811,7 +815,7 @@ def parse_prizepicks_board(text: str) -> pd.DataFrame:
     return _frame(rows, attrs)
 
 
-# ── A typed list of picks (Barrett, 2026-11-06) ──────────────────────────────
+# -- A typed list of picks (Barrett, 2026-11-06) ------------------------------
 # One pick per line, as a visitor types them or copies them from a picks post.
 # The first real one (Magic at Suns, 2026-11-05):
 #
@@ -3620,7 +3624,7 @@ def parse_any(text) -> pd.DataFrame:
     return board
 
 
-# ── Names -> PERSON_ID ───────────────────────────────────────────────────────
+# -- Names -> PERSON_ID -------------------------------------------------------
 def build_name_index(roster: pd.DataFrame) -> NameIndex:
     """NameIndex over the CURRENT roster frame (person_id, name, team)."""
     idx = NameIndex()
@@ -3690,7 +3694,7 @@ def resolve_names(lines: pd.DataFrame, roster: pd.DataFrame,
     return resolved, unresolved
 
 
-# ── Routing: each line to the ET date of its own game ────────────────────────
+# -- Routing: each line to the ET date of its own game ------------------------
 # A start time outside this window is junk, not a game. A paste box accepts
 # "9999-12-31T23:59:59Z", and subtracting that from a pandas tip raised
 # OutOfBoundsDatetime out of the whole paste (audit 2026-10-09).
@@ -3873,7 +3877,7 @@ def route_lines(lines: pd.DataFrame, schedule: pd.DataFrame, now=None,
     return out
 
 
-# ── The alt-line ladder ──────────────────────────────────────────────────────
+# -- The alt-line ladder ------------------------------------------------------
 _ODDS_RANK = {"standard": 0, "goblin": 1, "demon": 2}
 
 
@@ -4092,7 +4096,7 @@ def collapse_alt_lines(df: pd.DataFrame, new_from: int | None = None) -> pd.Data
     return out
 
 
-# ── One call from paste text to stored lines ─────────────────────────────────
+# -- One call from paste text to stored lines ---------------------------------
 def _classify_row(stat_type, name, is_combo, league) -> tuple[str | None, str, str | None]:
     try:
         return classify_stat(stat_type, name, bool(is_combo), league)
@@ -4250,7 +4254,7 @@ def lines_for_date(lines: pd.DataFrame | None, date) -> pd.DataFrame:
     return lines[lines["game_date"].astype(str) == d].reset_index(drop=True)
 
 
-# ── The visitor's board: in-process, token-keyed, never on the server's disk ─
+# -- The visitor's board: in-process, token-keyed, never on the server's disk -
 # Every internal link is a full page load (a new Streamlit session), so
 # st.session_state cannot carry a paste from the slate to a game page. The
 # board lives HERE, in this process, keyed by an unguessable token that rides
@@ -4332,9 +4336,28 @@ def _evict_locked(now: float) -> None:
         nbytes -= b.nbytes
 
 
+def _without_feed_rows(lines):
+    """`lines` less every row of the licensed feed (build amendment B14): a
+    line whose line-level `source` is FEED_SOURCE, or a compared row whose
+    `origin` is "feed" (compare's mark of the same thing). The token board
+    and its browser copy hold only the visitor's paste (design 2.5, RC R5).
+    The feed path never hands them a feed row; this makes a later mistake
+    that does harmless. Anything else, a non-frame included, passes as it
+    is."""
+    if not isinstance(lines, pd.DataFrame) or lines.empty:
+        return lines
+    feed = np.zeros(len(lines), dtype=bool)
+    for col, mark in (("source", FEED_SOURCE), ("origin", "feed")):
+        if col in lines.columns:
+            feed |= np.array([isinstance(v, str) and v == mark for v in lines[col]], dtype=bool)
+    return lines[~feed] if feed.any() else lines
+
+
 def _cap(lines: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """(the stored frame, rows dropped by BOARD_MAX_ROWS). Compact columns only."""
-    lines = lines if lines is not None else pd.DataFrame()
+    """(the stored frame, rows dropped by BOARD_MAX_ROWS). Compact columns
+    only, and never a feed row (B14): every write to the store comes
+    through here."""
+    lines = _without_feed_rows(lines if lines is not None else pd.DataFrame())
     keep = [c for c in BOARD_COLUMNS if c in lines.columns]
     lines = lines[keep]
     dropped = max(0, len(lines) - BOARD_MAX_ROWS)
@@ -4421,7 +4444,12 @@ def add_to_board(token, lines: pd.DataFrame, pasted_utc=None) -> str:
     The superseded board moves to the eviction end of the LRU: it is usually
     the same visitor's previous copy, dead weight once their URL carries the
     new token, so under pressure it goes before anyone's live board. Reading
-    it again (an old or shared link) moves it back."""
+    it again (an old or shared link) moves it back.
+
+    A feed row in `lines` is dropped before the merge (build amendment B14;
+    _cap drops one on every write too), so it can never displace the
+    board's own pasted line for the same player and stat."""
+    lines = _without_feed_rows(lines)
     with _BOARDS_LOCK:
         now = _clock()
         _evict_locked(now)
@@ -4462,7 +4490,7 @@ def board_count() -> int:
         return len(_BOARDS)
 
 
-# ── The visitor's board, kept in THEIR browser (Barrett, 2026-11-05) ────────
+# -- The visitor's board, kept in THEIR browser (Barrett, 2026-11-05) --------
 # "I have to reenter them every time I refresh": the board above lives in this
 # process, so a link without ?board= (a bookmark, a new tab) or a restart (a
 # reboot, or freshen's purge on a deploy) loses it. The page keeps a copy in
@@ -4627,7 +4655,7 @@ def restore_saved(payload, roster: pd.DataFrame, today: dt.date, now: dt.datetim
         return None
 
 
-# ── Per-stat reliability ─────────────────────────────────────────────────────
+# -- Per-stat reliability -----------------------------------------------------
 # Measured side-picking edge per stat, written by an NBA validate_lean_accuracy
 # run on validate/test seasons. Missing file -> every row 'unmeasured', which the
 # UI renders quietly. Combos inherit their WEAKEST component.
@@ -4684,7 +4712,7 @@ def reliability_for(stat: str) -> dict:
             "note": str(hit.get("note") or "")}
 
 
-# ── Distributions: what compare() needs from the model side ──────────────────
+# -- Distributions: what compare() needs from the model side ------------------
 @runtime_checkable
 class DistProvider(Protocol):
     """Hands compare() a distribution for one player, game and stat.
@@ -4778,7 +4806,7 @@ class MeanDispersionProvider:
         return "baseline"
 
 
-# ── The lean ─────────────────────────────────────────────────────────────────
+# -- The lean -----------------------------------------------------------------
 # REBOOT HOOK. PrizePicks voids a MORE pick on a full-game line when the player
 # leaves in the first half and does not return, unless he already cleared it.
 # Pricing that needs an exit model (play-by-play, v1.1). Until then the void
@@ -4808,7 +4836,40 @@ def lean_from(q_more: float, band: float = EVEN_BAND) -> str:
     return "Even"
 
 
-# ── Compare ──────────────────────────────────────────────────────────────────
+# -- The licensed odds feed: its books and columns (design 2.5, layout B) -----
+# The page hands this module the feed's lines as a DataFrame, exactly as it
+# hands it the schedule mark: nothing here fetches, and this module imports
+# nothing of the feed (tests/test_props.py's guards). The rows come from The
+# Odds API under licence (Barrett, 2026-11-09), for five books. The board shows
+# ONE book at a time, picked with a row of pills (layout B, amendment A1), and
+# lists the other four books' lines beside each row.
+FEED_SOURCE = "oddsapi"      # the line-level `source` of a feed row; TYPED_SOURCE is untouched
+PASTE_BOOK = "prizepicks"    # every pasted line is a PrizePicks line, as before the feed
+# The pill order and the Other books order (amendment A2). sources.oddsapi
+# keeps the same five as BOOKS and the same titles (tests/test_props_feed.py
+# pins both), and this module never imports it.
+BOOK_ORDER = ("prizepicks", "underdog", "draftkings", "fanduel", "betmgm")
+BOOK_TITLE = {"prizepicks": "PrizePicks", "underdog": "Underdog", "draftkings": "DraftKings",
+              "fanduel": "FanDuel", "betmgm": "BetMGM"}
+BOOK_CODE = {"prizepicks": "PP", "underdog": "UD", "draftkings": "DK", "fanduel": "FD",
+             "betmgm": "MGM"}
+# Pick'em books. Their prices are indicative only, so a DFS row never carries a
+# price, and their side words are More and Less (side_words).
+DFS_BOOKS = frozenset({"prizepicks", "underdog"})
+# The columns prepare_feed needs from the feed frame (sources.oddsapi's
+# FEED_COLUMNS hold them all; a contract test pins it).
+FEED_REQUIRED = ("name", "stat_type", "line", "start_time", "direction", "odds_type", "league",
+                 "source", "book", "book_title", "price_over", "price_under", "last_update",
+                 "fetched_at", "event_id", "event_home", "event_away", "game_id", "game_date",
+                 "tip_utc")
+# What compare() adds to every row for the feed: the book (PASTE_BOOK for a
+# pasted line), its title, the origin ("feed" or "pasted"), the two prices (NaN
+# on DFS rows and pasted rows) and the feed's two stamps (None on pasted rows).
+TABLE_EXTRA = ("book", "book_title", "origin", "price_over", "price_under", "fetched_at",
+               "last_update")
+
+
+# -- Compare ------------------------------------------------------------------
 TABLE_COLUMNS = [
     "person_id", "game_id", "game_date", "player", "team", "opp", "stat",
     "stat_label", "line", "model", "mean", "gap", "p_over", "p_push", "p_under",
@@ -4816,6 +4877,7 @@ TABLE_COLUMNS = [
     "tier_edge", "tier_note", "games_prior", "thin", "void_risk", "mu_min",
     "void_note", "source", "how", "pasted_name", "model_version", "as_of",
     "provisional", "adjusted", "tip_utc", "tie_possible", "pick",
+    *TABLE_EXTRA,
 ]
 _GAMES_COLS = ("games_prior", "n_games", "games")
 _MIN_COLS = ("mu_min", "min")
@@ -4871,6 +4933,39 @@ def _bump(d: dict, k, n: int = 1) -> None:
     d[k] = d.get(k, 0) + n
 
 
+def _line_book(rec) -> str:
+    """The book a line came from: a feed row's own key, else PASTE_BOOK (a
+    pasted line, and every line before the feed, is a PrizePicks line)."""
+    b = rec.get("book") if hasattr(rec, "get") else None
+    return b.strip().lower() if isinstance(b, str) and b.strip() else PASTE_BOOK
+
+
+def _utc_stamp(v) -> pd.Timestamp | None:
+    """An aware UTC Timestamp, or None for a stamp that is missing, naive or
+    unreadable (_parse_ts's rules)."""
+    ts = _parse_ts(v)
+    return None if ts is None else pd.Timestamp(ts).tz_convert("UTC")
+
+
+def _line_extra(rec) -> dict:
+    """compare()'s TABLE_EXTRA cells for one line (design 2.5). The title is
+    this module's own for the five books, so a vendor's spelling never
+    reaches the page. A DFS row carries no price: its prices are indicative
+    only, so nothing may do price math on them."""
+    book = _line_book(rec)
+    title = BOOK_TITLE.get(book)
+    if title is None:
+        own = rec.get("book_title")
+        title = own if isinstance(own, str) and own else book
+    dfs = book in DFS_BOOKS
+    return {"book": book, "book_title": title,
+            "origin": "feed" if str(rec.get("source") or "") == FEED_SOURCE else "pasted",
+            "price_over": float("nan") if dfs else _finite_or_nan(rec.get("price_over")),
+            "price_under": float("nan") if dfs else _finite_or_nan(rec.get("price_under")),
+            "fetched_at": _utc_stamp(rec.get("fetched_at")),
+            "last_update": _utc_stamp(rec.get("last_update"))}
+
+
 def _centred_pmf(dist_provider, pid: int, gid: str, prow: dict, stat: str) -> Pmf | None:
     """The provider's pmf for one player, game and stat, re-centred on the
     projection row's shipped mean when it carries one: how compare() reads
@@ -4889,7 +4984,14 @@ def _centred_pmf(dist_provider, pid: int, gid: str, prow: dict, stat: str) -> Pm
 
 def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
             roster: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
-    """Every pasted line against its distribution. Returns (table, meta).
+    """Every line, pasted or prepared from the odds feed (prepare_feed),
+    against its distribution. Returns (table, meta).
+
+    Each row also says which book's line it is and where it came from
+    (TABLE_EXTRA): `book` (PASTE_BOOK for a pasted line), `book_title`,
+    `origin` ("feed" for a row whose `source` is FEED_SOURCE, else
+    "pasted"), the prices (NaN on a DFS row), and the feed's `fetched_at`
+    and `last_update` (None on a pasted row).
 
     Per matched line: P(>), P(=), P(<) from the provider's Pmf (re-centred on
     the shipped mean when the projection row carries one), q per side with ties
@@ -5066,6 +5168,9 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
                 # The side a typed list named: shown beside the lean, never
                 # used to price, rank or hide the line.
                 "pick": pick_of(rec.get("pick")),
+                # Which book's line this is, where it came from and, for a
+                # feed row, its prices and stamps (TABLE_EXTRA).
+                **_line_extra(rec),
             })
         except Exception as e:  # noqa: BLE001 - a bad row is counted, never raised
             meta["errors"] += 1
@@ -5288,7 +5393,712 @@ def ledger(meta: dict, shown=None, hidden=None, thin=None, void=None) -> dict:
     return out
 
 
-# ── The record: LOCAL ONLY ───────────────────────────────────────────────────
+# -- The licensed odds feed: lines, tables and the board (design 2.5) --------
+# The page hands this module the feed's frame (oddsapi's FEED_COLUMNS, one
+# row per book, player and market, every row a standard full-game line).
+#   prepare_feed   gives it the shape prepare_paste gives a paste: stat
+#                  verdicts, names resolved inside the event's two teams, ISO
+#                  game dates, one row per game date, player, stat and book.
+#                  It never routes by the clock: the event match placed every
+#                  row on its game, and route_lines drops started games (T2).
+#   compare_books  runs compare() once per (book, game).
+#   feed_board     takes the SELECTED book's rows for every game (layout B,
+#                  amendment A1), merges the visitor's paste into PrizePicks'
+#                  rows (newest wins, M5), and lists the other books' rows
+#                  for the same keys as context. Its meta balances under
+#                  ledger(meta, *board_rows(reference)) for every pick.
+# Storage stays apart (RC R5): the visitor's token board and its browser copy
+# hold only the paste. Nothing here calls new_board, add_to_board,
+# saved_board or restore_saved, and feed rows never reach _cap.
+FEED_REPORT_NAMES = 12        # unmatched and ambiguous names listed per book
+FEED_META_NAMES = 50          # compare()'s own cap on a meta's name lists
+_FALLBACK_HOWS = ("exact", "alias")    # what the other-team fallback accepts (m20, B13)
+_PREPARED_COLUMNS = ("stat", "kind", "refusal", "team", "team_code", "match", "person_id",
+                     "how", "roster_name", "roster_team", "route_how", "projectable")
+_SUMMED = ("posted", "matched", "unmatched", "ambiguous", "unprojected", "n_refused",
+           "errors", "period_withheld")
+_TALLIED = ("refused", "unmapped", "unprojected_why")
+
+
+def _iso_game_date(v) -> str | None:
+    """A game date as the ISO string a pasted row carries (route_lines), from
+    a python date (the schedule's, pipeline.state_games), a Timestamp or an
+    ISO string; None when it is not a date (m3)."""
+    if isinstance(v, str):
+        s = v.strip()[:10]
+        if not _ISO_DATE.match(s):
+            return None
+        try:
+            return dt.date.fromisoformat(s).isoformat()
+        except ValueError:
+            return None
+    try:
+        if v is None or pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if isinstance(v, dt.datetime):            # pd.Timestamp included
+        return v.date().isoformat()
+    if isinstance(v, dt.date):
+        return v.isoformat()
+    return None
+
+
+def _game_id_of(v) -> str | None:
+    if isinstance(v, str):
+        return v.strip() or None
+    return None
+
+
+def _in_game_pairs(projections) -> set:
+    """{(person_id, game_id)} for every projection row: who plays in which game."""
+    if projections is None or not isinstance(projections, pd.DataFrame) or projections.empty \
+            or not {"person_id", "game_id"} <= set(projections.columns):
+        return set()
+    out = set()
+    for pid, gid in projections[["person_id", "game_id"]].itertuples(index=False):
+        p = _as_pid(pid)
+        if p is not None and gid is not None:
+            out.add((p, str(gid)))
+    return out
+
+
+def resolve_event_names(lines: pd.DataFrame, roster: pd.DataFrame,
+                        projections: pd.DataFrame | None = None
+                        ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(resolved, unresolved) for feed lines, in resolve_names' shape. Never
+    drops a row.
+
+    A feed line names its event's two teams (event_away, event_home), never
+    the player's own, so resolve_names' one-team scope cannot apply, and with
+    no team an exact name two players share is ambiguous (RC G9). So, per
+    event:
+      1. one build_name_index over the two teams' roster rows, looked up
+         with team=None: alias, exact, then the unique given-name prefix,
+         all inside those two teams (NameIndex.get);
+      2. if that finds nobody, an index over the roster rows of the players
+         with a projection row in THIS line's game only, and only an exact or
+         alias match there (never a prefix): a roster lagging a trade while
+         the projections already have him on his new team (m20). Looking
+         only at this game's players (build amendment B13), a namesake
+         anywhere else in the league never makes such a line ambiguous or
+         unmatched. Such rows carry `how` + "+other_team", as resolve_names
+         marks a player the roster puts on another team.
+    Everything else is unresolved, with reason "ambiguous" or "unmatched".
+    Resolved rows get team = team_code = the roster's team."""
+    cols = list(lines.columns) if isinstance(lines, pd.DataFrame) else []
+    res_cols = cols + [c for c in ("person_id", "how", "roster_name", "roster_team",
+                                   "team", "team_code") if c not in cols]
+    unres_cols = cols + [c for c in ("reason", "how") if c not in cols]
+    if not isinstance(lines, pd.DataFrame) or lines.empty:
+        return pd.DataFrame(columns=res_cols), pd.DataFrame(columns=unres_cols)
+    have_roster = isinstance(roster, pd.DataFrame) and not roster.empty
+    look = _roster_lookup(roster) if have_roster else {}
+    codes = roster["team"].map(teams.canonical) if have_roster else pd.Series(dtype=object)
+    in_game = _in_game_pairs(projections)
+    roster_pids = roster["person_id"].map(_as_pid) if have_roster else pd.Series(dtype=object)
+    by_pair: dict = {}
+    by_game: dict = {}            # game_id -> index of the roster rows projected in that game
+    res, unres = [], []
+    for rec in lines.to_dict(orient="records"):
+        try:
+            away = teams.canonical(rec.get("event_away"))
+            home = teams.canonical(rec.get("event_home"))
+            name = str(rec.get("name") or "")
+            if away is None or home is None or away == home or not have_roster:
+                unres.append({**rec, "reason": "unmatched", "how": "none"})
+                continue
+            idx = by_pair.get((away, home))
+            if idx is None:
+                idx = by_pair[(away, home)] = build_name_index(roster[codes.isin([away, home])])
+            m = idx.get(name, team=None)
+            pid, how, last = (None if m.value is None else int(m.value)), m.how, m.how
+            if pid is None and m.how != "ambiguous":
+                gid = str(rec.get("game_id"))
+                gidx = by_game.get(gid)
+                if gidx is None:                  # B13: this game's projected players only
+                    here = {p for p, g in in_game if g == gid}
+                    gidx = by_game[gid] = build_name_index(roster[roster_pids.isin(here)])
+                f = gidx.get(name, team=None)
+                last = f.how
+                if (f.value is not None and f.how in _FALLBACK_HOWS
+                        and (int(f.value), gid) in in_game):
+                    pid, how = int(f.value), f"{f.how}+other_team"
+        except Exception as e:  # noqa: BLE001 - one bad row costs one row (audit)
+            logger.warning("resolve_event_names: row failed (%s)", type(e).__name__)
+            unres.append({**rec, "reason": "unmatched", "how": "error"})
+            continue
+        if pid is None:
+            reason = "ambiguous" if last == "ambiguous" else "unmatched"
+            unres.append({**rec, "reason": reason, "how": "ambiguous" if reason == "ambiguous"
+                          else "none"})
+            continue
+        rname, rteam = look.get(pid, (None, None))
+        res.append({**rec, "person_id": pid, "how": how, "roster_name": rname,
+                    "roster_team": rteam, "team": rteam, "team_code": rteam})
+    resolved = pd.DataFrame(res, columns=res_cols) if res else pd.DataFrame(columns=res_cols)
+    unresolved = pd.DataFrame(unres, columns=unres_cols) if unres \
+        else pd.DataFrame(columns=unres_cols)
+    return resolved, unresolved
+
+
+def _empty_prepared() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(FEED_REQUIRED)
+                        + [c for c in _PREPARED_COLUMNS if c not in FEED_REQUIRED])
+
+
+def _new_feed_report() -> dict:
+    return {"error": None, "rows": 0, "kept": 0, "comparable": 0, "not_a_person": 0,
+            "bad_rows": 0, "duplicates": 0, "books": {}, "games": {}, "parser": {}}
+
+
+def _book_tally() -> dict:
+    return {"rows": 0, "kept": 0, "comparable": 0, "unmatched": 0, "ambiguous": 0,
+            "refused": 0, "not_a_person": 0, "bad_rows": 0, "duplicates": 0,
+            "unmatched_names": [], "ambiguous_names": [], "refused_labels": {}}
+
+
+def _feed_keys(df: pd.DataFrame) -> pd.Series:
+    """One key per (game date, player, stat, book): the person_id when the
+    name resolved, else the normalized name; the stat when it has one, else
+    the label's key."""
+    who = [f"p{int(p)}" if _as_pid(p) is not None else
+           "n:" + normalize_name(n if isinstance(n, str) else "")
+           for p, n in zip(df["person_id"], df["name"])]
+    stat = [s if isinstance(s, str) and s else label_key(t)
+            for s, t in zip(df["stat"], df["stat_type"])]
+    return pd.Series([f"{d}|{w}|{s}|{b}" for d, w, s, b in
+                      zip(df["game_date"], who, stat, df["book"])], index=df.index)
+
+
+def prepare_feed(feed, roster, projections) -> tuple[pd.DataFrame, dict]:
+    """The feed's lines, in the shape prepare_paste leaves a paste in, ready
+    for compare_books: (lines, report). NEVER raises.
+
+    1. None, a frame with no rows, or one missing a FEED_REQUIRED column: an
+       empty frame and report["error"] ("no feed", "no lines" or "missing
+       columns", with the missing names in report["missing"]).
+    2. game_date becomes the ISO string a pasted row carries (m3), game_id
+       a string, tip_utc an ISO UTC string (a pasted row's form), and
+       fetched_at and last_update aware UTC Timestamps (None when
+       unreadable). A row with no game, no date, no book, or a line outside
+       the paste rule (finite, 0 to MAX_LINE_VALUE) is dropped and counted
+       (bad_rows); so is a name that is not a person (not_a_person), as the
+       paste parsers drop one.
+    3. Each line's stat verdict (stat, kind, refusal), as _classify_row
+       gives a paste.
+    4. Names through resolve_event_names, filling what _classify_and_resolve
+       fills for a paste (match, person_id, how, roster_name, roster_team,
+       team_code).
+    5. No routing by the clock: game_id, game_date and tip_utc are the event
+       match's, route_how is "event" and projectable is True (only projected
+       games are bought).
+    6. One row per (game_date, person_id, stat, book), the newest fetched_at
+       winning; duplicates are counted (the parser keeps one line per book,
+       player and market, so they are expected to be 0).
+    7. The report: per book under "books" (rows, kept, comparable,
+       unmatched, ambiguous, refused, the first FEED_REPORT_NAMES unmatched
+       and ambiguous names, refused labels, not_a_person, bad_rows,
+       duplicates), the same totals at the top, each game's date, tip and
+       event teams under "games", and the parser's counters under "parser"
+       when the frame still carries them in its attrs.
+    The report also rides on the lines as attrs["feed_report"], which is
+    where compare_books finds it. Names are capped, never escaped here: the
+    page escapes what it renders."""
+    report = _new_feed_report()
+    try:
+        lines = _prepare_feed(feed, roster, projections, report)
+    except Exception as e:  # noqa: BLE001 - whatever a page hands in, never a traceback
+        logger.warning("prepare_feed failed (%s)", type(e).__name__)
+        report["error"] = "internal error"
+        lines = _empty_prepared()
+    lines.attrs = {"feed_report": report}
+    return lines, report
+
+
+def _prepare_feed(feed, roster, projections, report: dict) -> pd.DataFrame:
+    if not isinstance(feed, pd.DataFrame):
+        report["error"] = "no feed"
+        return _empty_prepared()
+    missing = [c for c in FEED_REQUIRED if c not in feed.columns]
+    if missing:
+        report["error"], report["missing"] = "missing columns", missing
+        return _empty_prepared()
+    if feed.empty:
+        report["error"] = "no lines"
+        return _empty_prepared()
+    by_book = feed.attrs.get("by_book") if isinstance(feed.attrs, dict) else None
+    if isinstance(by_book, dict):
+        report["parser"] = {str(b): dict(t) for b, t in by_book.items() if isinstance(t, dict)}
+    df = feed.reset_index(drop=True).copy()
+    df.attrs = {}
+    df["book"] = [b.strip().lower() if isinstance(b, str) and b.strip() else None
+                  for b in df["book"]]
+    df["game_id"] = [_game_id_of(g) for g in df["game_id"]]
+    df["game_date"] = [_iso_game_date(d) for d in df["game_date"]]
+    df["tip_utc"] = [_utc_iso(_parse_ts(t)) for t in df["tip_utc"]]
+    df["line"] = [_parse_line(x) for x in df["line"]]
+    for c in ("fetched_at", "last_update"):
+        df[c] = pd.Series([_utc_stamp(t) for t in df[c]], index=df.index, dtype=object)
+    books = report["books"]
+    report["rows"] = len(df)
+    for b in df["book"]:
+        if (b or "unknown") not in books:
+            books[b or "unknown"] = _book_tally()
+        books[b or "unknown"]["rows"] += 1
+    bad = (df["book"].isna() | df["game_id"].isna() | df["game_date"].isna()
+           | df["line"].isna()).to_numpy()
+    person = np.array([_person_like(n) for n in df["name"]], dtype=bool)
+    for b in df.loc[bad, "book"]:
+        books[b or "unknown"]["bad_rows"] += 1
+    for b in df.loc[~bad & ~person, "book"]:
+        books[b or "unknown"]["not_a_person"] += 1
+    report["bad_rows"] = int(bad.sum())
+    report["not_a_person"] = int((~bad & ~person).sum())
+    df = df[~bad & person].reset_index(drop=True)
+    if df.empty:
+        return _empty_prepared()
+    df["line"] = df["line"].astype(float)
+
+    df["_i"] = np.arange(len(df))
+    is_combo = df["is_combo"] if "is_combo" in df.columns else pd.Series(False, index=df.index)
+    kinds = [_classify_row(t, n, c, lg) for t, n, c, lg in
+             zip(df["stat_type"], df["name"], is_combo, df["league"])]
+    df["stat"] = [k[0] for k in kinds]
+    df["kind"] = [k[1] for k in kinds]
+    df["refusal"] = [k[2] for k in kinds]
+    combo = df["kind"].eq("refused") & df["refusal"].eq(REFUSE_COMBO)
+    resolved, unresolved = resolve_event_names(df[~combo], roster, projections)
+    parts = []
+    if not resolved.empty:
+        parts.append(resolved.assign(match="matched"))
+    if not unresolved.empty:
+        parts.append(unresolved.rename(columns={"reason": "match"}))
+    if combo.any():
+        parts.append(df[combo].assign(match="refused", how="combo"))
+    df = _stack(parts)
+    for c in ("person_id", "roster_name", "roster_team", "team", "team_code"):
+        if c not in df.columns:
+            df[c] = None
+    df["person_id"] = pd.Series([_as_pid(p) for p in df["person_id"]], index=df.index,
+                                dtype=object)
+    df["route_how"] = "event"
+    df["projectable"] = True
+
+    # One row per (game date, player, stat, book): the newest fetched_at wins.
+    stamps = [_utc_stamp(t) for t in df["fetched_at"]]
+    df["_t"] = [s.value if s is not None else -(2 ** 62) for s in stamps]
+    df["_k"] = _feed_keys(df)
+    ranked = df.sort_values(["_k", "_t", "_i"], ascending=[True, False, True], kind="mergesort")
+    dup = ranked.duplicated("_k", keep="first")
+    for b in ranked.loc[dup, "book"]:
+        books[b]["duplicates"] += 1
+    report["duplicates"] = int(dup.sum())
+    df = (ranked[~dup].sort_values("_i", kind="mergesort")
+          .drop(columns=["_i", "_t", "_k"]).reset_index(drop=True))
+
+    in_game = _in_game_pairs(projections)
+    for rec in df.to_dict(orient="records"):
+        t = books[rec["book"]]
+        t["kept"] += 1
+        match, kind = str(rec.get("match")), str(rec.get("kind"))
+        if kind != "ok":
+            t["refused"] += 1
+            label = str(rec.get("stat_type") or "")[:MAX_LABEL_LEN]
+            _bump(t["refused_labels"], label)
+        elif match in ("unmatched", "ambiguous"):
+            t[match] += 1
+            names = t[f"{match}_names"]
+            if len(names) < FEED_REPORT_NAMES and rec.get("name") not in names:
+                names.append(str(rec.get("name")))
+        elif match == "matched" and (not in_game or (rec["person_id"], rec["game_id"]) in in_game):
+            t["comparable"] += 1
+        gid = rec["game_id"]
+        if gid not in report["games"]:
+            report["games"][gid] = {"game_date": rec["game_date"], "tip_utc": rec["tip_utc"],
+                                    "event_away": teams.canonical(rec.get("event_away")),
+                                    "event_home": teams.canonical(rec.get("event_home"))}
+    report["kept"] = len(df)
+    report["comparable"] = sum(t["comparable"] for t in books.values())
+    return df
+
+
+@dataclass
+class FeedTables:
+    """compare() per (book, game_id): `tables` and `metas` keyed alike, and
+    prepare_feed's report. Read-only for callers (the page caches it).
+
+    `failed` marks a date whose feed holds lines that could not be compared
+    (store.feed_tables: the simulator parameters missing, a step that raised,
+    or no line left to compare). It has no table and no meta, so no book has
+    a board to pick, and the page's board explains the failure (props_ui's
+    failed view) instead of promising lines the feed already holds."""
+    tables: dict = field(default_factory=dict)
+    metas: dict = field(default_factory=dict)
+    report: dict = field(default_factory=dict)
+    failed: bool = False
+
+
+def _game_projections(projections, gid: str) -> pd.DataFrame | None:
+    if not isinstance(projections, pd.DataFrame) or projections.empty \
+            or "game_id" not in projections.columns:
+        return projections if isinstance(projections, pd.DataFrame) else None
+    return projections[projections["game_id"].astype(str) == str(gid)]
+
+
+def _failed_meta(n: int) -> dict:
+    """A (book, game) whose compare() raised: every line counted as
+    unprojected for an internal error, so the ledger still balances."""
+    meta = _new_meta(n)
+    meta.update(unprojected=int(n), errors=int(n), unprojected_why={"internal error": int(n)})
+    return meta
+
+
+def _book_rank(book) -> int:
+    return BOOK_ORDER.index(book) if book in BOOK_ORDER else len(BOOK_ORDER)
+
+
+def compare_books(lines, dist_provider, projections, roster=None) -> FeedTables:
+    """compare() once per (book, game) of prepare_feed's lines:
+    compare(rows, dist_provider, projections[projections.game_id == game],
+    roster). Per game, so every row is priced against its own game's
+    projection and the period-board check keeps its per-game group; per book,
+    so that check stays inside one book, and every row's lean is against its
+    own book's line (design 7). A (book, game) whose compare() raises gets an
+    empty table and a meta counting its lines as unprojected, so its ledger
+    still balances. The report is the one prepare_feed left on the lines."""
+    report = {}
+    if isinstance(lines, pd.DataFrame):
+        report = dict(lines.attrs.get("feed_report") or {})
+    if not isinstance(lines, pd.DataFrame) or lines.empty \
+            or not {"book", "game_id"} <= set(lines.columns):
+        return FeedTables({}, {}, report)
+    tips = {}
+    if "tip_utc" in lines.columns:
+        for gid, tip in zip(lines["game_id"], lines["tip_utc"]):
+            if gid is not None and gid not in tips:
+                tips[gid] = _parse_ts(tip)
+    groups = lines.groupby(["book", "game_id"], sort=False).indices
+    order = sorted(groups, key=lambda k: (_book_rank(k[0]), str(k[0]),
+                                          tips.get(k[1]) is None,
+                                          tips.get(k[1]) or dt.datetime.max.replace(tzinfo=UTC),
+                                          str(k[1])))
+    tables, metas = {}, {}
+    for book, gid in order:
+        rows = lines.iloc[groups[(book, gid)]].reset_index(drop=True)
+        try:
+            table, meta = compare(rows, dist_provider, _game_projections(projections, gid), roster)
+        except Exception as e:  # noqa: BLE001 - one (book, game) costs only itself
+            logger.warning("compare_books: %s %s failed (%s)", book, gid, type(e).__name__)
+            table, meta = pd.DataFrame(columns=TABLE_COLUMNS), _failed_meta(len(rows))
+        tables[(book, gid)] = table
+        metas[(book, gid)] = meta
+    return FeedTables(tables, metas, report)
+
+
+@dataclass
+class FeedBoard:
+    """What the board shows for one date and one selected book (layout B).
+
+    reference     the selected book's rows for every game, one per
+                  (game_date, person_id, stat), ranked (rank_rows): what
+                  ranks, counts and colours. PrizePicks' rows are the
+                  feed's merged with the visitor's paste.
+    context       every OTHER book's row for the reference keys (PrizePicks'
+                  merged rows when another book is selected), in the
+                  reference's order and then BOOK_ORDER: the Other books cell.
+    meta          the merged meta, balanced under
+                  ledger(meta, *board_rows(reference)).
+    ref_by_game   game_id -> the selected book, for each game it has lines
+                  for, in (tip, game_id) order.
+    missing_games the games, in (tip, game_id) order, where another book (or
+                  the paste) has lines and the selected book has none.
+    paste_won, feed_won   the PrizePicks keys both the feed and the paste
+                  hold, by whose line the merge kept (whichever book is
+                  selected, since PrizePicks' rows are context otherwise).
+    paste_times   {"pasted_utc": the paste's time, "feed_oldest" and
+                  "feed_newest": the range of fetch times of the feed lines
+                  that beat the paste}, each an aware UTC Timestamp or None.
+    """
+    reference: pd.DataFrame
+    context: pd.DataFrame
+    meta: dict
+    ref_by_game: dict = field(default_factory=dict)
+    missing_games: list = field(default_factory=list)
+    paste_won: int = 0
+    feed_won: int = 0
+    paste_times: dict = field(default_factory=dict)
+
+
+def _row_keys(df: pd.DataFrame) -> list[tuple]:
+    """(game date ISO, person_id, stat) per table row: the merge key (M5)."""
+    if df is None or df.empty:
+        return []
+    return [(_iso_game_date(d), _as_pid(p), s if isinstance(s, str) else None)
+            for d, p, s in zip(df["game_date"], df["person_id"], df["stat"])]
+
+
+def _one_per_key(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """(rows, rows removed): the first row of each key. compare() leaves one
+    row per key already, so the count is expected to be 0; a removed row
+    leaves the ledger along with its key, so the meta still balances."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=TABLE_COLUMNS), 0
+    dup = pd.Series(_row_keys(df), index=df.index).duplicated(keep="first").to_numpy()
+    return df[~dup].reset_index(drop=True), int(dup.sum())
+
+
+def _stack(frames, columns=()) -> pd.DataFrame:
+    """The frames' rows in one frame: `columns` first, then every other column
+    in the order it first appears. Built from records, so pandas never infers
+    a dtype across an empty or all-missing column (its concat warns there)."""
+    parts = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
+    cols = list(dict.fromkeys([*columns, *(c for f in parts for c in f.columns)]))
+    recs = [r for f in parts for r in f.to_dict(orient="records")]
+    return pd.DataFrame(recs, columns=cols) if recs else pd.DataFrame(columns=cols)
+
+
+def _concat_rows(frames: list) -> pd.DataFrame:
+    return _stack(frames, TABLE_COLUMNS)
+
+
+def _paste_wins(paste_row: dict, feed_row: dict, pasted) -> bool:
+    """The merge rule for one key (M5): the visitor's pasted row wins when it
+    is a typed pick, a Demon or a Goblin, or when the board's paste time is
+    later than the feed row's fetch time. A board with no paste time counts
+    as older; so does a feed row with no fetch time."""
+    if pick_of(paste_row.get("pick")) is not None:
+        return True
+    if str(paste_row.get("odds_type") or "").lower() in ("demon", "goblin"):
+        return True
+    if pasted is None:
+        return False
+    fetched = _utc_stamp(feed_row.get("fetched_at"))
+    return fetched is None or pasted > fetched
+
+
+def _merge_paste(feed_pp: pd.DataFrame, paste: pd.DataFrame, pasted) -> tuple[pd.DataFrame, dict]:
+    """PrizePicks' rows for the date: the feed's and the paste's, one row per
+    key, by _paste_wins where both hold the key. Returns (rows, stats):
+    removed (rows the merge left out, overlaps and any duplicate), paste_won,
+    feed_won and the fetch times of the feed rows that won."""
+    feed_rows, dup_f = _one_per_key(feed_pp)
+    paste_rows, dup_p = _one_per_key(paste)
+    fkeys, pkeys = _row_keys(feed_rows), _row_keys(paste_rows)
+    paste_at = {k: i for i, k in enumerate(pkeys)}
+    feed_recs = feed_rows.to_dict(orient="records")
+    paste_recs = paste_rows.to_dict(orient="records")
+    paste_won, feed_won, won_at = set(), set(), []
+    for i, k in enumerate(fkeys):
+        j = paste_at.get(k)
+        if j is None:
+            continue
+        if _paste_wins(paste_recs[j], feed_recs[i], pasted):
+            paste_won.add(k)
+        else:
+            feed_won.add(k)
+            at = _utc_stamp(feed_recs[i].get("fetched_at"))
+            if at is not None:
+                won_at.append(at)
+    keep_feed = np.array([k not in paste_won for k in fkeys], dtype=bool)
+    keep_paste = np.array([k not in feed_won for k in pkeys], dtype=bool)
+    rows = _concat_rows([feed_rows[keep_feed] if len(feed_rows) else feed_rows,
+                         paste_rows[keep_paste] if len(paste_rows) else paste_rows])
+    removed = dup_f + dup_p + len(paste_won) + len(feed_won)
+    return rows, {"removed": removed, "paste_won": len(paste_won), "feed_won": len(feed_won),
+                  "feed_oldest": min(won_at) if won_at else None,
+                  "feed_newest": max(won_at) if won_at else None}
+
+
+def _sum_metas(parts: list, removed: int) -> dict:
+    """compare() metas summed into one (design 2.5): every count summed,
+    then posted and matched each less the rows the merge left out (every one
+    of them was matched, so the identity holds); tallies summed, names and
+    non-exact matches deduplicated and capped, the period and history flags
+    ORed, and the unresolved lines stacked."""
+    out = _new_meta(0)
+    unresolved = []
+    for m in parts:
+        if not isinstance(m, dict):
+            continue
+        for k in _SUMMED:
+            out[k] += int(m.get(k, 0) or 0)
+        for k in _TALLIED:
+            for label, n in (m.get(k) or {}).items():
+                _bump(out[k], label, int(n))
+        out["refused_why"].update(m.get("refused_why") or {})
+        for k in ("unmatched_names", "ambiguous_names", "nonexact"):
+            for item in m.get(k) or []:
+                if item not in out[k] and len(out[k]) < FEED_META_NAMES:
+                    out[k].append(item)
+        for k in ("period_board_suspect", "games_unknown"):
+            out[k] = bool(out[k] or m.get(k))
+        u = m.get("unresolved")
+        if isinstance(u, pd.DataFrame) and not u.empty:
+            unresolved.append(u)
+    out["posted"] -= int(removed)
+    out["matched"] -= int(removed)
+    out["unresolved"] = _stack(unresolved)
+    return out
+
+
+def _games_of(df) -> set:
+    if not isinstance(df, pd.DataFrame) or df.empty or "game_id" not in df.columns:
+        return set()
+    return {str(g) for g in df["game_id"] if isinstance(g, str) and g}
+
+
+def _game_tips(ft: FeedTables, frames: list) -> dict:
+    """game_id -> its earliest known tip (an aware datetime), from prepare_feed's
+    report and every frame's tip_utc."""
+    tips: dict = {}
+
+    def note(gid, tip):
+        t = _parse_ts(tip)
+        if isinstance(gid, str) and t is not None and (gid not in tips or t < tips[gid]):
+            tips[gid] = t
+    for gid, g in ((ft.report or {}).get("games") or {}).items():
+        if isinstance(g, dict):
+            note(gid, g.get("tip_utc"))
+    for df in frames:
+        if isinstance(df, pd.DataFrame) and not df.empty and {"game_id", "tip_utc"} <= set(df.columns):
+            for gid, tip in zip(df["game_id"], df["tip_utc"]):
+                note(gid, tip)
+    return tips
+
+
+def feed_board(ft, paste_table, paste_meta, pasted_utc, *, selected: str) -> FeedBoard:
+    """The board for one date with the feed on (layout B, amendment A1).
+
+    `ft` is compare_books' FeedTables for the date; `paste_table` and
+    `paste_meta` are compare() of the visitor's pasted lines for the date,
+    as the board compares them today (None or empty with no paste), and
+    `pasted_utc` the board's paste time (board_info). `selected` is a
+    BOOK_ORDER key (the page's pills; "prizepicks" by default there);
+    anything else raises ValueError.
+
+    - reference: the selected book's rows for every game, and only that
+      book's: a game it has not posted has no rows (amendment A6), never
+      another book's. For PrizePicks they are the feed's rows merged with the
+      paste by the M5 rule (_paste_wins: newest wins; a typed pick, a Demon or
+      a Goblin always wins; a board with no paste time counts as older).
+      Pasted rows the paste path withheld are not in the paste table, so the
+      feed's line stays for those keys.
+    - context: every other book's rows for the reference keys; PrizePicks'
+      are the same merged rows.
+    - meta: the sum of the selected book's per-game metas, plus the paste's
+      meta when PrizePicks is selected, less the rows the merge left out
+      (_sum_metas), with by_tier counted on the reference and pasted_utc the
+      paste's when PrizePicks is selected (None otherwise). It balances
+      under ledger(meta, *board_rows(reference)).
+    - ref_by_game, missing_games, paste_won, feed_won and paste_times as
+      FeedBoard says. A book "has lines" for a game when compare_books holds
+      a meta for it (every line it posted, compared or not), and the paste
+      when its table or its unresolved lines name the game."""
+    if not isinstance(selected, str) or selected not in BOOK_ORDER:
+        raise ValueError("selected must be a BOOK_ORDER key")
+    ft = ft if isinstance(ft, FeedTables) else FeedTables()
+    paste = paste_table if isinstance(paste_table, pd.DataFrame) and not paste_table.empty \
+        else pd.DataFrame(columns=TABLE_COLUMNS)
+    pmeta = paste_meta if isinstance(paste_meta, dict) else {}
+    pasted = _utc_stamp(pasted_utc)
+
+    tables: dict = {b: [] for b in BOOK_ORDER}
+    metas: dict = {b: [] for b in BOOK_ORDER}
+    posted: dict = {b: set() for b in BOOK_ORDER}
+    for (book, gid), meta in ft.metas.items():
+        if book in BOOK_ORDER and isinstance(meta, dict):
+            metas[book].append(meta)
+            if int(meta.get("posted", 0) or 0) > 0:
+                posted[book].add(str(gid))
+    for (book, _gid), table in ft.tables.items():
+        if book in BOOK_ORDER:
+            tables[book].append(table)
+    rows: dict = {}
+    removed: dict = {}
+    for b in BOOK_ORDER:
+        rows[b], removed[b] = _one_per_key(_concat_rows(tables[b]))
+    pp_rows, merge = _merge_paste(_concat_rows(tables[PASTE_BOOK]), paste, pasted)
+    rows[PASTE_BOOK], removed[PASTE_BOOK] = pp_rows, merge["removed"]
+    unresolved = pmeta.get("unresolved")
+    paste_games = _games_of(paste) | _games_of(unresolved)
+    posted[PASTE_BOOK] |= paste_games
+
+    reference = rank_rows(rows[selected]) if len(rows[selected]) else rows[selected]
+    reference = reference.reset_index(drop=True)
+    parts = metas[selected] + ([pmeta] if selected == PASTE_BOOK and pmeta else [])
+    meta = _sum_metas(parts, removed[selected])
+    if not reference.empty:
+        meta["by_tier"] = reference["tier"].value_counts().to_dict()
+    meta["pasted_utc"] = pasted_utc if selected == PASTE_BOOK and pasted is not None else None
+
+    order = {k: i for i, k in enumerate(_row_keys(reference))}
+    context_parts = []
+    for b in BOOK_ORDER:
+        if b == selected or rows[b].empty:
+            continue
+        keys = _row_keys(rows[b])
+        hit = np.array([k in order for k in keys], dtype=bool)
+        if hit.any():
+            context_parts.append(rows[b][hit])
+    context = _concat_rows(context_parts)
+    if not context.empty:
+        pos = [order[k] for k in _row_keys(context)]
+        rank = [_book_rank(b) for b in context["book"]]
+        context = (context.assign(_o=pos, _b=rank)
+                   .sort_values(["_o", "_b"], kind="mergesort")
+                   .drop(columns=["_o", "_b"]).reset_index(drop=True))
+
+    tips = _game_tips(ft, [*ft.tables.values(), paste, unresolved,
+                           *[m.get("unresolved") for m in ft.metas.values()
+                             if isinstance(m, dict)]])
+    far = dt.datetime.max.replace(tzinfo=UTC)
+
+    def by_tip(gid):
+        return (gid not in tips, tips.get(gid, far), gid)
+    mine = posted[selected]
+    every = set().union(*posted.values())
+    return FeedBoard(
+        reference=reference, context=context, meta=meta,
+        ref_by_game={g: selected for g in sorted(mine, key=by_tip)},
+        missing_games=sorted(every - mine, key=by_tip),
+        paste_won=merge["paste_won"], feed_won=merge["feed_won"],
+        paste_times={"pasted_utc": pasted, "feed_oldest": merge["feed_oldest"],
+                     "feed_newest": merge["feed_newest"]})
+
+
+def american_breakeven(price) -> float | None:
+    """The chance a side at an American price needs to break even: the
+    probability the price implies, -p / (-p + 100) for p <= -100 and
+    100 / (p + 100) for p >= 100 (-110 gives 0.5238). None for anything that
+    is not an American price: missing, NaN, a boolean, text, or a number
+    between -100 and +100. Every DFS row's price is NaN (its prices are
+    indicative only), so a DFS row never gets a figure. A display note only,
+    never compared with a model probability on the page (design 7)."""
+    if price is None or isinstance(price, (bool, np.bool_)) \
+            or not isinstance(price, (int, float, np.integer, np.floating)):
+        return None
+    p = float(price)
+    if not math.isfinite(p):
+        return None
+    if p <= -100:
+        return -p / (-p + 100.0)
+    if p >= 100:
+        return 100.0 / (p + 100.0)
+    return None
+
+
+def side_words(book) -> tuple[str, str]:
+    """The words for the two sides on a row of `book` (design 2.6 m8,
+    amendment A4): ("More", "Less") on a pick'em book (DFS_BOOKS),
+    ("Over", "Under") on a sportsbook. Words only: the stored lean stays
+    More, Less or Even, which the colour classes read. A row with no book is
+    a pasted PrizePicks row."""
+    b = book.strip().lower() if isinstance(book, str) and book.strip() else PASTE_BOOK
+    return ("More", "Less") if b in DFS_BOOKS else ("Over", "Under")
+
+
+# -- The record: LOCAL ONLY ---------------------------------------------------
 # Without a frozen record a hit rate is worse than useless, because it looks
 # authoritative: compare() joins lines to projections computed NOW, so grading
 # an old board scores it against a model retrained since, and the record would

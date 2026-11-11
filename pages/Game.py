@@ -1,6 +1,6 @@
 """One game: header, context, and both teams' projected players.
 
-URL: /Game?date=YYYY-MM-DD&away=BOS&home=DET[&out=pid,pid][&board=token].
+URL: /Game?date=YYYY-MM-DD&away=BOS&home=DET[&out=pid,pid][&board=token][&book=key].
 Team params go through teams.canonical, which returns None for anything
 unknown (never a pass-through into HTML), and every rendered string goes
 through util.esc.
@@ -15,6 +15,14 @@ widget's id is hashed from its options); the pickers are seeded from the URL
 only when the URL itself changes, never because the two disagree. After tip,
 each player's box-score line (live.box, 120 s) sits under his projected one,
 and his pasted lines show what happened to them.
+
+The licensed odds feed (design 2.8; layout B, amendments A3 to A7): with a key
+configured the board is the date's, built from the feed's lines and filtered
+to this game as the paste board is, so this page's counts equal the slate
+card's for every pick. The book pills sit directly above the "Lines on this
+game" note, outside every fragment, and each player's lines carry the other
+books' lines for the same stat. With no key none of it runs and the page is
+what it was.
 """
 from __future__ import annotations
 
@@ -33,7 +41,7 @@ import freshen  # noqa: E402
 
 freshen.ensure()
 
-from bucketlib import live, props_ui, store, teams  # noqa: E402
+from bucketlib import live, props, props_ui, store, teams  # noqa: E402
 from bucketlib.theme import (SITE_NAME, render_footer, render_nav, render_page_chrome,  # noqa: E402
                              render_share)
 from bucketlib.util import esc, fmt_tip, to_et, today_et  # noqa: E402
@@ -57,9 +65,15 @@ except RuntimeError:
 # browser kept comes back onto the link for this whole run.
 TOKEN = props_ui.board_keeper(ROSTER)
 MARKS = store.parse_out(qp.get("out"))
+# The odds feed's book pills (amendment A3): ?book= is reconciled into the
+# pills' state now, only when the URL changed, before any link is minted or
+# the board is built, so every link and count follows the pick.
+FEED_ON = store.feed_on()
+props_ui.seed_book_from_url(FEED_ON)
+BOOK = props_ui.selected_book(FEED_ON)
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
-        **store.view_params(TOKEN, MARKS)}
-FOOT_KEEP = {"date": date.isoformat() if date else "", **store.view_params(TOKEN, MARKS)}
+        **store.view_params(TOKEN, MARKS, BOOK)}
+FOOT_KEEP = {"date": date.isoformat() if date else "", **store.view_params(TOKEN, MARKS, BOOK)}
 render_nav("Game", keep=FOOT_KEEP)
 back = store.page_url("/", keep, date=date.isoformat() if date else None)
 
@@ -74,8 +88,9 @@ if not (away and home and date):
 
 try:
     sched = live.schedule().value
-except RuntimeError as e:
-    st.markdown(store.render_notice(f"<b>The schedule feed is unreachable.</b> {esc(e)}"),
+except RuntimeError:
+    # A fixed sentence, never the error's text (RC K6).
+    st.markdown(store.render_notice("<b>The schedule feed is unreachable.</b>"),
                 unsafe_allow_html=True)
     render_footer(FOOT_KEEP)
     st.stop()
@@ -88,10 +103,11 @@ with st.container(key="bv_nav_actions"):
         _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), date})
         TOKEN = props_ui.render_update_lines_popover(date, store.mark_projected(sched, _route_dates),
                                                      ROSTER, dates=_route_dates,
-                                                     in_nav_container=False) or TOKEN
-        keep.update(store.view_params(TOKEN, MARKS))
+                                                     in_nav_container=False,
+                                                     feed_on=FEED_ON) or TOKEN
+        keep.update(store.view_params(TOKEN, MARKS, BOOK))
         back = store.page_url("/", keep, date=date.isoformat())
-        FOOT_KEEP = {"date": date.isoformat(), **store.view_params(TOKEN, MARKS)}
+        FOOT_KEEP = {"date": date.isoformat(), **store.view_params(TOKEN, MARKS, BOOK)}
     render_share(store.game_url(date, away, home, keep))
 
 g = sched[(sched["game_date"] == date) & (sched["away"] == away) & (sched["home"] == home)]
@@ -107,13 +123,26 @@ if g.empty:
 row = g.iloc[0]
 gid = str(row["game_id"])
 state = live.game_state(row)
+# The odds feed's walk starts here, before the projection load (design 2.8).
+FEED_TICKET = store.feed_start(date, sched)
 
-# ── Projections: the date's one cached frame ─────────────────────────────────
+# -- Projections: the date's one cached frame ---------------------------------
 projectable = gid in store.projected_ids(sched, date)
 served = store.load_projections(date, MARKS) if projectable else None
 rows = served.game(gid) if served is not None else pd.DataFrame()
 past = served is not None and gid in served.past
 FEATS = store.display_features(date) if projectable else None
+# The feed's lines for the date, compared once per date as on the slate.
+FEED = store.feed_result(FEED_TICKET)
+FEED_LIVE = FEED.state != "off"
+params = None
+if TOKEN or FEED_LIVE:
+    try:
+        params = store.sim_params()
+    except Exception:  # noqa: BLE001 - date_board explains a board it cannot build
+        params = None
+FT = (store.feed_tables(date, FEED, served, params, ROSTER)
+      if FEED_LIVE and served is not None and len(served.frame) else None)
 
 st.markdown(f'<a class="bv-back" href="{esc(back)}" target="_self">Back to the slate</a>',
             unsafe_allow_html=True)
@@ -157,8 +186,9 @@ def _roster_tables(notice_html: str, statuses: pd.DataFrame | None = None) -> No
     st.markdown(notice_html, unsafe_allow_html=True)
     try:
         rost = live.roster()
-    except RuntimeError as e:
-        st.markdown(store.render_notice(f"<b>Rosters are unavailable.</b> {esc(e)}"),
+    except RuntimeError:
+        # A fixed sentence, never the error's text (RC K6).
+        st.markdown(store.render_notice("<b>Rosters are unavailable.</b>"),
                     unsafe_allow_html=True)
         return
     asof = (f"Rosters as of {pd.Timestamp(rost.fetched_at, unit='s', tz='UTC').tz_convert('America/New_York').strftime('%b %-d, %-I:%M %p')} ET"
@@ -216,7 +246,7 @@ if rows.empty:
     render_footer(FOOT_KEEP)
     st.stop()
 
-# ── Mark-outs: per team, ?out=, stable options ───────────────────────────────
+# -- Mark-outs: per team, ?out=, stable options -------------------------------
 TEAMS = (away, home)
 KEYS = {t: f"bv_out_{t}" for t in TEAMS}
 names = dict(zip(rows["person_id"].astype("int64"), rows["player_name"].astype(str)))
@@ -270,7 +300,7 @@ if not past:
                                format_func=lambda p: names.get(int(p), str(p)),
                                on_change=_apply_marks, placeholder="Nobody marked out")
 
-# ── Tables ───────────────────────────────────────────────────────────────────
+# -- Tables -------------------------------------------------------------------
 try:
     MED = store.table_medians(served.frame)
 except Exception as e:  # noqa: BLE001 - minutes still show; the medians read the sentinel
@@ -294,23 +324,91 @@ if state in ("live", "final"):
             "<b>The box score is unavailable right now.</b> Actual lines appear here once the "
             "NBA's live box score answers."), unsafe_allow_html=True)
 
+
+def _origins(frames) -> set:
+    """Where this game's board rows came from: "feed" and/or "pasted"."""
+    return {str(o) for x in frames if len(x) and "origin" in x.columns
+            for o in x["origin"].dropna()}
+
+
 board = None
-if TOKEN:
-    try:
-        params = store.sim_params()
-    except Exception:  # noqa: BLE001 - date_board explains a board it cannot build
-        params = None
-    board = props_ui.date_board(TOKEN, date, served.frame, params, ROSTER)
+# Tables marked failed (the feed holds lines it could not compare) still make
+# a board: date_board's explained empty one, never the prompt that says the
+# lines load from the odds feed.
+if TOKEN or (FT is not None and (FT.tables or FT.failed)):
+    board = props_ui.date_board(TOKEN, date, served.frame, params, ROSTER, feed=FT,
+                                feed_info=(store.feed_info(FEED, today_et())
+                                           if FT is not None else None),
+                                selected=props_ui.selected_book(FEED_LIVE))
+FEED_BOARD = board is not None and board.feed is not None
+# Build amendment B17: the feed's lines could not be compared, and the board is
+# the visitor's paste, exactly as with the feed off.
+PASTE_ONLY = board is not None and board.paste_only
+if FEED_LIVE:
+    # The odds feed for this game, directly above the board's note: the feed's
+    # state when it is stale, down or paused (design 6), the loading watch
+    # while this game loads (build 4's review, L3-4: its own game only), and
+    # the pills when the feed has lines for this game, or the board has lines
+    # here some pick can show: a game only the paste posted, whose A6 note
+    # points at the pills (amendment A3, A6; L3-2).
+    if FEED.state in ("stale", "down", "paused") and not PASTE_ONLY:
+        _info = board.feed if FEED_BOARD else store.feed_info(FEED, today_et())
+        _notice = props_ui.feed_notice_html(_info, today_et(), game_id=gid, with_loading=False)
+        if _notice:
+            st.markdown(_notice, unsafe_allow_html=True)
+    if gid in FEED.loading_games:
+        store.feed_loading_watch(date.isoformat(), FEED.generation, game_id=gid)
+    if gid in props_ui.feed_games(FT) or (FEED_BOARD and (gid in board.ref_by_game
+                                                          or gid in board.missing_games)):
+        props_ui.render_book_pills()
 by_person = {}
 if board is not None:
     mine = [x[x["game_id"].astype(str) == gid] if len(x) else x
             for x in (board.shown, board.hidden, board.thin, board.void)]
     by_person = props_ui.rows_by_person(mine[0])
     if board.meta.get("error"):
+        if not FEED_BOARD:
+            st.markdown(store.render_notice(
+                "<b>The comparison with your lines could not be built just now.</b> Your lines are "
+                "still saved; try reloading the page."), unsafe_allow_html=True)
+        else:
+            _kept = ("Your pasted lines are still saved" if int(board.feed.get("pasted", 0) or 0)
+                     else "The odds feed's lines are still in memory")
+            st.markdown(store.render_notice(
+                "<b>The comparison with the board's lines could not be built just now.</b> "
+                f"{_kept}; try reloading the page."), unsafe_allow_html=True)
+    elif PASTE_ONLY and not sum(len(x) for x in mine):
+        # B17 with no pasted line on this game: the failure notice as built.
         st.markdown(store.render_notice(
-            "<b>The comparison with your lines could not be built just now.</b> Your lines are "
-            "still saved; try reloading the page."), unsafe_allow_html=True)
+            "<b>The comparison with the board's lines could not be built just now.</b> "
+            "Your pasted lines are still saved; try reloading the page."), unsafe_allow_html=True)
+    elif FEED_BOARD and gid in board.missing_games:
+        # Amendment A6: the picked book has not posted this game, so it has no
+        # rows here, never another book's. After tip it says the odds feed did
+        # not load the book's lines before tip (build amendment B29), and for a
+        # book the site does not buy that its lines are not loaded here (B25).
+        _missing = props_ui.book_missing_game_html(board.feed.get("book"),
+                                                   tipped=state in ("live", "final"),
+                                                   loaded=board.feed.get("books"))
+        st.markdown(f'<div class="bv-note">{_missing}</div>', unsafe_allow_html=True)
+    elif sum(len(x) for x in mine) and FEED_BOARD:
+        # The feed's lines say when they were pulled (after tip, that they are
+        # the pre-tip copies); pasted ones say when they were pasted.
+        _came = _origins(mine)
+        _when = " ".join(s for s in (
+            props_ui.lines_asof_text(board.feed, today_et(), game_id=gid)
+            if "feed" in _came else "",
+            props_ui.paste_time_text(board.meta) if "pasted" in _came else "") if s)
+        st.markdown(
+            f'<div class="bv-note"><b>Lines on this game:</b> '
+            f"{esc(props_ui.count_header(*mine))}.{' ' + esc(_when) if _when else ''} A teal "
+            "count beside a name is how many lines he has: open him under his team's table "
+            "to compare each line with his median."
+            f"{props_ui.hidden_picks_text(mine[1], game_page=True)}</div>",
+            unsafe_allow_html=True)
     elif sum(len(x) for x in mine):
+        if PASTE_ONLY:
+            st.markdown(props_ui.paste_only_note_html(), unsafe_allow_html=True)
         when = props_ui.paste_time_text(board.meta)
         st.markdown(
             f'<div class="bv-note"><b>Your lines on this game:</b> '
@@ -330,20 +428,32 @@ if gid in info.frozen:
 elif len(stamp):
     t = to_et(pd.Timestamp(stamp.max()).to_pydatetime())
     asof = f"Projected {fmt_tip(t)}"
+_game_context = None
 for team in TEAMS:
     trows = rows[rows["team"] == team]
     view = store.team_view(trows, MED, positions, STARTERS)
     view = view.assign(n_lines=[len(by_person.get(int(p), ())) for p in view["person_id"]])
     st.markdown(store.render_projection_table(team, view, asof_note=asof,
                                               team_note=store.team_report_label(trows) or "",
-                                              actuals=ACT),
+                                              actuals=ACT, feed=FEED_BOARD),
                 unsafe_allow_html=True)
     for pid, name in zip(view["person_id"], view["name"]):
         recs = by_person.get(int(pid))
         if recs:
+            if FEED_BOARD and _game_context is None:
+                # The Other books index is built from this game's rows only,
+                # once, not from the whole date's per player (L3-5).
+                _ctx = board.context
+                _game_context = (_ctx[_ctx["game_id"].astype(str) == gid]
+                                 if isinstance(_ctx, pd.DataFrame) and len(_ctx)
+                                 and "game_id" in _ctx.columns else _ctx)
             with st.expander(f"{props_ui.md_escape(name)}: {len(recs)} "
                              f"line{'s' if len(recs) != 1 else ''}"):
-                props_ui.render_player_lines_block(store.line_actuals(recs, ACT))
+                # With the feed's rows each line carries the other books' lines
+                # for the same stat: all five books per player (amendment A7).
+                props_ui.render_player_lines_block(store.line_actuals(recs, ACT),
+                                                   _game_context if FEED_BOARD else None,
+                                                   board.feed if FEED_BOARD else None)
 
 st.markdown(
     '<div class="bv-note">MIN is the projected average for a player who plays. The other '
@@ -356,11 +466,31 @@ st.markdown(
     "decide before anyone has started).</div>",
     unsafe_allow_html=True)
 
-# DiamondValue's biggest-gaps strip for this game, at the bottom.
+# DiamondValue's biggest-gaps strip for this game, at the bottom. With the
+# feed's rows its title names the picked book (amendment A8).
 if board is not None:
-    props_ui.render_discrepancies(mine[0], f"{away} at {home}")
-elif ROSTER is not None and state == "upcoming":
-    # DiamondValue's empty-board prompt, while a paste can still land here.
-    st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_GAME}</div>', unsafe_allow_html=True)
+    props_ui.render_discrepancies(mine[0], f"{away} at {home}",
+                                  book_label=props.BOOK_TITLE.get(board.feed.get("book"))
+                                  if FEED_BOARD else None)
+if not FEED_LIVE:
+    if board is None and ROSTER is not None and state == "upcoming":
+        # DiamondValue's empty-board prompt, while a paste can still land here.
+        st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_GAME}</div>', unsafe_allow_html=True)
+elif not (board is not None and (board.meta.get("error") or PASTE_ONLY or sum(len(x) for x in mine)
+                                 or (FEED_BOARD and gid in board.missing_games))):
+    # The feed is on and this game has no lines on the board: before tip the
+    # prompt, only while the feed holds no line for this game (unless the
+    # feed's own notice above already says what to do, or its lines are
+    # still loading); after tip, why there are none (m22).
+    if state == "upcoming":
+        if ROSTER is not None and FEED.state in ("idle", "ok") and not FEED.loading \
+                and not (FEED.per_game.get(gid) or {}).get("asof"):
+            st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_GAME_FEED}</div>',
+                        unsafe_allow_html=True)
+    elif state in ("live", "final"):
+        _why = (FEED.per_game.get(gid) or {}).get("reason")
+        if _why:
+            st.markdown(f'<div class="bv-note">{props_ui.after_tip_note_html(_why)}</div>',
+                        unsafe_allow_html=True)
 
 render_footer(FOOT_KEEP)

@@ -7,6 +7,16 @@ from store.load_projections, the same cached frame the Game page reads, so a
 card's line-count pill (SHOWN rows of the board only) equals the count on that
 game's page, and "Model vs the board" uses the same simulator provider as the
 Game tables.
+
+The licensed odds feed (design 2.8; layout B, amendments A3 to A8). With a key
+configured, store.feed_start kicks the live layer's walk before the
+projection load, so the two overlap, and store.feed_result reads the lines
+after it. The board then shows one book's lines at a time, picked with a row
+of pills drawn outside every fragment, so a pick reruns the whole page and the
+cards count the picked book. ?book= is reconciled into the pills' state at the
+top, only when the URL changed, before the board, the cards or any link is
+built, and every minted link carries the pick. With no key none of it runs
+and the page is what it was.
 """
 from __future__ import annotations
 
@@ -32,21 +42,23 @@ from bucketlib.util import esc, today_et  # noqa: E402
 st.set_page_config(page_title=SITE_NAME, page_icon="static/favicon.svg", layout="wide")
 render_page_chrome()
 
-# ── Schedule ─────────────────────────────────────────────────────────────────
+# -- Schedule -----------------------------------------------------------------
 try:
     SCHED_LIVE = live.schedule()
-except RuntimeError as e:
+except RuntimeError:
     render_nav("Home")
+    # A fixed sentence, never the error's text (RC K6): it can carry a host or
+    # a server path.
     st.markdown(store.render_notice(
         "<b>The NBA schedule feed is unreachable and nothing is cached.</b> "
         f"{SITE_NAME} cannot draw a slate without it. This is a data-source "
-        f"outage, not an empty day. Details: {esc(e)}"), unsafe_allow_html=True)
+        "outage, not an empty day. Reload in a minute."), unsafe_allow_html=True)
     render_footer()
     st.stop()
 SCHED = SCHED_LIVE.value
 SEASON_DATES = sorted(SCHED["game_date"].unique())
 
-# ── View date: seeded from ?date= only when the URL CHANGES ──────────────────
+# -- View date: seeded from ?date= only when the URL CHANGES ------------------
 # A keyed widget ignores its default after the first render, and a sync that
 # fires whenever URL and widget DISAGREE throws away the user's pick on the
 # rerun before the URL catches up. So the last reconciled URL value is kept in
@@ -86,6 +98,16 @@ if st.query_params.get("date") != view.isoformat():
     st.session_state["_url_date_seen"] = view.isoformat()
 MARKS = store.parse_out(st.query_params.get("out"))
 
+# -- The licensed odds feed (design 2.8) --------------------------------------
+# Kicked here, before the projection load below, so the walk runs while the
+# projections load (M6 item 4); with no key it is "off" before any feed code
+# runs (M9). The pills' book is reconciled from ?book= now, before the board,
+# the cards and every link are built: they all follow the pick (amendment A3).
+FEED_TICKET = store.feed_start(view, SCHED)
+FEED_ON = FEED_TICKET.mode != "off"
+props_ui.seed_book_from_url(FEED_ON)
+BOOK = props_ui.selected_book(FEED_ON)
+
 try:
     ROSTER = live.roster().value
 except RuntimeError:
@@ -96,8 +118,8 @@ except RuntimeError:
 # kept comes back onto the link for this whole run (props_ui.board_keeper).
 TOKEN = props_ui.board_keeper(ROSTER)
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
-        **store.view_params(TOKEN, MARKS)}
-render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS)})
+        **store.view_params(TOKEN, MARKS, BOOK)}
+render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS, BOOK)})
 with st.container(key="bv_nav_actions"):
     if ROSTER is not None:
         # Board text carries no dates: lines route to each player's game
@@ -106,20 +128,21 @@ with st.container(key="bv_nav_actions"):
         _route_dates = sorted({today_et(), today_et() + dt.timedelta(days=1), view})
         TOKEN = props_ui.render_update_lines_popover(view, store.mark_projected(SCHED, _route_dates),
                                                      ROSTER, dates=_route_dates,
-                                                     in_nav_container=False) or TOKEN
-        keep.update(store.view_params(TOKEN, MARKS))
+                                                     in_nav_container=False,
+                                                     feed_on=FEED_ON) or TOKEN
+        keep.update(store.view_params(TOKEN, MARKS, BOOK))
     render_share(store.page_url("/", keep, date=view.isoformat(),
                                 player=st.query_params.get("player")))
-FOOT_KEEP = {"date": view.isoformat(), **store.view_params(TOKEN, MARKS)}
+FOOT_KEEP = {"date": view.isoformat(), **store.view_params(TOKEN, MARKS, BOOK)}
 
-# ── Date bar ─────────────────────────────────────────────────────────────────
+# -- Date bar -----------------------------------------------------------------
 today = today_et()
 with st.container(key="bv_datebar"):
     c_prev, c_next, c_date, c_y, c_t, c_tm, _ = st.columns([0.05, 0.05, 0.17, 0.11, 0.1, 0.12, 0.4])
     with c_prev:
-        st.button("‹", key="bv_day_prev", on_click=_step, args=(-1,), help="Previous day")
+        st.button(chr(0x2039), key="bv_day_prev", on_click=_step, args=(-1,), help="Previous day")
     with c_next:
-        st.button("›", key="bv_day_next", on_click=_step, args=(1,), help="Next day")
+        st.button(chr(0x203A), key="bv_day_next", on_click=_step, args=(1,), help="Next day")
     with c_date:
         st.date_input("Date", key="view_date", format="YYYY-MM-DD")
     with c_y:
@@ -136,7 +159,7 @@ if SCHED_LIVE.stale:
         "The live NBA feed did not answer just now, so scores and statuses may lag."),
         unsafe_allow_html=True)
 
-# ── Slate ────────────────────────────────────────────────────────────────────
+# -- Slate --------------------------------------------------------------------
 games = live.games_on(SCHED, view)
 nba = games[games["game_type"].isin(["RS", "PI", "PO", "CUP_FINAL"])] if len(games) else games
 pre = games[games["game_type"] == "PRE"] if len(games) else games
@@ -147,13 +170,29 @@ IDS = store.projected_ids(SCHED, view)
 served = store.load_projections(view, MARKS) if IDS else None
 FRAME = served.frame if served is not None else None
 FEATS = store.display_features(view) if IDS else None
-BOARD = None
-if TOKEN and FRAME is not None and len(FRAME):
+# The feed's lines for the date, read once the projection load is done: the
+# picked book's rows are the board, with or without a paste (design 2.8).
+FEED = store.feed_result(FEED_TICKET)
+FEED_LIVE = FEED.state != "off"
+_params = None
+if TOKEN or FEED_LIVE:
     try:
         _params = store.sim_params()
     except Exception:  # noqa: BLE001 - date_board explains a board it cannot build
         _params = None
-    BOARD = props_ui.date_board(TOKEN, view, FRAME, _params, ROSTER)
+FT = (store.feed_tables(view, FEED, served, _params, ROSTER)
+      if FEED_LIVE and FRAME is not None and len(FRAME) else None)
+BOARD = None
+# Tables marked failed (the feed holds lines it could not compare) still make
+# a board: date_board's explained empty one, never the prompt that says the
+# board fills from the odds feed.
+if (TOKEN or (FT is not None and (FT.tables or FT.failed))) and FRAME is not None and len(FRAME):
+    BOARD = props_ui.date_board(TOKEN, view, FRAME, _params, ROSTER, feed=FT,
+                                feed_info=store.feed_info(FEED, today) if FT is not None else None,
+                                selected=props_ui.selected_book(FEED_LIVE))
+# The board carries the feed's rows: its header names the picked book, each
+# row has its Other books cell, and the pills' counts are the board's lines.
+FEED_BOARD = BOARD is not None and BOARD.feed is not None
 
 states = {r["game_id"]: live.game_state(r) for _, r in nba.iterrows()} if len(nba) else {}
 odds = live.odds_on(view) if len(nba) else None
@@ -181,7 +220,7 @@ else:
     st.markdown(store.render_masthead(view, nba, None), unsafe_allow_html=True)
 
 
-# ── Player search (?player=, seeded only when the URL changes) ───────────────
+# -- Player search (?player=, seeded only when the URL changes) ---------------
 def _player_search(frame, date: dt.date, keep: dict, feats) -> None:
     opts = store.player_options(frame)
     labels = dict(opts)
@@ -233,7 +272,11 @@ if len(nba):
         states=states,
         line_counts=props_ui.line_counts_by_game(BOARD.shown) if BOARD is not None else None,
         subs=store.card_subs(served, mpg=store.season_mpg(FEATS)),
-        b2b=store.b2b_by_game(store.rest_by_game(FEATS))), unsafe_allow_html=True)
+        b2b=store.b2b_by_game(store.rest_by_game(FEATS)), feed=FEED_BOARD), unsafe_allow_html=True)
+    if FEED.loading:
+        # Games still loading: the watch shows the loading line and reruns the
+        # page once their lines land (design 2.7, M6 item 3).
+        store.feed_loading_watch(view.isoformat(), FEED.generation)
     if FRAME is not None and len(FRAME):
         _trust = store.trust_line(store.page_url("/About", keep, date=view.isoformat()))
         if _trust:
@@ -258,14 +301,38 @@ else:
     st.markdown(store.render_notice(f"<b>No NBA games on {view.strftime('%A, %B %-d')}.</b>{nxt}"),
                 unsafe_allow_html=True)
 
-# ── Model vs the board (only when the visitor pasted lines for this date) ────
+# -- Model vs the board (a pasted board, the odds feed, or both) --------------
+_labels = {str(r["game_id"]): f"{r['away']} at {r['home']}" for _, r in nba.iterrows()}
+if FEED_LIVE and len(nba):
+    # The feed's notice goes above the board, so it shows even when the board
+    # draws nothing (m7): its state, the paste merge, the games the picked
+    # book has not posted (named the schedule's way, N2; only those not yet
+    # tipped, by the schedule's own state, build amendment B25) and the lines
+    # taken down. The loading line is the watch's while it runs. Then the
+    # pills, when the feed has lines for the date (amendment A3).
+    if BOARD is not None and BOARD.paste_only:
+        # Build amendment B17: the feed's lines could not be compared, so the
+        # visitor's paste is the board, exactly as with the feed off, under
+        # one note (and no pills: no book has a board).
+        st.markdown(props_ui.paste_only_note_html(), unsafe_allow_html=True)
+    else:
+        _tipped = {str(g) for g, s in states.items() if s in ("live", "final")}
+        _notice = props_ui.feed_notice_html(BOARD.feed if FEED_BOARD else store.feed_info(FEED, today),
+                                            today, _labels, with_loading=not FEED.loading,
+                                            tipped=_tipped)
+        if _notice:
+            st.markdown(_notice, unsafe_allow_html=True)
+    if props_ui.feed_games(FT):
+        props_ui.render_book_pills()
 if BOARD is not None:
-    _labels = {str(r["game_id"]): f"{r['away']} at {r['home']}" for _, r in nba.iterrows()}
     props_ui.render_board(BOARD.shown, BOARD.hidden, BOARD.thin, BOARD.void,
                           scope_label=view.strftime("%B %-d"), meta=BOARD.meta,
-                          game_labels=_labels)
-    # DiamondValue's biggest-gaps strip, as its own section at the bottom.
-    props_ui.render_discrepancies(BOARD.shown, view.strftime("%B %-d"))
+                          game_labels=_labels, context=BOARD.context, feed=BOARD.feed)
+    # DiamondValue's biggest-gaps strip, as its own section at the bottom. With
+    # the feed's rows its title names the picked book (amendment A8).
+    props_ui.render_discrepancies(BOARD.shown, view.strftime("%B %-d"),
+                                  book_label=props.BOOK_TITLE.get(BOARD.feed.get("book"))
+                                  if FEED_BOARD else None)
 elif TOKEN:
     board = props.get_board(TOKEN)
     todays = props.lines_for_date(board, view) if board is not None else None
@@ -278,6 +345,14 @@ elif TOKEN:
 elif ROSTER is not None and FRAME is not None and len(FRAME) \
         and any(s == "upcoming" for s in states.values()):
     # DiamondValue's empty-board prompt: a paste could still land on this date.
-    st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_SLATE}</div>', unsafe_allow_html=True)
+    # With the feed on it says the board fills by itself, and only while the
+    # feed holds no line for the date (lines it holds are the board's to show
+    # or explain); while the feed is down, paused or loading its own notice
+    # above says what to do instead.
+    if not FEED_LIVE:
+        st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_SLATE}</div>', unsafe_allow_html=True)
+    elif FEED.state in ("idle", "ok") and not FEED.loading and not len(FEED.value):
+        st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_SLATE_FEED}</div>',
+                    unsafe_allow_html=True)
 
 render_footer(FOOT_KEEP)

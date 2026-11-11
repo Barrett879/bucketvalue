@@ -6,7 +6,14 @@ reasons come from third-party feeds and are not trusted input). URLs are MINTED
 with readable params and carry view state, because every internal link is a full
 page load and therefore a fresh Streamlit session.
 
-THE LOADER (last section) is the only way a page reaches projections:
+THE ODDS FEED (design 2.7, layout B). feed_start and feed_result are the
+page's two calls into the live layer's licensed feed: with no key,
+feed_start returns "off" before any feed code runs (M9), so nothing about the
+page changes. feed_tables compares the feed's lines once per ledger
+generation and content (st.cache_resource), and feed_info hands props_ui the
+feed's facts as plain values.
+
+THE LOADER (its own section below) is the only way a page reaches projections:
 load_projections(date, marks) wraps pipeline.live_projections in st.cache_data
 keyed by CONTENT: the ET date, the report (kind, title time, rows), the lines
 (spreads and totals), the sorted effective mark-outs (effective_marks) and the
@@ -22,28 +29,36 @@ to disk.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
+import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlencode
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from . import cache as C
 from . import context as CTX
 from . import dist as D
 from . import live as LV
 from . import models as M
+from . import oddsbudget as OB
 from . import pipeline as P
 from . import props, props_ui, simprov, teams
 from . import state as S
 from .cache import MODELS_DIR
-from .util import SENTINEL, esc, fmt_num, fmt_tip, now_utc, season_for_date, to_et
+from .sources import oddsapi as O
+from .util import ET, SENTINEL, UTC, esc, fmt_num, fmt_tip, now_utc, season_for_date, to_et
 
-# ── Links ────────────────────────────────────────────────────────────────────
+# -- Links --------------------------------------------------------------------
 def page_url(path: str, keep: dict | None = None, **params) -> str:
     """A minted internal link: `params` first, then carried view state."""
     q = {k: v for k, v in params.items() if v not in (None, "")}
@@ -57,16 +72,24 @@ def game_url(date: dt.date, away: str, home: str, keep: dict | None = None) -> s
     return page_url("/Game", keep, date=date.isoformat(), away=away, home=home)
 
 
-def view_params(token: str | None = None, marks=()) -> dict:
+def view_params(token: str | None = None, marks=(), book: str | None = None) -> dict:
     """The view state every minted internal URL carries besides the date and
     the theme (spec 5): the pasted board (?board=, props_ui.keep_params) and
     the visitor's mark-outs (?out=). One definition for the slate, the Game
-    page and About, so no page's links drop either."""
+    page and About, so no page's links drop either.
+
+    `book` is the picked book (props_ui.selected_book): it rides as ?book=
+    only while the odds feed is on and it is not PrizePicks, so the links
+    between the slate and the Game page keep the pick (amendment A3). With
+    the feed off a ?book= is never carried."""
     out = out_param(marks)
-    return {**props_ui.keep_params(token), **({"out": out} if out else {})}
+    params = {**props_ui.keep_params(token), **({"out": out} if out else {})}
+    if book in props.BOOK_ORDER and book != props.PASTE_BOOK and feed_on():
+        params[props_ui.BOOK_PARAM] = book
+    return params
 
 
-# ── Small pieces ─────────────────────────────────────────────────────────────
+# -- Small pieces -------------------------------------------------------------
 def render_notice(body_html: str) -> str:
     """Never let an empty or degraded result render as silence."""
     return f'<div class="bv-notice">{body_html}</div>'
@@ -117,7 +140,7 @@ def _final_html(row) -> str:
             f' - <span{" class=w" if h > a else ""}>{h}</span></div>')
 
 
-# ── Slate ────────────────────────────────────────────────────────────────────
+# -- Slate --------------------------------------------------------------------
 def active_games(games: pd.DataFrame | None) -> pd.DataFrame | None:
     """The games that will be played on the date: postponed ones dropped
     (live.is_postponed). The masthead counts these and their lines."""
@@ -200,11 +223,13 @@ def b2b_chips(teams_b2b) -> str:
 
 def render_slate_card(row, date: dt.date, keep: dict, odds: dict | None = None,
                       state: str = "upcoming", n_lines: int = 0, sub_html: str = "",
-                      b2b: tuple = ()) -> str:
+                      b2b: tuple = (), feed: bool = False) -> str:
     """One game card: status tag (Upcoming, Live, Final, Postponed), the
     matchup, the tip time ('Time TBD' when it is not set), the line or the
     score, back-to-back chips and the card's extra line. A placeholder whose
-    teams are not known yet is an unlinked card in the same panel."""
+    teams are not known yet is an unlinked card in the same panel. `feed`:
+    the board carries the odds feed's rows, so the pill's title counts the
+    board's lines, not "your" lines (design 2.7)."""
     away, home = row["away"], row["home"]
     if not (isinstance(away, str) and isinstance(home, str)):
         label = _placeholder_label(row)
@@ -225,7 +250,8 @@ def render_slate_card(row, date: dt.date, keep: dict, odds: dict | None = None,
     lines_html = ""
     if n_lines > 0:
         unit = "line" if n_lines == 1 else "lines"
-        what = f"{n_lines} of your lines shown for this game"
+        what = (f"{n_lines} {unit} shown for this game" if feed
+                else f"{n_lines} of your lines shown for this game")
         lines_html = (f'<span class="bv-slate-lines" title="{what}" aria-label="{what}">'
                       f'<b>{n_lines}</b><span class="u">{unit}</span></span>')
     title = f"{teams.get(away).full_name} at {teams.get(home).full_name}"
@@ -243,12 +269,12 @@ def render_slate_card(row, date: dt.date, keep: dict, odds: dict | None = None,
 def render_slate(games: pd.DataFrame, date: dt.date, keep: dict,
                  odds_by_game: dict | None = None, states: dict | None = None,
                  line_counts: dict | None = None, subs: dict | None = None,
-                 b2b: dict | None = None) -> str:
+                 b2b: dict | None = None, feed: bool = False) -> str:
     """Cards grouped by tip time: with 10-15 games a night the useful grouping
     is when each one starts (and so when its information stops changing).
     Games whose time is not set (live.time_tbd) are grouped last under
     'Time TBD', never under their made-up 00:00 ET. `b2b`: {game_id: teams
-    on a back-to-back} (rest_by_game)."""
+    on a back-to-back} (rest_by_game). `feed`: render_slate_card's."""
     if games is None or games.empty:
         return ""
     odds_by_game, states = odds_by_game or {}, states or {}
@@ -266,13 +292,13 @@ def render_slate(games: pd.DataFrame, date: dt.date, keep: dict,
             render_slate_card(r, date, keep, odds_by_game.get(r["game_id"]),
                               states.get(r["game_id"], "upcoming"),
                               int(line_counts.get(r["game_id"], 0)), subs.get(r["game_id"], ""),
-                              tuple(b2b.get(str(r["game_id"]), ())))
+                              tuple(b2b.get(str(r["game_id"]), ())), feed)
             for _, r in block.iterrows())
         parts.append(f'<div class="bv-slate-grid">{cards}</div>')
     return "".join(parts)
 
 
-# ── Game page ────────────────────────────────────────────────────────────────
+# -- Game page ----------------------------------------------------------------
 def render_matchup_header(row, state: str) -> str:
     away, home = row["away"], row["home"]
     ac, hc = _colors(away, home)
@@ -307,7 +333,7 @@ def render_facts(facts: list[str]) -> str:
     return f'<div class="bv-facts">{"".join(facts)}</div>'
 
 
-# ── Lines as the pages show them ─────────────────────────────────────────────
+# -- Lines as the pages show them ---------------------------------------------
 PRE_TIP = "Pre-tip line"
 
 
@@ -419,7 +445,7 @@ def market_facts(odds: dict | None, away: str, home: str, unavailable: bool = Fa
             fact("Implied points", implied)]
 
 
-# ── Rest, starters and season minutes: the committed features ────────────────
+# -- Rest, starters and season minutes: the committed features ----------------
 # Display columns read from the date's committed history features (the rows
 # the models were fed), so a B2B chip or a starter dot says what the model
 # saw. A date without committed features shows none of them.
@@ -533,7 +559,7 @@ def projected_starters(frame: pd.DataFrame | None, feats: pd.DataFrame | None
 
 
 
-# ── Status badges ────────────────────────────────────────────────────────────
+# -- Status badges ------------------------------------------------------------
 # Every label context.display_status can produce (spec 5). The two team-level
 # unknowns are drawn once in the table caption AND as "?" on every row, so an
 # unknown status can never read as a blank, healthy badge.
@@ -556,26 +582,30 @@ STAT_COLS = [("min", "MIN"), ("pts", "PTS"), ("reb", "REB"), ("ast", "AST"), ("f
              ("stl", "STL"), ("blk", "BLK"), ("tov", "TOV"), ("pra", "PRA"), ("fantasy", "FS")]
 
 
-def _player_cell(p) -> str:
+def _player_cell(p, feed: bool = False) -> str:
     img = (f'<img class="bv-hs" src="{esc(teams.headshot_url(p["person_id"]))}" alt="" '
            f'loading="lazy">')
     pos = f'<span class="pos">{esc(p.get("position", ""))}</span>' if p.get("position") else ""
     dot = ('<span class="bv-sd" title="Projected starter"></span>'
            if p.get("starter") is True or p.get("starter") == 1 else "")
-    return f'<td class="l pl">{img}{esc(p["name"])}{_lines_chip(p)}{dot}{pos}</td>'
+    return f'<td class="l pl">{img}{esc(p["name"])}{_lines_chip(p, feed)}{dot}{pos}</td>'
 
 
-def _lines_chip(p) -> str:
+def _lines_chip(p, feed: bool = False) -> str:
     """DiamondValue's teal count: how many of the visitor's SHOWN PrizePicks
     lines this player has (the page fills `n_lines` from the board), so a
-    reader sees whose lines open under the table. Nothing at zero or unset."""
+    reader sees whose lines open under the table. Nothing at zero or unset.
+    `feed`: the board carries the odds feed's rows, so the count is the
+    picked book's lines on the board, not the visitor's (design 2.7)."""
     try:
         n = int(p.get("n_lines") or 0)
     except (TypeError, ValueError):
         return ""
     if n <= 0:
         return ""
-    what = f"{n} PrizePicks {'line' if n == 1 else 'lines'} on your board; open him under this table"
+    unit = "line" if n == 1 else "lines"
+    what = (f"{n} {unit} on the board; open him under this table" if feed
+            else f"{n} PrizePicks {unit} on your board; open him under this table")
     return f'<span class="bv-nl" title="{esc(what)}">{n}</span>'
 
 
@@ -627,7 +657,7 @@ def render_team_table(team: str, players: pd.DataFrame, asof_note: str = "",
     )
 
 
-# ── Game page: one team's projected players ──────────────────────────────────
+# -- Game page: one team's projected players ----------------------------------
 def projected_ids(schedule: pd.DataFrame | None, date) -> set[str]:
     """The date's games the bot projects: pipeline.state_games (serve's
     _state_games and tables.STATE_TYPES, the one definition), so a page
@@ -758,7 +788,7 @@ COLGROUP = ('<colgroup><col class="c-badge"><col class="c-player"><col class="c-
             + "".join("<col>" for _ in STAT_COLS) + "</colgroup>")
 
 
-# ── After tip: the box score ─────────────────────────────────────────────────
+# -- After tip: the box score -------------------------------------------------
 DNP_TEXT = "Did not play"
 
 
@@ -833,31 +863,32 @@ def _actual_row(p, actuals: Actuals | None) -> str:
     return f'<tr class="act">{lab}<td></td>{cells}</tr>'
 
 
-def _proj_row(p, actuals: Actuals | None = None) -> str:
+def _proj_row(p, actuals: Actuals | None = None, feed: bool = False) -> str:
     pid = int(p["person_id"])
     badge = f'<td class="l">{status_badge(p.get("status"))}</td>'
     if p.get("out"):
         reason = p.get("reason")
         if not isinstance(reason, str) or reason.strip() in ("", "-"):
             reason = p.get("status") or "Out"
-        return (f'<tr class="out" data-pid="{pid}">{badge}{_player_cell(p)}'
+        return (f'<tr class="out" data-pid="{pid}">{badge}{_player_cell(p, feed)}'
                 f'<td class="l reason" colspan="{len(STAT_COLS) + 1}">{esc(reason)}</td></tr>'
                 + _actual_row(p, actuals))
     cells = "".join(f'<td class="{"lead" if k == "min" else ""}">{fmt_num(p.get(k), 1)}</td>'
                     for k, _ in STAT_COLS)
-    return (f'<tr data-pid="{pid}">{badge}{_player_cell(p)}'
+    return (f'<tr data-pid="{pid}">{badge}{_player_cell(p, feed)}'
             f'<td class="pp">{esc(p.get("pplay") or "")}</td>{cells}</tr>' + _actual_row(p, actuals))
 
 
 def render_projection_table(team: str, players: pd.DataFrame, asof_note: str = "",
-                            team_note: str = "", actuals: Actuals | None = None) -> str:
+                            team_note: str = "", actuals: Actuals | None = None,
+                            feed: bool = False) -> str:
     """One team's projected players (team_view rows). MIN, the projected
     average, is the bold lead column; the nine stats after it are mid-p
     medians under an "if he plays" header; P(play) only where team_view
     filled it; the projected starters marked with a dot; the deep bench
     collapsed under its own summary; Out rows greyed at the bottom with the
     reason and no numbers. After tip (`actuals`), each player's box-score
-    line sits under his projected one."""
+    line sits under his projected one. `feed`: _lines_chip's."""
     t = teams.get(team)
     sec = players["section"] if len(players) else pd.Series(dtype=object)
     main, deep, out = (players[sec == s] for s in _SECTIONS)
@@ -868,7 +899,7 @@ def render_projection_table(team: str, players: pd.DataFrame, asof_note: str = "
                       else f"<th>{esc(lab)}</th>" for k, lab in STAT_COLS) + "</tr></thead>")
 
     def body(part):
-        return "".join(_proj_row(p, actuals) for _, p in part.iterrows())
+        return "".join(_proj_row(p, actuals, feed) for _, p in part.iterrows())
     parts = [f'<table>{COLGROUP}{head}<tbody>{body(main)}</tbody></table>']
     if len(deep):
         n = len(deep)
@@ -885,7 +916,7 @@ def render_projection_table(team: str, players: pd.DataFrame, asof_note: str = "
             f'{"".join(parts)}</div>')
 
 
-# ── The slate's player search ────────────────────────────────────────────────
+# -- The slate's player search ------------------------------------------------
 def player_options(frame: pd.DataFrame | None) -> list[tuple[int, str]]:
     """[(person_id, 'Name, TEAM')] of every projected player on the date, by
     name then id: a fixed order, so the keyed search box's options never
@@ -955,7 +986,7 @@ def adjusted_banner(n_marked: int, clear_url: str | None = None) -> str:
             f"anyone else.{clear}</div>")
 
 
-# ── Slate cards ──────────────────────────────────────────────────────────────
+# -- Slate cards --------------------------------------------------------------
 def short_name(name) -> str:
     """'Maxey' from 'Tyrese Maxey', 'Oubre Jr.' from 'Kelly Oubre Jr.'."""
     parts = str(name or "").strip().split(" ", 1)
@@ -1019,7 +1050,7 @@ def reports_filed(frame: pd.DataFrame | None) -> tuple[int, int] | None:
     return int((~per).sum()), int(len(per))
 
 
-# ── Notices about the frame ──────────────────────────────────────────────────
+# -- Notices about the frame --------------------------------------------------
 # Why the committed projections stand in for a live recompute, in words. The
 # raw exception text is never rendered: it can carry server paths.
 _STALE_WHY = ((P.LIVE_FRAME_FAILED, "the live update hit an error"),
@@ -1207,7 +1238,7 @@ def empty_notice(served: "Served", game_id: str | None = None, game_ids=()) -> s
     return render_notice(f"<b>Projections not published yet for this date.</b> {_PUBLISHES}")
 
 
-# ── About: the trust table, generated from data/stat_reliability.csv ─────────
+# -- About: the trust table, generated from data/stat_reliability.csv ---------
 POWER_PLAY_2_PAYOUT = 3.0        # a two-pick PrizePicks Power Play pays 3x
 
 
@@ -1327,7 +1358,7 @@ def render_trust_table(table: pd.DataFrame) -> str:
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
-# ── The loader ───────────────────────────────────────────────────────────────
+# -- The loader ---------------------------------------------------------------
 LOADER_TTL_S = 120          # the clock moves hours_to_tip and report_age_h; reports, 10 min
 LOADER_MAX_ENTRIES = 64     # mark-out variants per date stay bounded
 SIM_PARAMS_FILE = "sim_params_v1.json"
@@ -1567,3 +1598,436 @@ def table_medians(frame: pd.DataFrame | None) -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame(columns=["person_id", "game_id", *(f"med_{s}" for s in MEDIAN_STATS)])
     return simprov.provider_for(frame, sim_params()).medians(MEDIAN_STATS)
+
+
+# -- The licensed odds feed (design 2.7; layout B; build amendments B2, B10, N4) --
+# The page's side of the feed the live layer buys (design 2.4). One page view
+# of today: feed_start(view, SCHED) before the projection load, so the walk
+# overlaps it (M6 item 4), then feed_result(ticket) after it, then
+# feed_tables and feed_info for props_ui. With no key nothing of it runs:
+# feed_start returns "off" before it reads the schedule helpers, the work
+# order or the anchor (M9), so "down" can never appear and the site is
+# today's. The key itself is read by the live layer only; this section never
+# holds it.
+PAGE_WAIT_S = LV.PAGE_WAIT_S              # the most a page waits for today's tasks
+FEED_WORK_TTL_S = 600                     # the work order, rebuilt at most every 10 minutes
+SEASON_GAMES_TTL_S = 3600                 # the season's projected games (its busiest month)
+FEED_TABLES_MAX = 4                       # compared tables kept (design 2.7, m19)
+WATCH_EVERY_S = 3                         # the loading watch's own reruns
+WATCH_MAX_RUNS = 20                       # then it only shows the line (one minute)
+WATCH_RUNS_KEY = "bv_feed_watch_runs"     # its runs in this loading episode
+WATCH_EPISODE_KEY = "bv_feed_watch_episode"   # the episode they count (L3-4)
+# The schedule columns the work order reads (pipeline.state_games and
+# live.time_tbd): its cache key digests these, so a score or a status moving
+# during a game does not rebuild the order.
+_ORDER_COLUMNS = ("game_id", "game_type", "game_date", "tip_utc", "home", "away", "postponed",
+                  "time_tbd")
+_off_lock = threading.Lock()
+_off_said: set = set()
+
+
+def _off_once(msg: str) -> None:
+    """One INFO line per process for each way the feed is off (design 6)."""
+    with _off_lock:
+        if msg in _off_said:
+            return
+        _off_said.add(msg)
+    C.logger.info(msg)
+
+
+def feed_on(environ=None) -> bool:
+    """A key and the kill switch on, read on this call (RC K3, G1): no
+    network, no anchor, nothing stored. `environ` None is the process
+    environment; a mapping given is read as it is (m11). The key is the live
+    layer's reader's; this returns only whether there is one."""
+    env = os.environ if environ is None else environ
+    try:
+        if LV._read_key(env) is None:
+            _off_once("oddsapi: no key; feed off")
+            return False
+        if not O.read_settings(env).enabled:
+            _off_once("oddsapi: switched off")
+            return False
+    except Exception as e:  # noqa: BLE001 - the type only; a failed check is off
+        C.logger.warning("oddsapi: feed check failed (%s)", type(e).__name__)
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class FeedTicket:
+    """What feed_start did for a page view: "off" (no key, or switched off),
+    "kicked" (today: the walk was started, so feed_result waits for it) or
+    "memory" (another date: feed_result reads memory, never the vendor)."""
+    date: dt.date
+    mode: str
+
+
+def feed_start(view_date, sched) -> FeedTicket:
+    """The page's first call (design 2.7), before load_projections.
+
+    With the feed off it returns "off" at once (M9). For today (ET, by this
+    module's clock) it builds the work order (feed_work), starts the walk
+    (live.feed_kick, which never blocks) and the refresher
+    (live.ensure_refresher, N4), all inside one try: an exception logs its
+    type and still gives "kicked", so feed_result reads memory. Any other
+    date gives "memory": nothing is bought for it (today only, design 1.1)."""
+    if not feed_on():
+        return FeedTicket(view_date, "off")
+    try:
+        day = S.as_date(view_date)
+    except (TypeError, ValueError):
+        return FeedTicket(view_date, "memory")
+    if day != to_et(now_utc()).date():
+        return FeedTicket(day, "memory")
+    try:
+        if sched is not None and len(sched):
+            LV.feed_kick(feed_work(day, sched))
+        LV.ensure_refresher()
+    except Exception as e:  # noqa: BLE001 - the type only; the page still reads memory
+        C.logger.warning("oddsapi: feed start failed (%s)", type(e).__name__)
+    return FeedTicket(day, "kicked")
+
+
+def feed_result(ticket: FeedTicket) -> LV.FeedLive:
+    """What the page shows of the feed for its ticket's date: "off" gives
+    FeedLive.off(); "kicked" waits up to PAGE_WAIT_S for today's tasks
+    (live.feed_view); "memory" reads memory without waiting
+    (live.prop_lines_memory). Any exception gives FeedLive.down(), with a
+    WARNING naming its type."""
+    mode = getattr(ticket, "mode", "off")
+    if mode not in ("kicked", "memory"):
+        return LV.FeedLive.off()
+    try:
+        if mode == "kicked":
+            return LV.feed_view(ticket.date, wait_s=PAGE_WAIT_S)
+        return LV.prop_lines_memory(ticket.date)
+    except Exception as e:  # noqa: BLE001 - the type only
+        C.logger.warning("oddsapi: feed result failed (%s)", type(e).__name__)
+        return LV.FeedLive.down()
+
+
+# -- The work order (design 2.4.5; B2, N4, m26) -----------------------------------
+def _strict_digest(df) -> str | None:
+    """A sha1 of a frame's content: pandas' row hashes plus the column names
+    and dtypes. None when it is not a frame or cannot be hashed, and None
+    means do not cache (m19): never a fallback to len(), as _digest has."""
+    if not isinstance(df, pd.DataFrame):
+        return None
+    try:
+        rows = pd.util.hash_pandas_object(df, index=False).to_numpy()
+    except (TypeError, ValueError):
+        return None
+    h = hashlib.sha1(repr([(str(c), str(t)) for c, t in df.dtypes.items()]).encode())
+    h.update(rows.tobytes())
+    return h.hexdigest()
+
+
+def _params_digest(params) -> str | None:
+    """The simulator parameters' digest (simprov's own rule), or None."""
+    try:
+        return hashlib.sha1(json.dumps(asdict(params), sort_keys=True, default=str)
+                            .encode()).hexdigest()
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_sched_key(sched) -> str | None:
+    """The strict digest of the schedule columns the work order reads."""
+    if not isinstance(sched, pd.DataFrame):
+        return None
+    cols = [c for c in _ORDER_COLUMNS if c in sched.columns]
+    if "time_tbd" not in sched.columns and "status_text" in sched.columns:
+        cols.append("status_text")              # live.time_tbd's fallback
+    return _strict_digest(sched[cols])
+
+
+def _iso_utc(v) -> str | None:
+    """An aware instant as an ISO UTC string; None for a missing or naive one."""
+    try:
+        ts = pd.Timestamp(v)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(ts) or ts.tzinfo is None:
+        return None
+    return ts.tz_convert("UTC").isoformat()
+
+
+def _order_row(g, day: dt.date) -> dict:
+    """One projected game as the work order holds it: plain values, with both
+    teams on every row (N4: the refresher matches vendor events by the date
+    and the team pair, so a row without them could never be bought)."""
+    return {"game_id": str(g["game_id"]), "game_date": day.isoformat(),
+            "tip_utc": _iso_utc(g.get("tip_utc")), "tbd": bool(LV.time_tbd(g)),
+            "away": str(g["away"]), "home": str(g["home"])}
+
+
+def _projected_rows(sched) -> tuple[list, int]:
+    """Every projected game of the schedule, date by date through
+    pipeline.state_games (the one definition; a play-in or a postponed game
+    is in none of them), as _order_row rows in date and tip order, and the
+    most projected games in one calendar month: the season's busiest month,
+    which sizes the per-game cap (design 3.3)."""
+    if sched is None or not len(sched):
+        return [], 0
+    rows, months = [], {}
+    days = pd.to_datetime(sched["game_date"]).dt.date
+    for day, sub in sched.groupby(days, sort=True):
+        for _, g in P.state_games(sub, day).iterrows():
+            rows.append(_order_row(g, day))
+            months[(day.year, day.month)] = months.get((day.year, day.month), 0) + 1
+    return rows, max(months.values(), default=0)
+
+
+@st.cache_data(ttl=SEASON_GAMES_TTL_S, max_entries=2, show_spinner=False)
+def _season_games(sched_key: str, _sched) -> tuple[list, int]:
+    return _projected_rows(_sched)
+
+
+def _horizon_days(today: dt.date) -> tuple[dt.date, dt.date]:
+    """The work order's horizon, as ET dates (build amendment B2): from the
+    earliest instant any credit period current on `today` could have opened
+    to the latest instant any such period's horizon could end. Outside every
+    reset window that is the period's own (the window's first day, the last
+    day of the month before, to 08:00 ET on the 1st after); inside one, the
+    previous month's period opening day to the new period's end. Read from
+    oddsbudget.period_of at the day's first and last instant, with no
+    balance known (the old period) and with nothing used (the new one), so
+    the order is the same at every hour of the day and the governor picks
+    the period's own games out of it."""
+    opens, ends = [], []
+    for clock in (dt.time(0, 0), dt.time(23, 59, 59)):
+        t = dt.datetime.combine(today, clock, tzinfo=ET)
+        for used, allowance in ((None, None), (0, 1)):
+            p = OB.period_of(t, used, allowance, None, 1, [])
+            opens.append(p.opens)
+            ends.append(p.horizon_end)
+    return min(opens).astimezone(ET).date(), max(ends).astimezone(ET).date()
+
+
+def _committed(day: dt.date) -> tuple:
+    """((path, mtime_ns, size), ...) of the date's committed projections file,
+    then its features file, for the ones that exist."""
+    out = []
+    for p in (P.projections_path(day), P.features_path(day)):
+        if os.path.isfile(p):
+            info = os.stat(p)
+            out.append((os.path.abspath(p), info.st_mtime_ns, info.st_size))
+    return tuple(out)
+
+
+def _published_ids(files: tuple) -> frozenset:
+    """The game ids of the first of `files` (the projections file, else the
+    features file: store.load_projections' test, m26): its game_id column
+    only. Unreadable or none: no id, so nothing is bought."""
+    if not files:
+        return frozenset()
+    try:
+        df = pd.read_parquet(files[0][0], columns=["game_id"])
+    except Exception as e:  # noqa: BLE001 - the type only; buying nothing is safe
+        C.logger.warning("oddsapi: the date's published file is unreadable (%s)",
+                         type(e).__name__)
+        return frozenset()
+    return frozenset(str(g) for g in df["game_id"].dropna())
+
+
+def _serve_paths(day: dt.date) -> list[str]:
+    return [os.path.abspath(P.projections_path(day)), os.path.abspath(P.features_path(day))]
+
+
+def _work_order(today: dt.date, sched, files: tuple, season=None) -> dict:
+    """The work order (design 2.4.5): plain data only.
+
+    games        today's BUYABLE games: projected (pipeline.state_games) and
+                 in the date's committed projections file, or its features
+                 file when there is none (m26), so a bot-outage day costs no
+                 credits;
+    horizon      every projected game from _horizon_days' first day to its
+                 last, tipped ones too (B2), each with its teams (N4);
+    serve_files  today's and tomorrow's committed file paths, projections
+                 first, so the refresher can buy tomorrow's games at 08:50
+                 from this evening's order (2.4.5);
+    busiest      the season's busiest month in projected games."""
+    rows, busiest = season if season is not None else _projected_rows(sched)
+    first, last = _horizon_days(today)
+    lo, hi, iso = first.isoformat(), last.isoformat(), today.isoformat()
+    ids = _published_ids(files)
+    return {"date": iso, "written_at": now_utc().astimezone(UTC).isoformat(),
+            "games": [dict(r) for r in rows if r["game_date"] == iso and r["game_id"] in ids],
+            "horizon": [dict(r) for r in rows if lo <= r["game_date"] <= hi],
+            "serve_files": {d.isoformat(): _serve_paths(d)
+                            for d in (today, today + dt.timedelta(days=1))},
+            "busiest": int(busiest)}
+
+
+@st.cache_data(ttl=FEED_WORK_TTL_S, max_entries=4, show_spinner=False)
+def _feed_work(today_iso: str, sched_key: str, files_key: tuple, _sched) -> dict:
+    return _work_order(dt.date.fromisoformat(today_iso), _sched, files_key,
+                       _season_games(sched_key, _sched))
+
+
+def feed_work(today: dt.date, sched) -> dict:
+    """The work order for `today` (design 2.4.5), cached on the schedule's
+    strict digest (the columns it reads) and the committed files' (path,
+    mtime_ns, size). With no digest it is built afresh, never cached. live
+    cannot build it itself: it must not import pipeline, which imports live."""
+    files = _committed(today)
+    key = _order_sched_key(sched)
+    if key is None:
+        return _work_order(today, sched, files)
+    return _feed_work(today.isoformat(), key, files, _sched=sched)
+
+
+# -- The feed's tables and facts for props_ui (design 2.7, m19) -------------------
+@st.cache_resource(max_entries=FEED_TABLES_MAX, show_spinner=False)
+def _feed_tables(date_iso: str, generation: int, feed_key: str, frame_key: str, roster_key: str,
+                 params_key: str, _feed, _frame, _params, _roster) -> props.FeedTables:
+    return _tables_now(_feed, _frame, _params, _roster)
+
+
+class _NothingCompared(Exception):
+    """The feed's lines left no line to compare (prepare_feed's own error, or
+    every row dropped). Raised inside the cached build, so a failure is never
+    cached and the next view tries again."""
+
+
+def _tables_now(feed_value, frame, params, roster) -> props.FeedTables:
+    lines, _report = props.prepare_feed(feed_value, roster, frame)
+    ft = props.compare_books(lines, simprov.provider_for(frame, params), frame, roster)
+    if not ft.tables:
+        raise _NothingCompared("no line left to compare")
+    return ft
+
+
+def feed_tables(date, feed, served, params, roster) -> props.FeedTables | None:
+    """The odds feed's lines compared for one date (props.prepare_feed, then
+    props.compare_books with the date's shared simulator provider). Never
+    raises.
+
+    None when there is nothing to compare: the feed off, no line held for
+    the date, or no frame. When the feed holds lines and the frame is there
+    but the tables cannot be built (no simulator parameters, a step that
+    raised, or no line left to compare), props.FeedTables(failed=True): no
+    table and no meta, so date_board explains the failure ("The odds feed's
+    lines are still in memory") and the page never promises lines the feed
+    already holds (build 3's review, F1). A step that raises is logged by
+    its type only, and no failure is ever cached.
+
+    Cached in st.cache_resource (m19): no pickling on every rerun, so callers
+    treat the tables as read-only. The key is the ledger's generation, which
+    moves only when a stored frame changes, plus strict digests of the feed's
+    rows, the frame, the roster and the parameters; a digest that cannot be
+    made is never cached (computed every time). At most FEED_TABLES_MAX
+    entries; a cache clear costs one recompute, never a credit (the credits
+    live in the anchor). The feed never enters _live_frame or its keys (RC N3)."""
+    has_lines = False
+    try:
+        value = getattr(feed, "value", None)
+        frame = getattr(served, "frame", None)
+        if (getattr(feed, "state", "off") == "off" or not isinstance(value, pd.DataFrame)
+                or value.empty or not isinstance(frame, pd.DataFrame) or frame.empty):
+            return None
+        has_lines = True
+        if params is None:
+            return props.FeedTables(failed=True)
+        keys = (_strict_digest(value), _strict_digest(frame), _strict_digest(roster),
+                _params_digest(params))
+        if any(k is None for k in keys):
+            return _tables_now(value, frame, params, roster)
+        return _feed_tables(S.as_date(date).isoformat(), int(feed.generation), *keys,
+                            _feed=value, _frame=frame, _params=params, _roster=roster)
+    except Exception as e:  # noqa: BLE001 - the type only; the board explains itself
+        C.logger.warning("oddsapi: feed tables failed (%s)", type(e).__name__)
+        return props.FeedTables(failed=True) if has_lines else None
+
+
+def feed_info(feed, today: dt.date, environ=None) -> dict:
+    """The feed's facts for props_ui as plain values (copies): state, asof
+    (the oldest latest pull among the games with lines), loading,
+    generation, lines (rows held), per_game ({game_id: {"asof", "books",
+    "pretip", "pp_missing", "reason"}}), report, the page's `today`, from
+    which props_ui writes ', Nov 9' beside an older stamp (m1), and books:
+    the books the site buys (BUCKETVALUE_ODDS_BOOKS, read on this call from
+    `environ`, the process environment when None), so a pick of a book the
+    setting leaves out says its lines are not loaded here (build amendment
+    B25). Book keys only: never a setting's raw text."""
+    value = getattr(feed, "value", None)
+    per_game = {}
+    for gid, facts in (getattr(feed, "per_game", None) or {}).items():
+        if isinstance(facts, dict):
+            per_game[str(gid)] = {**facts, "books": dict(facts.get("books") or {})}
+    report = {k: (list(v) if isinstance(v, (list, tuple)) else v)
+              for k, v in (getattr(feed, "report", None) or {}).items()}
+    env = os.environ if environ is None else environ
+    return {"state": getattr(feed, "state", "off"), "asof": getattr(feed, "asof", None),
+            "loading": int(getattr(feed, "loading", 0) or 0),
+            "generation": int(getattr(feed, "generation", 0) or 0),
+            "lines": int(len(value)) if isinstance(value, pd.DataFrame) else 0,
+            "per_game": per_game, "report": report, "today": today,
+            "books": tuple(O.read_settings(env).books)}
+
+
+# -- The loading watch (design 2.7, M6 item 3) ------------------------------------
+def _fragment_run() -> bool:
+    """True inside a fragment's own timed run; False in a full script run,
+    where an st.rerun() would cut the script short and drop the state of
+    every widget drawn after it (the pills, the board's filters)."""
+    ctx = get_script_run_ctx(suppress_warning=True)
+    return bool(ctx is not None and ctx.fragment_ids_this_run)
+
+
+class _Watched(NamedTuple):
+    """What a game-scoped watch reads of memory: the ledger's generation and
+    that game's own loading (1 or 0)."""
+    generation: int
+    loading: int
+
+
+def _watched(now, game_id):
+    """The view the watch decides on: memory's own for the date, or with a
+    `game_id` (the Game page) that game's loading only (build 4's review,
+    L3-4: a load of another game is not this page's)."""
+    if now is None or game_id is None:
+        return now
+    return _Watched(int(getattr(now, "generation", 0) or 0),
+                    int(str(game_id) in tuple(getattr(now, "loading_games", ()) or ())))
+
+
+def watch_reruns(runs: int, generation: int, now) -> bool:
+    """Whether the loading watch asks for a full rerun: within its first
+    WATCH_MAX_RUNS runs, once the ledger's generation moved past the page's
+    or nothing is loading any more."""
+    if now is None or runs > WATCH_MAX_RUNS:
+        return False
+    return int(now.generation) != int(generation) or int(now.loading) == 0
+
+
+@st.fragment(run_every=WATCH_EVERY_S)
+def feed_loading_watch(date_iso: str, generation: int, game_id=None) -> None:
+    """Rendered by the page only while games are loading (FeedLive.loading;
+    the Game page passes its `game_id` and renders it only while that game
+    loads, FeedLive.loading_games). Every run reads memory (live.feed_view,
+    no wait) and shows the loading line, of the date's games or of the one
+    game. From its own timed runs, once the generation moves or nothing is
+    loading, it asks for a full app rerun (st.rerun), so the cards, the
+    pills and the board fill in; never from the page's own run. Its runs
+    are counted per loading episode (the date, the game and the generation
+    the page drew it with: a new episode starts the count again, build 4's
+    review, L3-4), and after WATCH_MAX_RUNS (a minute) it only shows the
+    line."""
+    episode = f"{date_iso}|{game_id or ''}|{int(generation)}"
+    if st.session_state.get(WATCH_EPISODE_KEY) != episode:
+        st.session_state[WATCH_EPISODE_KEY] = episode
+        st.session_state[WATCH_RUNS_KEY] = 0
+    runs = int(st.session_state.get(WATCH_RUNS_KEY, 0) or 0) + 1
+    st.session_state[WATCH_RUNS_KEY] = runs
+    try:
+        now = _watched(LV.feed_view(date_iso, wait_s=0), game_id)
+    except Exception as e:  # noqa: BLE001 - the type only
+        C.logger.warning("oddsapi: loading watch failed (%s)", type(e).__name__)
+        now = None
+    line = props_ui.loading_line_html(getattr(now, "loading", 0))
+    if line:
+        st.markdown(line, unsafe_allow_html=True)
+    if watch_reruns(runs, generation, now) and _fragment_run():
+        st.rerun()

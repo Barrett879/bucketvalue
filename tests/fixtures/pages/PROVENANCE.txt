@@ -1,0 +1,24 @@
+CAPTURED FROM OUR OWN CODE, NOT FROM ANY VENDOR. No odds feed data is here.
+
+no_key_golden.json
+  What the pages (app.py, pages/Game.py, pages/About.py) rendered with NO key
+  configured, for the serve fixture's world (tests/fixtures/serve: the
+  2026-03-12 slate, every clock pinned), in the fourteen views of
+  tests/test_pages_no_key_golden.py's VIEWS: the slate, both Game pages and
+  About, with and without a pasted board (the fixture's board.txt, its paste
+  time pinned to 12:20 PM ET), in the morning (12:20 PM ET) and the evening
+  (7:00 PM ET), with ?out= and ?book= variants.
+  Each view is every element of the page in render order, as its proto (what
+  a browser is sent), one line per text line; each <style> block is its
+  sha256, and the board token and the keeper's request id are masked.
+  Written on 2026-11-10 by logs/I4_capture_pages_golden.py from build 3's
+  tree, before build 4's fix pass touched any page, and checked against stage
+  S9's capture of the tree before the pages were wired to the feed
+  (logs/S9_pages_capture_before.json): all fourteen views agree element for
+  element, once the paste's wall-clock time (which S9 did not pin) is
+  masked. So this is the pre-feed site's no-key output for these views.
+  tests/test_pages_no_key_golden.py checks the pages against it: with no key
+  configured the site must keep today's HTML on every page.
+  Written with json's ASCII escapes. NEVER regenerate it from the current
+  code to make a test pass: a change to a no-key page is a change to the live
+  site and needs its own decision.

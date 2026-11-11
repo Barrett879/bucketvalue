@@ -1,0 +1,21 @@
+CAPTURED FROM OUR OWN CODE, NOT FROM ANY VENDOR. No odds feed data is here.
+
+feed_off_golden.json
+  What bucketlib/props_ui.py rendered BEFORE the licensed odds feed reached
+  it (build 2's tree, stage S8's starting point, 2026-11-10), for the
+  hand-built rows of tests/ui_rows.py: invented players and numbers on the
+  serve fixture's 2026-03-12 date.
+    "functions"  ui_rows.feed_off_outputs(props_ui): the ledger, the Game
+                 page's line rows (before and after tip), the notes, the
+                 board's title bar, the none-matched notice, the
+                 discrepancy title, strip and table, every stat cell, the
+                 paste time, the two no-lines prompts and PROPS_CSS.
+    "page"       the markdown, success and caption elements of a Streamlit
+                 page (AppTest) running render_board, render_discrepancies
+                 and render_player_lines_block on those rows.
+  tests/test_props_ui_feed.py checks that props_ui with the feed off (no
+  feed argument, or feed=None) still renders exactly this, byte for byte:
+  with no key configured the site must keep today's HTML on every page.
+  Written with json's ASCII escapes, so the sentinel shows as \u2014 here.
+  NEVER regenerate it from the current code to make a test pass: a change to
+  the feed-off HTML is a change to the live site and needs its own decision.

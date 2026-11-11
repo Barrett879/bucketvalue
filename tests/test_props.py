@@ -31,7 +31,7 @@ NOW = pd.Timestamp("2026-10-21T03:00:00Z").to_pydatetime()   # 11pm ET Oct 20
 OPENER, NEXT = "2026-10-20", "2026-10-21"
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+# -- Fixtures -----------------------------------------------------------------
 @pytest.fixture(scope="module")
 def roster():
     return pd.read_csv(FIX / "roster_constructed.csv")
@@ -92,7 +92,7 @@ class FixedProvider:
         return self._void if self._void is not None else float("nan")
 
 
-def _line(name="Nikola Jokić", stat="Points", line=27.5, team="DEN", **kw):
+def _line(name="Nikola Joki\u0107", stat="Points", line=27.5, team="DEN", **kw):
     rec = {"name": name, "team": team, "position": "C", "stat_type": stat,
            "line": line, "start_time": None, "direction": "both",
            "odds_type": "standard", "opp": None, "is_combo": False,
@@ -115,7 +115,7 @@ def _prepared(lines, roster, schedule, now=NOW, dates=None):
     return props.route_lines(out, schedule, now=now, dates=dates)
 
 
-# ── Stat labels ──────────────────────────────────────────────────────────────
+# -- Stat labels --------------------------------------------------------------
 @pytest.mark.parametrize("label,key", [
     ("Points", "pts"), ("Rebounds", "reb"), ("Assists", "ast"),
     ("3-PT Made", "fg3m"), ("3-Pointers Made", "fg3m"), ("3PT Made", "fg3m"),
@@ -156,7 +156,7 @@ def test_other_refusals_carry_their_own_reason(label, word):
 
 
 def test_combo_player_squares_and_other_boards_are_refused():
-    assert props.classify_stat("Points", name="LeBron James + Luka Dončić")[2] == props.REFUSE_COMBO
+    assert props.classify_stat("Points", name="LeBron James + Luka Don\u010di\u0107")[2] == props.REFUSE_COMBO
     assert props.classify_stat("Points", is_combo=True)[1] == "refused"
     assert "NBA1Q" in props.classify_stat("Points", league="NBA1Q")[2]
     assert props.classify_stat("Points", league="nba")[1] == "ok"
@@ -166,7 +166,7 @@ def test_an_unknown_label_is_unmapped_not_dropped():
     assert props.classify_stat("Minutes Played")[1] == "unmapped"
 
 
-# ── Names that are not people ────────────────────────────────────────────────
+# -- Names that are not people ------------------------------------------------
 @pytest.mark.parametrize("name", ["LAL", "GSW", "UTAH", "LAL vs GSW", "LAL/GSW",
                                   "NYK @ BOS", "", None, "Points", "Trending",
                                   "vs DAL Wed 8:30pm", "Cur. 27"])
@@ -174,14 +174,14 @@ def test_team_codes_and_junk_are_not_people(name):
     assert props._person_like(name) is False
 
 
-@pytest.mark.parametrize("name", ["Nikola Jokić", "P.J. Washington", "OG Anunoby",
+@pytest.mark.parametrize("name", ["Nikola Joki\u0107", "P.J. Washington", "OG Anunoby",
                                   "Shai Gilgeous-Alexander", "Jaren Jackson Jr.",
                                   "Yang Hansen", "De'Aaron Fox"])
 def test_nba_names_are_people(name):
     assert props._person_like(name) is True
 
 
-# ── Direction ────────────────────────────────────────────────────────────────
+# -- Direction ----------------------------------------------------------------
 def test_direction_is_never_inferred_from_odds_type():
     for odds in ("demon", "goblin", "standard"):
         assert props.offered_sides(None, odds) == "both"
@@ -208,7 +208,7 @@ def test_is_pickable(lean, sides, ok):
     assert props.is_pickable(lean, sides) is ok
 
 
-# ── Feed parsing ─────────────────────────────────────────────────────────────
+# -- Feed parsing -------------------------------------------------------------
 def test_feed_fixture_parses_per_row(feed_text):
     df = props.parse_any(feed_text)
     assert len(df) == 15
@@ -324,24 +324,24 @@ def test_a_paste_over_the_size_cap_is_refused_quickly(monkeypatch):
     assert got.empty and got.attrs["too_large"] and time.time() - start < 0.5
 
 
-# ── Board-text parsing ───────────────────────────────────────────────────────
+# -- Board-text parsing -------------------------------------------------------
 def test_board_fixture_reads_the_real_structure(board_text):
     df = props.parse_any(board_text)
     got = {(r.name, r.stat_type): r for r in df.itertuples()}
     assert len(df) == 13
-    j = got[("Nikola Jokić", "Points")]
+    j = got[("Nikola Joki\u0107", "Points")]
     assert (j.line, j.odds_type, j.direction, j.team, j.position, j.opp) == \
         (34.5, "demon", "more", "DEN", "C", "DAL")                    # tag on the NAME line
     c = got[("Stephen Curry", "3-PT Made")]
     assert (c.odds_type, c.direction) == ("goblin", "more")
-    assert got[("Nikola Jokić", "Rebounds")].direction == "both"
-    assert got[("Luka Dončić", "Pts+Rebs+Asts")].position == "F-G"     # hyphenated
+    assert got[("Nikola Joki\u0107", "Rebounds")].direction == "both"
+    assert got[("Luka Don\u010di\u0107", "Pts+Rebs+Asts")].position == "F-G"     # hyphenated
     assert got[("Jaren Jackson Jr.", "Blocked Shots")].position == "F-C"
     assert got[("Yang Hansen", "Dunks")].position == "C-F"
     nt = got[("Stephen Curry", "Points")]
     assert nt.team is None and nt.line == 24.5                          # TEAM - POS optional
     assert got[("P.J. Washington", "Rebounds")].line == 7.0            # whole line
-    assert bool(got[("LeBron James + Luka Dončić", "Points")].is_combo)
+    assert bool(got[("LeBron James + Luka Don\u010di\u0107", "Points")].is_combo)
     assert "DEN" not in set(df["name"])                                 # team header row
     assert 945.0 not in set(df["line"])                                 # trending count
     assert df.attrs["skipped_live"] == 1                                # SGA live square
@@ -433,7 +433,7 @@ def _time(fn) -> float:
     return time.perf_counter() - t
 
 
-# ── Name resolution ──────────────────────────────────────────────────────────
+# -- Name resolution ----------------------------------------------------------
 def test_names_resolve_with_their_how(roster):
     lines = pd.DataFrame([
         _line("Nikola Jokic", team="DEN"), _line("Shai Gilgeous Alexander", team="OKC"),
@@ -463,7 +463,7 @@ def test_team_scoping_picks_the_right_namesake(roster):
     assert res.iloc[0]["person_id"] == 1699001
 
 
-# ── Routing ──────────────────────────────────────────────────────────────────
+# -- Routing ------------------------------------------------------------------
 def test_a_feed_line_routes_to_the_et_date_of_its_own_start_time(feed_text, roster, schedule):
     # 11am ET Oct 20, before any tip (at NOW, 11pm, the Oct 20 games have tipped
     # and their lines are refused: test_a_feed_line_for_a_game_that_has_tipped...)
@@ -531,7 +531,7 @@ def test_a_naive_or_malformed_start_time_is_unrouted_not_guessed(roster, schedul
     assert set(df["route_how"]) <= {"team_schedule", "unrouted"}
 
 
-# ── The alt-line ladder ──────────────────────────────────────────────────────
+# -- The alt-line ladder ------------------------------------------------------
 def test_ladder_collapses_to_the_standard_line():
     df = pd.DataFrame([_line(line=27.5), _line(line=31.5, odds_type="demon"),
                        _line(line=22.5, odds_type="goblin")])
@@ -561,10 +561,10 @@ def test_the_freeze_key_has_no_line_and_no_false_comment_says_otherwise():
     assert "FREEZE_KEYS includes" not in src
 
 
-# ── Compare: lean, gap, ranking, partition, ledger ───────────────────────────
+# -- Compare: lean, gap, ranking, partition, ledger ---------------------------
 def _proj_row(pid=203999, gid="0022600005", games=300, **means):
     return pd.DataFrame([{"person_id": pid, "game_id": gid, "game_date": NEXT,
-                          "name": "Nikola Jokić", "team": "DEN", "opp": "DAL",
+                          "name": "Nikola Joki\u0107", "team": "DEN", "opp": "DAL",
                           "games_prior": games, **means}])
 
 
@@ -723,7 +723,7 @@ def test_ledger_balances_under_hostile_rows(roster, projections, no_reliability)
     lines = pd.DataFrame([
         _line(), _line(stat="Rebounds"), _line(stat="Assists"), _line(stat="Dunks"),
         _line(stat="Minutes Played"), _line(name="Nobody Here"), _line(name="Chris Smith", team=None),
-        _line(name="LeBron James + Luka Dončić", is_combo=True), _line(name="Jayson Tatum", team="BOS"),
+        _line(name="LeBron James + Luka Don\u010di\u0107", is_combo=True), _line(name="Jayson Tatum", team="BOS"),
         _line(line=float("nan")),
     ])
     table, meta = props.compare(lines, Exploding(), projections, roster=roster)
@@ -767,7 +767,7 @@ def test_void_risk_hook_is_carried_and_not_priced(no_reliability):
     assert math.isnan(no_hook.iloc[0]["void_risk"])
 
 
-# ── The board store ──────────────────────────────────────────────────────────
+# -- The board store ----------------------------------------------------------
 def test_tokens_are_unguessable_and_validated():
     t = props.new_board(pd.DataFrame([_line()]))
     assert props.valid_token(t) and len(t) >= 30
@@ -813,7 +813,7 @@ def test_a_board_keeps_the_time_of_the_paste_that_made_it(monkeypatch):
         assert props_ui.paste_time_text(meta) == ""
 
 
-# ── The board kept in the visitor's browser (Barrett, 2026-11-05) ────────────
+# -- The board kept in the visitor's browser (Barrett, 2026-11-05) ------------
 TODAY = dt.date(2026, 10, 20)          # the ET date at NOW (11pm Oct 20)
 
 
@@ -1051,7 +1051,7 @@ def test_report_points_at_other_dates_and_unrouted(feed_text, board_text, roster
     assert empty[0][0] == "warning" and "included player list" in empty[0][1]
 
 
-# ── The record (LOCAL ONLY) ──────────────────────────────────────────────────
+# -- The record (LOCAL ONLY) --------------------------------------------------
 @pytest.fixture()
 def record_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
@@ -1061,7 +1061,7 @@ def record_dir(tmp_path, monkeypatch):
 
 def _frozen_table(line=24.5, model=26.1, lean="More", stat="pts", **kw):
     row = {"person_id": 203999, "game_id": "0022600005", "game_date": NEXT,
-           "player": "Nikola Jokić", "stat": stat, "stat_label": "Points", "line": line,
+           "player": "Nikola Joki\u0107", "stat": stat, "stat_label": "Points", "line": line,
            "model": model, "mean": model + 0.4, "gap": model - line, "lean": lean,
            "sides": "both", "odds_type": "standard", "tier": "unmeasured",
            "thin": False, "games_prior": 300, "model_version": "v",
@@ -1203,7 +1203,7 @@ def test_the_record_is_not_wired_into_any_public_page():
     assert not used & record, used & record
 
 
-# ── Paste only: no network, ever ─────────────────────────────────────────────
+# -- Paste only: no network, ever ---------------------------------------------
 NETWORK = {"requests", "urllib", "urllib3", "httpx", "aiohttp", "socket", "ftplib",
            "websocket", "websockets", "curl_cffi", "pycurl", "http", "nba_api",
            # Ways out that name no network library (audit 2026-10-09: a
@@ -1234,13 +1234,24 @@ def _module_path(dotted: str) -> Path | None:
 
 
 def _scan(tree) -> tuple[set, set, list]:
-    """(external top-level imports, internal bucketlib modules, banned references)."""
+    """(external top-level imports, internal bucketlib modules, banned references).
+
+    `import bucketlib` (or `import bucketlib.x`, which binds `bucketlib` too)
+    makes every submodule an attribute away: `bucketlib.live.feed_view` runs
+    once the pages have imported live. So a name bound to the package itself
+    has each attribute read on it counted as an internal module, and the
+    closure walk reaches it (build 4's review, L1-4)."""
     ext, internal, dynamic = set(), set(), []
+    pkg_names = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.split(".")[0] == "bucketlib":
                     internal.add(".".join(a.name.split(".")[1:]) or "__init__")
+                    if a.asname is None:
+                        pkg_names.add("bucketlib")
+                    elif a.name == "bucketlib":
+                        pkg_names.add(a.asname)
                 else:
                     ext.add(a.name.split(".")[0])
         elif isinstance(node, ast.ImportFrom):
@@ -1264,6 +1275,10 @@ def _scan(tree) -> tuple[set, set, list]:
             dynamic.append(node.attr)
         elif isinstance(node, ast.Name) and (node.id in BANNED_REFS or node.id in BANNED_NAMES):
             dynamic.append(node.id)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in pkg_names):
+            internal.add(node.attr)
     return ext, internal, dynamic
 
 
@@ -1405,10 +1420,20 @@ def _root_rules(tree) -> list[str]:
     return bad
 
 
+# The licensed odds feed's side of bucketlib (design 8.3): the live layer, the
+# vendor's http entry point, the credit governor and every source module. A
+# module in the closure under one of these internal names is an offender
+# WHATEVER it imports: oddsapi imports no network library at all, so only this
+# name rule keeps `from .sources import oddsapi` out of props, and it holds
+# for oddsbudget before that file even exists.
+FEED_SIDE = {"live", "http", "oddsbudget", "sources"}
+
+
 def _network_offenders(root_source: str, root_name: str = "props") -> list[str]:
     """Walk the bucketlib import closure of `root_source`; any module in it that
     imports a network library or references a fetcher, spawner or
-    import-by-string is an offender, and the root must pass _root_rules."""
+    import-by-string is an offender, so is any module named in FEED_SIDE, and
+    the root must pass _root_rules."""
     offenders, seen = [], {root_name}
     root = ast.parse(root_source)
     offenders += [f"{root_name}: {b}" for b in _root_rules(root)]
@@ -1421,6 +1446,9 @@ def _network_offenders(root_source: str, root_name: str = "props") -> list[str]:
             offenders.append(f"{name} imports {sorted(bad)}")
         if dynamic:
             offenders.append(f"{name} uses {sorted(set(dynamic))}")
+        feed = sorted(m for m in internal if m.split(".")[0] in FEED_SIDE)
+        if feed:
+            offenders.append(f"{name} imports the odds feed's {feed}")
         for mod in internal:
             if mod in seen:
                 continue
@@ -1449,6 +1477,25 @@ def test_props_cannot_reach_the_network():
     "\nfrom bucketlib.sources import espn\n",
     "\ndef scrape():\n    return __import__('urllib.request')\n",
     "\nimport importlib\ndef scrape():\n    return importlib.import_module('socket')\n",
+    "\nfrom .sources import oddsapi\n",
+    "\nfrom . import oddsbudget\n",
+    # Build 4's review, L1-4: the package imported bare, its feed side read
+    # as attributes (the pages have imported it, so this runs).
+    """
+import bucketlib
+def lines(date):
+    return bucketlib.live.prop_lines_memory(date)
+""",
+    """
+import bucketlib as B
+def call():
+    return B.http.vendor_get
+""",
+    """
+import bucketlib.util
+def lines(date):
+    return bucketlib.live.feed_view(date)
+""",
 ])
 def test_the_network_guard_catches_a_laundered_fetcher(laundered):
     """A guard nobody has watched fail is not known to work. Each of these is a
@@ -1458,7 +1505,7 @@ def test_the_network_guard_catches_a_laundered_fetcher(laundered):
     assert _network_offenders(src, "props"), laundered
 
 
-# ── UI escaping and house style ──────────────────────────────────────────────
+# -- UI escaping and house style ----------------------------------------------
 EVIL = '<img src=x onerror=alert(1)>"\'&'
 
 
@@ -1548,7 +1595,7 @@ def test_top_per_player_keeps_one_row_each_with_a_count():
     assert list(rows["person_id"]) == [1, 2] and more == {1: 2, 2: 1}
 
 
-# ── Biggest discrepancies (DiamondValue's strip, Barrett 2026-11-05) ─────────
+# -- Biggest discrepancies (DiamondValue's strip, Barrett 2026-11-05) ---------
 def _gap_rows(specs):
     """Board-shown-like rows from (player, stat, label, model, line, odds_type)."""
     rows = []
@@ -1652,12 +1699,23 @@ def test_the_family_filter_is_the_boards_families_in_its_order():
     assert props_ui.discrepancy_families(t.iloc[:0]) == ["All"]
 
 
+# The props modules, and since the licensed odds feed every file on its path
+# (design 8.3). The credit governor joins the moment its file exists.
+DASH_GUARDED = ("bucketlib/props.py", "bucketlib/props_ui.py", "bucketlib/pmf.py",
+                "bucketlib/sources/oddsapi.py", "bucketlib/live.py", "bucketlib/http.py",
+                "bucketlib/store.py", "app.py", "pages/Game.py", "pages/About.py",
+                "scripts/probe_oddsapi.py")
+DASH_GUARDED_LATER = ("bucketlib/oddsbudget.py",)
+
+
 def test_no_em_dashes_or_emojis_in_the_props_modules():
-    """House style. util.SENTINEL is imported, never retyped."""
-    for name in ("props.py", "props_ui.py", "pmf.py"):
-        text = (PKG / name).read_text(encoding="utf-8")
-        assert "—" not in text, f"em dash in {name}"
-        assert "–" not in text, f"en dash in {name}"
+    """House style. util.SENTINEL is imported, never retyped. A file of the
+    list that is missing fails here; a later one is read once it exists."""
+    names = list(DASH_GUARDED) + [n for n in DASH_GUARDED_LATER if (REPO / n).is_file()]
+    for name in names:
+        text = (REPO / name).read_text(encoding="utf-8")
+        assert "\u2014" not in text, f"em dash in {name}"
+        assert "\u2013" not in text, f"en dash in {name}"
         emoji = [ch for ch in text if ord(ch) >= 0x1F000 or 0x2600 <= ord(ch) <= 0x27BF]
         assert not emoji, f"emoji in {name}: {emoji[:3]}"
 
@@ -1670,7 +1728,7 @@ def test_feed_url_is_one_constant_and_only_a_link():
     assert "api.prizepicks.com" not in src, "the URL must live in one place"
 
 
-# ── Streamlit smoke tests (AppTest, no browser) ──────────────────────────────
+# -- Streamlit smoke tests (AppTest, no browser) ------------------------------
 def _apptest(script: str):
     from streamlit.testing.v1 import AppTest
     return AppTest.from_string(script, default_timeout=60)
@@ -2065,10 +2123,10 @@ st.write(f"returned {n}")
     assert "Model vs the board" not in " ".join(m.value for m in at.markdown)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # Audit fixes (2026-10-09). Each test below was run and watched FAIL against the
 # code the audit read, then the fix went in. The defect number is the audit's.
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 MORNING = pd.Timestamp("2026-10-20T15:00:00Z").to_pydatetime()   # 11am ET Oct 20
 
 
@@ -2086,7 +2144,7 @@ def _feed(*rows):
     return json.dumps({"data": data, "included": inc})
 
 
-# ── Defect 1: one square's state leaked into the next ───────────────────────
+# -- Defect 1: one square's state leaked into the next -----------------------
 def test_a_team_square_never_lends_its_state_to_the_next_player(roster, schedule):
     txt = ("DEN\nDEN - TM\nvs DAL Wed 8:30pm\n118.5\nTeam Points\n"
            "Stephen Curry\n24.5\nPoints\nLess\nMore\n")
@@ -2124,7 +2182,7 @@ def test_a_team_square_never_lends_its_state_to_the_next_player(roster, schedule
         assert len(df) == 1 and df.iloc[0]["team"] is None and df.iloc[0]["opp"] is None, pre
 
 
-# ── Defect 2: the record's guards failed open ───────────────────────────────
+# -- Defect 2: the record's guards failed open -------------------------------
 def test_the_schedule_tip_rides_on_every_routed_row(board_text, roster, schedule,
                                                     projections, no_reliability):
     lines, _ = props.prepare_paste(board_text, roster, schedule, now=NOW)
@@ -2163,7 +2221,7 @@ def test_the_record_fails_closed(record_dir, board_text, roster, schedule, proje
     assert set(back["model_version"]) == {"m1-test"}
 
 
-# ── Defect 3: the thin filter failed open ───────────────────────────────────
+# -- Defect 3: the thin filter failed open -----------------------------------
 def test_thin_fails_closed_without_a_game_count(board_text, roster, schedule, projections,
                                                no_reliability):
     lines, _ = props.prepare_paste(board_text, roster, schedule, now=NOW)
@@ -2180,7 +2238,7 @@ def test_thin_fails_closed_without_a_game_count(board_text, roster, schedule, pr
     assert informed.empty and len(thin2) == 2
 
 
-# ── Defect 4: the no-network guard had holes ────────────────────────────────
+# -- Defect 4: the no-network guard had holes --------------------------------
 @pytest.mark.parametrize("laundered", [
     "\ndef scrape():\n    return pd.read_json(FEED_URL)\n",
     "\nimport subprocess\ndef scrape():\n    return subprocess.run(['curl', FEED_URL])\n",
@@ -2253,7 +2311,7 @@ def test_the_socket_guard_is_known_to_fire(socket_guard):
     assert socket_guard
 
 
-# ── Defect 5: memory on the shared process ──────────────────────────────────
+# -- Defect 5: memory on the shared process ----------------------------------
 def _realistic_feed(n: int, feed: dict) -> dict:
     """The constructed feed scaled to `n` projections shaped like a real one:
     27 attributes and 8 relationships, about 1 KB each. The first real NBA
@@ -2335,7 +2393,7 @@ def test_the_board_store_is_bounded_in_bytes(monkeypatch, roster, schedule):
     assert props.get_board(first) is None                    # the oldest went first
 
 
-# ── Defect 6: feed lines for games that had tipped were priced ──────────────
+# -- Defect 6: feed lines for games that had tipped were priced --------------
 def test_a_feed_line_for_a_game_that_has_tipped_is_not_routed(roster, schedule):
     text = _feed(("Jayson Tatum", "BOS", "Points", 26.5, "2026-10-20T23:00:00Z"),
                  ("Nikola Jokic", "DEN", "Points", 29.5, "2026-10-22T00:30:00Z"))
@@ -2348,7 +2406,7 @@ def test_a_feed_line_for_a_game_that_has_tipped_is_not_routed(roster, schedule):
     assert early[early["name"] == "Jayson Tatum"].iloc[0]["game_id"] == "0022600001"
 
 
-# ── Defect 7: one bad row discarded the whole paste ─────────────────────────
+# -- Defect 7: one bad row discarded the whole paste -------------------------
 @pytest.mark.parametrize("start", ["2999-01-01T00:00:00Z", "9999-12-31T23:59:59Z",
                                    "0001-01-01T00:00:00Z"])
 def test_an_absurd_start_time_costs_one_row(roster, schedule, start):
@@ -2396,7 +2454,7 @@ def test_classify_resolve_and_route_catch_errors_per_row(roster, schedule, monke
     assert list(unres["reason"]) == ["unmatched"]
 
 
-# ── Defect 8: compare re-resolved resolved lines and broke ──────────────────
+# -- Defect 8: compare re-resolved resolved lines and broke ------------------
 def test_compare_trusts_the_paste_time_match(roster, projections, no_reliability):
     import warnings
     # resolved at paste time against an EMPTY roster: nothing matched, so the
@@ -2443,7 +2501,7 @@ def test_the_saved_fuzz_input_that_broke_compare(roster, schedule, projections, 
     assert meta["n_refused"] == 1 and meta["unmatched"] == 1
 
 
-# ── Defect 9: hostile void ids and dates ────────────────────────────────────
+# -- Defect 9: hostile void ids and dates ------------------------------------
 def test_hostile_void_ids_never_raise(no_reliability):
     pmf = Pmf.from_poisson(30.0)
     table, _ = props.compare(_matched([_line(line=24.5)]), FixedProvider(pmf), _proj_row())
@@ -2464,7 +2522,7 @@ def test_board_view_never_raises_on_a_bad_date(roster, schedule, projections):
         assert v.shown.empty
 
 
-# ── Defect 10: the banner counted lines that can never show ─────────────────
+# -- Defect 10: the banner counted lines that can never show -----------------
 def test_the_banner_counts_only_lines_that_can_be_compared(roster, schedule):
     text = ("Nobody Known Here\nDEN - C\n27.5\nPoints\nLess\nMore\n"
             "Paolo Banchero\nORL - F\n6.5\n1Q Points\nLess\nMore\n")
@@ -2488,7 +2546,7 @@ def test_the_banner_count_on_the_board_fixture(board_text, roster, schedule):
     assert props_ui.toast_count(report) == 8
 
 
-# ── Defect 11: tests that a regression would have walked past ───────────────
+# -- Defect 11: tests that a regression would have walked past ---------------
 def _evil(k: str) -> str:
     return f"<img src=x onerror=alert('{k}')>"
 
@@ -2585,7 +2643,7 @@ def test_one_feed_row_that_raises_costs_that_row(monkeypatch):
     assert list(got["name"]) == ["Nikola Jokic"] and got.attrs["skipped_error"] == 1
 
 
-# ── Defect 12: the record's scope was not the board's ───────────────────────
+# -- Defect 12: the record's scope was not the board's -----------------------
 def test_the_record_freezes_only_what_the_board_shows(record_dir):
     t = pd.concat([
         _frozen_table(stat="pts"),                                   # shown
@@ -2632,7 +2690,7 @@ def test_season_record_refuses_a_registry_without_a_readable_window(case):
         props.season_record([_window_picks()], registry=UNKNOWN_WINDOW[case])
 
 
-# ── Defect 13: Fantasy ties, and the board cap's silent drop ────────────────
+# -- Defect 13: Fantasy ties, and the board cap's silent drop ----------------
 def _parts(**medians) -> dict:
     """Point-mass pmfs for Fantasy Score's six parts: a point mass's mid-p
     median is the point itself, so the shown formula is exact arithmetic."""
@@ -2721,13 +2779,13 @@ def test_combo_inherits_the_lowest_edge_within_its_worst_tier():
         assert got["tier"] == worst and got["edge"] == want, (combo, got)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # Audit fixes, round 2 (2026-10-09). The props-N ids are the audit's. Each test
 # was watched FAIL with its fix reverted in a copy (mutation check). A test
 # whose name ends in _ui checks the props_ui.py / app.py half of a finding,
 # which belongs to another area and lands with its own change: it fails until
 # that half is in.
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 def _typed(schedule, types=None):
     """The fixture schedule with a game_type column: RS unless `types` says."""
     s = schedule.assign(game_type="RS")
@@ -2746,7 +2804,7 @@ def _board(pairs, stat="Points"):
     return "".join(f"{n}\n{_SQUARES[n]}\n{x}\n{stat}\nLess\nMore\n" for n, x in pairs)
 
 
-# ── props-1: lines for games the site never projects ────────────────────────
+# -- props-1: lines for games the site never projects ------------------------
 def test_lines_for_games_the_site_never_projects_are_not_comparable(roster, schedule):
     # tomorrow: DEN@DAL a preseason game, LAL@GSW a playoff game, MIA@ORL RS
     sched = _typed(schedule, {"0022600005": "PRE", "0022600006": "PO"})
@@ -2853,7 +2911,7 @@ def test_every_reason_the_report_can_give_has_words_ui():
         assert props_ui._WHY_WORDS.get(k), k
 
 
-# ── props-2: the Demon/Goblin direction fallback reached board rows only ────
+# -- props-2: the Demon/Goblin direction fallback reached board rows only ----
 def test_the_odds_type_fallback_reaches_feed_and_board_rows_alike(
         monkeypatch, roster, schedule, projections, no_reliability):
     def demon_feed(allowed=None):
@@ -2882,7 +2940,7 @@ def test_the_odds_type_fallback_reaches_feed_and_board_rows_alike(
     assert sides(no_buttons + "Less\nMore\n") == "both"
 
 
-# ── props-4: a quarter or half board pasted as full-game ────────────────────
+# -- props-4: a quarter or half board pasted as full-game --------------------
 _FULL = [("Nikola Jokic", 27.5), ("Luka Doncic", 33.5), ("Stephen Curry", 26.5),
          ("P.J. Washington", 13.5), ("Giannis Antetokounmpo", 29.5), ("Paolo Banchero", 24.5)]
 _QUARTER = [(n, x) for n, x in zip([n for n, _ in _FULL], [7.5, 9.5, 6.5, 3.5, 8.5, 6.5])]
@@ -2999,7 +3057,7 @@ props_ui.render_board(*props.board_rows(table), "Wed Oct 21", meta=meta)
     assert "none matched a projected player" not in md
 
 
-# ── props-5: a shared link is read-only ─────────────────────────────────────
+# -- props-5: a shared link is read-only -------------------------------------
 def test_a_second_visitor_on_a_shared_link_never_changes_the_board(roster, schedule):
     tok_a, _ = props_ui.ingest(_board([("Luka Doncic", 33.5)]), None, roster, schedule, now=NOW)
     before = props.get_board(tok_a)
@@ -3039,7 +3097,7 @@ props_ui.render_update_lines_popover(dt.date(2026, 10, 20), sched, roster, now=N
     assert props.get_board(shared) is not None, "Clear all deleted the board a link points at"
 
 
-# ── props-6: an empty feed and another league's feed ────────────────────────
+# -- props-6: an empty feed and another league's feed ------------------------
 def test_an_empty_feed_is_the_feed_and_other_json_is_not():
     empty = props.parse_any(json.dumps({"data": [], "included": [], "links": {}, "meta": {}}))
     assert empty.empty and empty.attrs["json_shape"] == props.EMPTY_FEED
@@ -3093,7 +3151,7 @@ def test_empty_and_wrong_league_feeds_are_explained_ui(roster, schedule):
     assert "[X](JS" not in text and "**B**" not in text and "\\[X\\]" in text
 
 
-# ── props-7: URL-capable readers the guard did not know ─────────────────────
+# -- props-7: URL-capable readers the guard did not know ---------------------
 @pytest.mark.parametrize("laundered", [
     "\ndef scrape():\n    return pd.read_json('https:' + '//' + 'example.test' + '/x.json')\n",
     "\nimport os\ndef scrape():\n    return pd.read_json(os.environ['BV_FEED'])\n",
@@ -3122,7 +3180,7 @@ def test_the_reader_allow_list_is_what_props_actually_calls():
     assert calls == {"read_csv"} and READER_ALLOW == {("_load_reliability", "read_csv")}
 
 
-# ── props-8: the role-based void note on More leans ─────────────────────────
+# -- props-8: the role-based void note on More leans -------------------------
 def test_a_more_lean_on_a_bench_role_carries_the_void_note(no_reliability):
     pmf = Pmf.from_poisson(12.0)
     proj = pd.concat([_proj_row(pid=1, gid="g", pts=12.0, mu_min=14.0),
@@ -3154,7 +3212,7 @@ def test_the_bench_role_void_tag_renders_without_a_number_ui(no_reliability):
     assert any("Reboot" in b for b in props_ui.notes_html({}, shown, None, None, None))
 
 
-# ── props-9: the record and the production projection frame ────────────────
+# -- props-9: the record and the production projection frame ----------------
 def _production_frame(projections, adjusted=(), version="v1-old"):
     """The fixture projections as pipeline writes them: computed_at a UTC
     timestamp, adjusted and provisional bools, a model_version, NO as_of."""

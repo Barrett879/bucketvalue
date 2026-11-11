@@ -1,0 +1,74 @@
+CONSTRUCTED FIXTURES. Every file here was written by hand on 2026-11-10. None
+is a captured vendor answer: no key exists yet, no call to The Odds API was
+ever made for them, and vendor data is never committed (RC R1, R6). They
+replace nothing real; the first-key probe (scripts/probe_oddsapi.py, design
+section 10) checks the shapes against live answers, and these files follow
+whatever it finds (design section 14, step 7b).
+
+Shapes: only fields the vendor documents, from its v4 guide (the event-odds
+example, UT/docs_v4.txt:1504-1586; the events example, 1409-1453; the
+participants example, 1754-1886) and its OpenAPI schema
+(UL/api_reference_v4_schema.yml: events 502-624, event odds 625-885,
+participants 1039-1116, Outcome 1979-2014). UT and UL are the vendor-page
+copies in BucketValueDev/understand/text and understand/live. The
+timestamp is the MARKET-level last_update only: the bookmaker-level one is
+deprecated and absent on event odds (docs 1053, 1501), so no file carries it
+(a test adds one to prove the parser never reads it). No file holds a
+key-shaped string: tests build their fake key at run time ("K" * 40).
+
+Players and games are the serve fixture's REAL ones for 2026-03-12
+(tests/fixtures/serve: 0022500953 PHI at DET, 7:00 PM ET, and 0022500958 DEN
+at SAS, 9:00 PM ET), so later stages can match the names against its roster.
+Names are spelled in plain ASCII, as a book may spell them ("Nikola Jokic",
+"Jonas Valanciunas"); the roster's own spellings carry the accents. Lines,
+prices, timestamps and the 32-character event ids are INVENTED. DFS prices
+(PrizePicks, Underdog) are all -137, as on every standard NFL PrizePicks and
+Underdog line read on 2026-09-03 (report_feed.md 1.5); the first-key probe
+found the same on NBA standard lines on 2026-11-11. The vendor's own titles
+are as its pages list them ("Underdog Fantasy"); the site never shows them.
+
+events_constructed.json
+  GET /v4/sports/basketball_nba/events on the morning of 2026-03-12. The nine
+  games of that date's real slate (tests/fixtures/pipeline/schedule.parquet),
+  with their real tips in UTC: four of them (DAL at MEM 00:00Z, DEN at SAS,
+  BOS at OKC, CHI at LAL) start on the NEXT UTC day and still belong to
+  2026-03-12 ET. Plus one INVENTED event, GSW at LAC at 2026-03-14T02:30:00Z
+  (2026-03-13 ET), which the vendor's listing of later games would include and
+  the parser must drop; it also carries the vendor-style "Los Angeles
+  Clippers". The list is deliberately not in tip order (whether the vendor
+  sorts it is UNVERIFIED, RF part 4 fact 12).
+
+event_odds_phi_det_constructed.json
+  GET .../events/{id}/odds for PHI at DET, as answered for
+  bookmakers=draftkings,fanduel,betmgm,prizepicks,underdog and
+  markets=player_points,player_rebounds,player_assists,player_fantasy_points.
+  64 outcomes. What each part encodes:
+    draftkings  three markets, every line an Over/Under pair.
+    fanduel     Cade Cunningham at two points, the off-centre 24.5 pair
+                (-142/+112) listed BEFORE the main 25.5 pair (-114/-106): the
+                main line is the pair whose implied probabilities are closest,
+                not the first one. Daniss Jenkins Over only (a "more" line).
+    betmgm      Jalen Duren Under only (a "less" line). VJ Edgecombe's Over has
+                NO point: that outcome is skipped and counted, never read as
+                0, and his Under at 16.5 stands alone.
+    prizepicks  the board.txt lines where the serve fixture's paste has them
+                (Cunningham 25.5 points and 8.5 assists, Duren 10.5 rebounds,
+                Jenkins 7.5, Edgecombe 17.5, Maxey 24.5), plus a fantasy line,
+                which the feed keeps for PrizePicks.
+    underdog    three points lines and a fantasy line, which the feed drops
+                (Underdog's fantasy formula is UNVERIFIED).
+  Tyrese Maxey has lines at every book: he was listed Out at noon (the
+  fixture's real injury report), after a 9 AM pull would have bought them.
+
+event_odds_den_sas_constructed.json
+  The same request for DEN at SAS. PrizePicks has NOT posted this game: no
+  prizepicks entry at all (the case the free PrizePicks-only polls and the
+  "No PrizePicks lines yet" notice are for). draftkings has nine points lines
+  and two rebounds lines, fanduel five, betmgm two, underdog four.
+
+participants_constructed.json
+  GET /v4/sports/basketball_nba/participants: the 30 teams as full names, in
+  the shape of the docs' example (full_name and an id that starts "par_"). The
+  names are the teams' official full names with "Los Angeles Clippers"; the
+  vendor's exact spellings are UNVERIFIED until the probe's step 2 (RF part 4,
+  fact 9). The ids are invented.

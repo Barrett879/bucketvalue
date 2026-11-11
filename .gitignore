@@ -4,6 +4,16 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 
+# Secrets are never committed (the repo is public). Ignored before any exists.
+.streamlit/secrets.toml
+.env
+.env.*
+*.key
+*.secret
+# The design's own key-file name (design 4.3), wherever it lands (build 4's review, L1-3).
+odds_api_key
+*odds_api_key*
+
 # The cache holds two kinds of file.
 #
 # RAW SOURCE DATA (per-game box scores, odds payloads, injury-report PDFs,

@@ -52,10 +52,18 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(live, "roster", lambda: live.Live(roster, 0.0))
     monkeypatch.setattr(live, "odds_on", lambda d: live.Live({("BOS", "DET"): {"home_line": -1.5, "total": 220.5, "provider": "DraftKings"}}, 0.0))
     monkeypatch.setattr(live, "box", H.no_box)          # never the network
+    # The odds feed (design 8.3): no key here (conftest), so store.feed_start
+    # is "off" before any feed call; stubbed anyway, and no ledger or cached
+    # feed table passes from one page test to the next (m16).
+    monkeypatch.setattr(live, "feed_kick", lambda *a, **k: None)
+    monkeypatch.setattr(live, "feed_view", lambda *a, **k: live.FeedLive.off())
+    monkeypatch.setattr(live, "prop_lines_memory", lambda *a, **k: live.FeedLive.off())
     # Never the repo's own state/: what the bot has committed must not change
     # what these tests see.
     monkeypatch.setattr(S, "STATE_DIR", tmp_path / "empty_state")
+    live.reset_feed_anchor_for_tests()
     store._live_frame.clear()
+    store._feed_tables.clear()
 
 
 @pytest.fixture(scope="module")
@@ -151,7 +159,7 @@ def game(**params):
     return run("pages/Game.py", date=DATE, **params)
 
 
-# ── The pages render ─────────────────────────────────────────────────────────
+# -- The pages render ---------------------------------------------------------
 def test_home_opening_night(monkeypatch):
     # Which notice an unpublished date gets depends on the WALL clock
     # (store.now_utc against each game's freeze point), and this is the
@@ -224,6 +232,11 @@ def test_the_committed_state_renders(monkeypatch):
     monkeypatch.setattr(live, "box", down)
     monkeypatch.setattr(live, "odds_on", lambda d: live.Live({}, None, stale=True, source="none",
                                                              error="offline"))
+    # The odds feed forced down by name too (design 8.3): no kick, and a view
+    # that is down, so nothing touches the network even with a key.
+    monkeypatch.setattr(live, "feed_kick", lambda *a, **k: None)
+    monkeypatch.setattr(live, "feed_view", lambda *a, **k: live.FeedLive.down())
+    monkeypatch.setattr(live, "prop_lines_memory", lambda *a, **k: live.FeedLive.down())
     for d in dates[-2:]:
         run("app.py", date=d)
         proj = C.read_parquet(REAL_STATE / "serve" / d / "projections_v1.parquet")
@@ -233,7 +246,7 @@ def test_the_committed_state_renders(monkeypatch):
             assert 'data-pid="' in html(at), (d, gid)
 
 
-# ── /Game: the tables ────────────────────────────────────────────────────────
+# -- /Game: the tables --------------------------------------------------------
 def test_game_page_renders_the_projected_numbers(monkeypatch, tmp_path, mdl):
     H.install(monkeypatch, tmp_path, H.MORNING)
     at = game(away="PHI", home="DET")
@@ -318,7 +331,7 @@ def test_unknown_report_state_is_never_drawn_healthy(monkeypatch, tmp_path, mdl)
     assert CTX.NOT_FILED not in sas and CTX.NO_REPORT not in sas
 
 
-# ── /Game: mark-outs ─────────────────────────────────────────────────────────
+# -- /Game: mark-outs ---------------------------------------------------------
 def test_out_param_adds_the_banner_and_moves_a_teammates_minutes(monkeypatch, tmp_path, mdl):
     H.install(monkeypatch, tmp_path, H.MORNING)
     plain = table_rows(game(away="PHI", home="DET"))
@@ -425,7 +438,7 @@ def test_the_injury_report_fact_claims_only_what_was_read(monkeypatch, tmp_path,
     assert facts(game(away="PHI", home="DET"))["Injury report"] == "12:00 PM ET"
 
 
-# ── / and the board ──────────────────────────────────────────────────────────
+# -- / and the board ----------------------------------------------------------
 CARD = re.compile(r'<a class="bv-slate-card" href="([^"]*)".*?</a>', re.S)
 PILL = re.compile(r'<span class="bv-slate-lines"[^>]*><b>(\d+)</b>')
 
@@ -689,7 +702,7 @@ def test_slate_banner_reports_tile_and_a_date_step_drops_the_marks(monkeypatch, 
     assert at.query_params["date"] in ("2026-03-13", ["2026-03-13"])
 
 
-# ── /About ───────────────────────────────────────────────────────────────────
+# -- /About -------------------------------------------------------------------
 def test_about_renders_the_trust_table_from_the_reliability_file():
     page = html(run("pages/About.py"))
     for s in simprov.GATED:
@@ -743,8 +756,8 @@ def test_about_nav_carries_the_board_the_marks_and_the_date(monkeypatch, tmp_pat
     assert nav and not any(k in h for h in nav for k in ("board=", "out=", "date=", "script"))
 
 
-# ── House style ──────────────────────────────────────────────────────────────
-EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
+# -- House style --------------------------------------------------------------
+EMOJI = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27bf]")
 
 
 def _dash_ok(text: str) -> bool:
@@ -773,7 +786,7 @@ def test_no_em_dash_outside_the_sentinel_and_no_emoji(monkeypatch, tmp_path, mdl
             assert not EMOJI.search(t), EMOJI.findall(t)[:3]
 
 
-# ── Audit fixes, 2026-10-09 ──────────────────────────────────────────────────
+# -- Audit fixes, 2026-10-09 --------------------------------------------------
 HREF = re.compile(r'href="(/[^"]*)"')
 
 
@@ -949,7 +962,7 @@ def test_rest_starters_and_upcoming_on_the_pages(monkeypatch, tmp_path, mdl):
 
 def test_the_player_search_follows_the_url(monkeypatch, tmp_path, mdl):
     H.install(monkeypatch, tmp_path, H.MORNING)
-    jokic = pid_of("Nikola Jokić")
+    jokic = pid_of("Nikola Joki\u0107")
     at = run("app.py", date=DATE, player=str(jokic))
     assert at.selectbox(key="bv_player").value == jokic
     assert "Open DEN at SAS" in html(at)
@@ -998,7 +1011,7 @@ def test_a_postponed_game_is_not_shown_as_played(monkeypatch, tmp_path, mdl):
     assert "Postponed. This game will not be played on this date" in visible(g) and 'data-pid="' not in g
 
 
-# ── Phone layout (375px; verified in a browser, pinned here) ─────────────────
+# -- Phone layout (375px; verified in a browser, pinned here) -----------------
 def test_phone_layout_rules_are_in_the_stylesheet(monkeypatch, tmp_path, mdl):
     from bucketlib import theme
     css = theme.COMMON_CSS
@@ -1050,7 +1063,7 @@ def test_the_paste_reads_the_pipelines_projected_games(monkeypatch, tmp_path, md
     assert "for a game the site does not project" in said and f"{11 - late} lines loaded" in said, said
 
 
-# ── Cross-area fixes after the 2026-10-09 audit ──────────────────────────────
+# -- Cross-area fixes after the 2026-10-09 audit ------------------------------
 PLAY_IN = ("Play-in: no projections. The models were trained on regular-season games only, and "
            "play-in rotations run tighter: on past play-in games starters played about 5 minutes "
            "more than projected.")

@@ -238,6 +238,91 @@ committed.**
   announced 2025-04: Free Throws Made, FT Attempted, Two Pointers Made/Attempted,
   Personal Fouls, '... in First 5 Minutes'. Others unverified until a real paste.
 
+## The Odds API (read 2026-11-09, probed 2026-11-11; display-only player lines)
+
+Two kinds of fact here. "Verified by the probe on 2026-11-11" means
+scripts/probe_oddsapi.py saw it with Barrett's key from this Mac, at about 10:15
+ET on a 10-game day (10 PASS, 0 FAIL, 14 credits spent; its output holds no
+key); the bracketed numbers are the probe's own fact numbers. Every other fact
+is from the vendor's own pages, read 2026-11-09, and is UNVERIFIED where marked.
+
+- **The calls.** Sport key basketball_nba. Props come only from
+  /v4/sports/basketball_nba/events/{id}/odds, one game per call, with the
+  books named in `bookmakers`. The key travels only as the apiKey query
+  parameter; nothing documents header auth. /events is free (x-requests-last
+  0), lists games in commence_time order and lists other dates' games too
+  (14 events, 10 of them that day's): verified by the probe on 2026-11-11
+  [12a]. The site keeps only today's ET games. That /events also lists
+  games in progress is the vendor's docs, UNVERIFIED. /participants costs 1
+  credit (verified by the probe on 2026-11-11).
+- **Cost.** Cost = unique markets returned x regions; up to 10 books named in
+  `bookmakers` count as 1 region, and `bookmakers` wins over `regions` (the
+  vendor's docs). Verified by the probe on 2026-11-11: points for the five
+  books, named with no `regions`, cost 1 credit per game call in all 7 games
+  read [3a], and adding regions=us did not change the bill [3b]. The schema
+  marks `regions` required, but a bookmakers-only call is accepted (verified),
+  so `oddsapi.SEND_REGIONS` stays False. An empty answer is free (the vendor's
+  docs; UNVERIFIED: the probe's free PrizePicks-only check was skipped, since
+  PrizePicks had posted every game it read).
+- **The free plan** (500 credits a month) serves all five books, PrizePicks
+  and Underdog included, with the books named and no regions: verified by the
+  probe on 2026-11-11 [2].
+- **Headers and errors.** A 200, a 422 and a 404 carry x-requests-remaining,
+  x-requests-used and x-requests-last, and a 401 INVALID_KEY carries none:
+  verified by the probe on 2026-11-11 [5a, 5b, 5c, 5d]. A 422 INVALID_MARKET
+  (an unknown market) and a 404 EVENT_NOT_FOUND (an unknown event) cost 0
+  (verified); the 422's body held the fields details_url, error_code and
+  message [5b]. A made-up key gets 401 INVALID_KEY (verified [5d]). 401 is a
+  bad key OR an exhausted account, and the body's code says which
+  (OUT_OF_USAGE_CREDITS); an exhausted account's 401, its headers, and
+  whether /events still answers it are UNVERIFIED. An unknown book key is
+  dropped without a word: no 422, and the known book still answers, for 1
+  credit (verified [4]). 429 limit: 30 calls a second on paid plans (the
+  vendor's docs); the free plan's is not stated, and a 429's headers are
+  UNVERIFIED.
+- **Credits reset** on the 1st of every month (the FAQ, for every plan; the
+  hour and time zone are not stated, UNVERIFIED); paid plans are BILLED on the
+  sign-up day, which is not a reset.
+- **What the books post.** By 10:15 ET on 2026-11-11 all five books had points
+  in all 7 games read, at 11 to 15 lines a game on DraftKings and FanDuel, 9 to
+  13 on BetMGM, 11 to 17 on PrizePicks and 5 to 10 on Underdog, and every line
+  had both sides (verified by the probe [1, 2, 10a]). What the books have
+  posted by the 08:50 ET first pull is UNVERIFIED: the probe ran at 10:15.
+  Caesars and Fanatics are paid-plan books and not among the five.
+- **Timestamps.** Market last_update is when the vendor last READ the market,
+  not when the line moved: verified by the probe on 2026-11-11, when within 2
+  minutes DraftKings, FanDuel, PrizePicks and Underdog re-stamped every
+  market's last_update with no line change, and BetMGM re-stamped none [8]. No
+  book carried a bookmaker-level last_update (verified [13]; the vendor calls
+  that stamp deprecated). So the site dates each book's lines by its own fetch
+  time (fetched_at), never by last_update. That last_update stops advancing on
+  suspension and the market drops about 15 minutes later is the vendor's docs,
+  UNVERIFIED.
+- **DFS prices** (prizepicks, underdog) are indicative only (the vendor's
+  docs). They were -137 on every standard line the probe read on 2026-11-11
+  (verified [6a]); the parser blanks them anyway, and no price is shown for any
+  book. PrizePicks Demons and Goblins sit only in _alternate markets (Goblins
+  at the default price, Demons at +100, the vendor's docs); the feed does not
+  buy them.
+- **Teams and players.** Team names are full names ("Detroit Pistons"), and
+  all 30 map through teams.canonical (verified by the probe on 2026-11-11
+  [9a]; the participants list also carried two names outside the 30 teams).
+  An event naming a team teams.canonical does not know is skipped and logged.
+  All 10 of the day's events matched the committed schedule, with no home and
+  away swaps (verified). Neutral-site games may list home and away the other
+  way round (UNVERIFIED: no neutral-site game that day), so events match on the
+  date and the unordered pair. Players are in outcome.description, and every
+  player name of every book matched in its own game in all 7 games (verified
+  [9b]).
+- **Parameters.** commenceTimeFrom is ignored on event odds: lines came back,
+  for 1 credit (verified by the probe on 2026-11-11 [14]).
+- **Still UNVERIFIED:** what the books post by 08:50 ET; the reset hour
+  (`--balance` around a month's end, and on a paid plan around its sign-up
+  day); the free plan's rate limit; a 401 OUT_OF_USAGE_CREDITS and a 429;
+  whether an empty answer is free; whether /events lists games in progress, and
+  whether its `status=pre` filter exists (the probe's `--evening`, while a game
+  is on); how large one game's answer gets with 12 markets.
+
 ## Measured modelling facts (2023-24..2025-26 unless noted)
 
 - Knowing actual minutes cuts squared error vs a season mean by PTS 31.6%, REB

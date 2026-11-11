@@ -40,9 +40,14 @@ def _date_param() -> str:
 
 # The nav and the footer carry the board and the mark-outs like every other
 # page's (a link that drops them loses the visitor's paste on the way back to
-# the slate).
+# the slate), and with the odds feed on the picked book (amendment A3): a
+# ?book= is validated as the pills' own (a junk value is dropped, never
+# carried), and with the feed off it is never read.
+FEED_ON = store.feed_on()
+props_ui.seed_book_from_url(FEED_ON)
 KEEP = {"date": _date_param(),
-        **store.view_params(props_ui.board_token(), store.parse_out(st.query_params.get("out")))}
+        **store.view_params(props_ui.board_token(), store.parse_out(st.query_params.get("out")),
+                            props_ui.selected_book(FEED_ON))}
 render_nav("About", keep=KEEP)
 
 # Read from the code, so the page cannot drift from what is served.
@@ -57,9 +62,14 @@ season on games they never saw, and shown as the median outcome for a player who
 """, unsafe_allow_html=True)
 
 FREEZE_MIN = int(pipeline.FREEZE_LEAD.total_seconds() // 60)
+# With the odds feed on, where the board's player lines come from (design 9.5).
+FEED_SOURCES = (" Player lines on the board come from DraftKings, FanDuel, BetMGM, PrizePicks "
+                "and Underdog through The Odds API, a licensed odds feed, refreshed through the "
+                "day until shortly before tip; you can also paste your own PrizePicks board."
+                if FEED_ON else "")
 st.markdown(f"""
 <div class="bv-note"><b>Where the numbers come from.</b> Box scores, schedules, rosters and
-participation from NBA.com. Game lines from ESPN (DraftKings). Availability from the NBA's
+participation from NBA.com. Game lines from ESPN (DraftKings).{FEED_SOURCES} Availability from the NBA's
 official injury report, read as of the time a projection is made, not as of tip-off.</div>
 <div class="bv-note"><b>What they are not.</b> A forecast of what will happen, or betting
 advice. The posted line already prices most of what any model knows, so a gap between the
@@ -90,7 +100,7 @@ Dunks, double-doubles or two-player squares, and the model does not price PrizeP
 rule (a More pick voided when a player leaves in the first half and does not return).</div>
 """, unsafe_allow_html=True)
 
-# ── The trust table ──────────────────────────────────────────────────────────
+# -- The trust table ----------------------------------------------------------
 st.markdown('<div class="bv-window"><span class="lab">How far to trust each stat</span>'
             '<span class="meta">Generated from the measured reliability table</span></div>',
             unsafe_allow_html=True)
@@ -108,14 +118,22 @@ notes = store.trust_caveats() + [
 ]
 st.markdown("".join(f'<div class="bv-note">{esc(n)}</div>' for n in notes), unsafe_allow_html=True)
 
-# ── Break-even and the board's ceiling ───────────────────────────────────────
+# -- Break-even and the board's ceiling ---------------------------------------
 be2 = store.breakeven(2)
+# With the odds feed on, the other books' break-even (design 9.5): a
+# sportsbook side's from its price (-110 as the example, the figure the board's
+# own note gives), none for Underdog, and no price shown for any book (the
+# board shows none: amendment A1; build amendment B27).
+FEED_BREAKEVEN = (f" A sportsbook line is different: a side priced at -110 needs about "
+                  f"{100 * props.american_breakeven(-110):.1f}% to break even, and the price sets "
+                  "the figure. Underdog's payouts are not modelled here, so no break-even is "
+                  "shown for its lines. No price is shown for any book." if FEED_ON else "")
 st.markdown(f"""
 <div class="bv-note"><b>What it takes to break even.</b> A two-pick Power Play pays
 {store.POWER_PLAY_2_PAYOUT:g} times the entry, so the pair has to hit at least one time in
 three: each pick needs about {be2:.1f}% just to break even. Across PrizePicks play sizes the
 per-pick break-even runs from {props.BREAKEVEN_LO:.1f}% to {props.BREAKEVEN_HI:.1f}%. An edge
-of a few points over the more common side is a long way from that.</div>
+of a few points over the more common side is a long way from that.{FEED_BREAKEVEN}</div>
 <div class="bv-note"><b>The board is at its ceiling.</b> A posted line is set by people who see
 the same box scores, injury reports and lines the models see, and it moves with the money. It
 already prices most of what a model knows, so the comparison on this site shows where the model

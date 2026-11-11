@@ -16,7 +16,7 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 | Name | **BucketValue**, one constant (`theme.SITE_NAME`) | Barrett, 2026-10-08 |
 | League | NBA only (WNBA season is over; SwishValue covers WNBA contracts) | default |
 | Shape | Same as the siblings: Streamlit, HistGB models, walk-forward validation, scheduled bot refresh, public Streamlit Cloud deploy | "the same as gridiron and diamond value" |
-| PrizePicks | INLINE on the board and game pages, never a tab. PASTE ONLY: no fetcher, ever (403 to servers and ToS 16(l) bars automation) | sibling precedent |
+| Player lines | INLINE on the board and game pages, never a tab. LICENSED FEED (Barrett, 2026-11-09): lines from DraftKings, FanDuel, BetMGM, PrizePicks and Underdog come from The Odds API under Barrett's key, fetched only by the app's live layer (never the bot, never Actions, never a visitor's browser), for today's ET date, display only. A row of book buttons picks whose lines the board shows, PrizePicks by default, and the other four books' lines sit beside each row. The paste box stays as the backup (outages, typed picks, Demons and Goblins). PrizePicks itself is never fetched by anything, ever (403 to servers and ToS 16(l) bars automation) | Barrett, 2026-11-09 (was PASTE ONLY, sibling precedent) |
 | Repo | `Desktop/Claude/NBA Predict`, package `bucketlib/` | default |
 | Accuracy page | **LOCAL ONLY**: `pages/Accuracy.py` and its summary outputs are gitignored, never in the nav of the deployed site (DiamondValue precedent) | Barrett, 2026-10-08 |
 | GitHub repo | `Barrett879/bucketvalue`, created PRIVATE 2026-10-08 (token has `workflow` scope, verified) (approved by Barrett; public creation needs his explicit visibility call, and Streamlit only shares apps from public repos, so flip it at deploy) | Barrett, 2026-10-08 |
@@ -51,11 +51,19 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 6. **Training-only sources are never features.** A source that does not exist at
    serve time (post-game participation, closing lines treated as known in the
    morning, post-game referee assignment) is simulated as absent in a parity test.
+   Player lines from the odds feed are DISPLAY ONLY (Barrett, 2026-11-09): no model reads
+   them. Making one a feature needs serve-time parity and a training history, and the
+   vendor sells history only on paid plans at 10 times the price.
 7. **Freshness never reads file mtime.** Committed files get a fresh mtime on every
    clone. Every cached payload embeds `fetched_at` (`bucketlib.cache`).
 8. **ET dates only.** `util.today_et()`. A test bans `date.today()` and friends.
 9. **Stale beats empty, but a cold failure raises.** An empty or failed fetch never
    overwrites good data. A `Blocked` is never read as "no games".
+   For the odds feed this holds per game and per book: a failed refresh, or one with no
+   bookmakers, keeps the last good lines with their own fetched_at; a book that answers
+   with no readable line, or with under half the lines it had, keeps its last lines; only
+   a line its book took down, while the rest of that book is present, is dropped, and it
+   is counted.
 10. **Paired comparisons only.** Model error and baseline error are compared on the
     same rows (DiamondValue published +4.60% that was really -0.07%). Per-target
     percentages, then averaged; never pooled MAE across targets.
@@ -67,15 +75,22 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 15. **Rank by confidence, never by raw gap.** The gap is an argmax over the model's
     own error and is not comparable across stats. One display is exempt, by Barrett's
     request (2026-11-05): "Biggest discrepancies" under the board, DiamondValue's strip.
-    It sorts the board's shown STANDARD lines by the raw gap, labels itself as such, offers
-    a stat-family filter, and never changes the board's own order (props_ui.discrepancies).
+    It sorts the board's shown STANDARD lines of the picked book (PrizePicks', or the book
+    the visitor chose), one row per player and stat, by the raw gap, names that book when
+    the odds feed is on, offers a stat-family filter, and never changes the board's own
+    order (props_ui.discrepancies).
 16. **The board is at its ceiling.** DiamondValue measured that the posted line is a
     near-sufficient statistic for its projection (incremental R^2 0.0007). Present
     projections honestly; never sell the props comparison as an edge. Always report a
     hit rate against the base rate of taking the more common side, and against the
-    54.7-58.5% per-leg break-even.
+    break-even of the line's own source: 54.7-58.5% per leg for PrizePicks Power Play
+    payouts; for a sportsbook side, the break-even its American price implies (about
+    52.4% at -110); none for Underdog until its payouts are verified. DFS prices are
+    indicative only and get no price math.
 17. **Every query param reaching `unsafe_allow_html` goes through `util.esc`.**
     `teams.canonical` returns None for unknown strings, never a pass-through.
+    Odds-feed text (player names) goes through `util.esc` too; book names render from the
+    code's own labels, never from the vendor's title strings.
 18. **Only link pages that exist in git.** A nav link to a missing page renders the
     shell and then a client-side "not found".
 19. **Clone and run before calling a deploy ready.** Derived artifacts must be
@@ -95,6 +110,7 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 | Pre-game injury status | official NBA injury-report PDFs | 2018-12-17+ | 3 layouts, 3 filename eras; title time, not filename time |
 | Closing spread/total (training) | ESPN core odds API, per event | 2014-15+ | cross-book median with an allow-list; Kaggle CC0 file only as a LOCAL cross-check |
 | Live lines | ESPN scoreboard (DraftKings) + core odds | serve | odds vanish at tip: snapshot before, recover from core after |
+| Player lines (display only) | The Odds API event odds, `bookmakers=draftkings,fanduel,betmgm,prizepicks,underdog` (1 region), markets from settings | serve, today ET | app live layer only (bucketlib.live: a background refresher and page views share one walk); never the bot; never PrizePicks itself |
 | Live injuries | NBA injury PDF (primary) + ESPN injuries endpoint | serve | ESPN historical injuries are TODAY's list: never a training source |
 | Rosters, two-way flag | stats `playerindex` (SUPPLEMENTAL_STATUS==1) | daily | camp rosters (18-21) until ~Oct 19 cuts |
 | Bio (birth date, height, draft) | CommonTeamRoster per team-season, playerindex | 2014-15+ | |
@@ -104,7 +120,9 @@ Raw payloads are cached gzipped under `cache/raw/` and never committed. Historic
 lines are never committed (provenance). The bot commits only the compact parsed
 context each published projection used (injury statuses, line snapshot, state
 stamp), never raw JSON or PDFs: ESPN core keeps pregame closes and ak-static keeps
-old PDFs, so next season can rebuild from source.
+old PDFs, so next season can rebuild from source. Odds-feed payloads and parsed feed
+lines are never committed, never written to disk, never used as a test fixture (vendor
+fixtures are hand-built), and never put in a visitor's token board or browser copy.
 
 **GAME_UNIVERSE** (one whitelist shared by backfill, bot and app): id prefix `002`
 regular season (training + state), `005` play-in (state; NOT projected in v1, the models trained on regular-season rows only; decided 2026-10-09), `004` playoffs
@@ -251,9 +269,11 @@ percentiles. Targets that fail ship a labelled baseline.
   when Final. In-session recomputes (mark-outs) are never scored.
 - **App live layer**: render committed projections first, then upgrade with the
   latest injury PDF (floor(now ET, 15 min), step back <= 8 slots) and ESPN odds;
-  budget ~5s, 0 retries, failures cached with their own TTL (circuit breaker). The app
-  never calls stats.nba.com. Under READ_ONLY app writes go to a temp LIVE_DIR outside
-  the checkout; app-written and bot-written path sets are disjoint by construction.
+  budget ~5s, 0 retries, failures cached with their own TTL (circuit breaker); the odds
+  feed's walk runs on a background pool, started by a refresher thread or a page view,
+  and a page waits at most 3 s for it; what is not done by then lands in memory for the
+  next run. The app never calls stats.nba.com. The app writes nothing to disk
+  (docs/serving_design.md section 0); there is no LIVE_DIR.
 - **Bot hygiene**: dense crons at off-minutes (e.g. :17/:43), cadence logic in Python;
   `if_changed=True` on every committed write (byte-stable when unchanged); append-only
   per-date partitions immutable once Final; an allow-list of bot-owned paths, one
@@ -261,7 +281,8 @@ percentiles. Targets that fail ship a labelled baseline.
   `pull --rebase` and retries; the run goes RED on any Blocked source, on logs trailing
   the last Final game by more than a game-day, or on a date with Finals yielding 0 rows;
   a dead-man's switch for runs that never start; an offseason keepalive (scheduled
-  workflows in a public repo disable after 60 days idle). Opening-night runbook:
+  workflows in a public repo disable after 60 days idle). The bot never calls the odds
+  vendor, and no workflow holds a vendor secret. Opening-night runbook:
   manual runs Oct 19 evening and Oct 20 morning (roster cut-down). BOS@DET tips at
   3pm ET, so the first freeze point is 2:55pm ET Oct 20 (tip minus
   `pipeline.FREEZE_LEAD`). The Oct 20 run must finish well before then: a game past
@@ -285,6 +306,12 @@ percentiles. Targets that fail ship a labelled baseline.
   (props.restore_saved: the copy is a second paste box, re-validated and re-matched;
   lines for games already played are dropped). Never on the server's disk; a board
   opened from someone else's link is never copied; Clear all removes the copy.
+- **Feed lines need no token** (Barrett, 2026-11-09): the odds feed's lines are one set
+  per date for every visitor, held in process memory, and the board built from them needs
+  no `?board=`. A visitor's token board and browser copy hold only what that visitor
+  pasted; feed rows are never copied into either. Where both have a PrizePicks line for
+  the same player and stat, the newer line is shown on that visitor's view (a typed pick,
+  a Demon or a Goblin from the paste always is), and the board says which and how many.
 - **A typed list pastes too** (Barrett, 2026-11-06: "can you incorporate these into
   the script"): one pick per line, as typed or copied from a picks post ("Take the
   OVER on Miles Bridges for a combined 6.5 Rebounds and Assists", "Oso Ighodaro o7.5
@@ -387,27 +414,43 @@ percentiles. Targets that fail ship a labelled baseline.
   screen); player search (`?player=`, sync-on-URL-change); cards grouped by tip time
   (team-colour split stripe, tip time, DraftKings spread/total or the sentinel, B2B
   chips, "Out: X, Y +2" for 15+ MPG players excluding G League/two-way, Upcoming /
-  Live / Final, line-count pill top-left counting SHOWN lines only); "Model vs the
-  board": green confirmation, "N of M shown (hidden / thin / void)", top 25 one row
-  per player with "+N more", stat-family pills and a game filter inside an
-  @st.fragment, "Show all", footnotes (Demon/Goblin, Reboot, board-at-its-ceiling).
+  Live / Final, line-count pill top-left counting the picked book's SHOWN lines only
+  (one per player and stat)); "Model vs the board": green confirmation, "N of M shown
+  (hidden / thin / void)", top 25 one row per player with "+N more", stat-family pills
+  and a game filter inside an @st.fragment, "Show all", footnotes (Demon/Goblin and
+  Reboot on PrizePicks rows only, break-even per source, board-at-its-ceiling); while
+  the odds feed holds lines for the date, a row of book buttons above the board
+  (PrizePicks, Underdog, DraftKings, FanDuel, BetMGM; PrizePicks by default, any other
+  pick kept in `?book=`) picks whose lines are the board's rows, the Line header
+  names that book ("PP line", "DK line"), each row's Other books cell lists the other
+  four books' lines for the same player and stat (each book's code and line, with
+  that line's own time when it is older, or a pasted PrizePicks line's badge word;
+  never a lean, colour, gap or price), and a game the picked book has not posted
+  shows none of its rows, never another book's, and a notice names such games (two
+  at most, then "and N more").
 - `/Game`: team-colour header (spread, total, implied team totals, rest/B2B, injury
   report as-of or "report not filed"); 5-chip strip; two team tables with
   team-tinted headers: status badge, player (headshot, projected-starter dot), P(play)
   only when listed or below 90%, **MIN** as the bold lead column, PTS REB AST 3PM STL
   BLK TOV PRA FS as mid-p medians under "if he plays"; starters by minutes then bench;
   deep bench collapsed; Out rows greyed at the bottom with the reason and no numbers;
-  expandable rows with pasted lines (sides offered, badges, void risk) and, after
-  tip, actuals from the cdn box score (120s cache; "Did not play, pick voided";
-  an exact landing reads "landed on the line", never "push"); per-team mark-out /
-  mark-in (stable options) writing `?out=` with a "your adjustments, not the published
-  projection" banner.
+  expandable rows with each player's lines (the picked book's, with the other four
+  books' lines beside each when the odds feed is on; sides offered, badges, void risk
+  on PrizePicks rows) and, after tip, actuals from the cdn box score (120s cache; "Did
+  not play, pick voided" on a PrizePicks line, "Did not play" on an Underdog or
+  sportsbook line; an exact landing reads "landed on the line", never "push", and on a
+  sportsbook line the chance-of-landing tooltip says the book's own rule decides it);
+  per-team mark-out / mark-in (stable options) writing `?out=` with a "your
+  adjustments, not the published projection" banner.
 - Status badges: Out, Doubtful, Questionable, Probable, G League, Two-way, Not with
   team, Suspended; team-level "Report not filed" and "No report yet". Unknown is
   never rendered as healthy.
 - `board_rows` returns (shown, hidden, thin, void); void = Out / inactive / marked
-  out. Pills, ledger and rows all read it. Ledger balances: pasted = matched +
-  unmatched + unprojected + refused, with unmatched names listed.
+  out. Pills, ledger and rows all read it. Ledger balances per book and game: posted =
+  matched + unmatched + ambiguous + refused + unprojected (props.ledger); the board's
+  ledger (the picked book's lines for every game it has posted, plus the paste with each
+  overlap counted once when PrizePicks is picked) balances too, with unmatched names
+  listed.
 - Ported from GridironValue props_ui (acceptance items): Demon/Goblin badge and
   footnote, hidden-side counts, "N of M lines" header and refusal reasons, GAP column
   not a percentage, green banner + toast after a paste, each line routed to its own

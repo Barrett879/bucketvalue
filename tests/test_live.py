@@ -49,8 +49,10 @@ def _box() -> dict:
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     """A fake clock for live (time.time and time.monotonic), empty memory and
-    breaker, the committed state in a temp dir, and http.fetch answering
-    whatever env.answer holds (a payload, or an exception to raise)."""
+    breaker, the committed state in a temp dir, and both of http's entry
+    points, http.fetch and the licensed feed's http.vendor_get, answering
+    whatever env.answer holds (a payload, or an exception to raise): every
+    http entry point is patched here (design 8.3, RC O4)."""
     clock = [1_000_000.0]
     monkeypatch.setattr(live, "time", types.SimpleNamespace(time=lambda: clock[0],
                                                             monotonic=lambda: clock[0]))
@@ -64,11 +66,19 @@ def env(monkeypatch, tmp_path):
         if isinstance(e.answer, BaseException):
             raise e.answer
         return copy.deepcopy(e.answer)
+
+    def vendor_get(host, path, params, **kw):
+        e.calls.append((host + path, kw))          # never the params: they would hold a key
+        if isinstance(e.answer, BaseException):
+            raise e.answer
+        return H.VendorResponse(status=200, headers={}, body=copy.deepcopy(e.answer), snippet="",
+                                nbytes=0)
     monkeypatch.setattr(H, "fetch", fetch)
+    monkeypatch.setattr(H, "vendor_get", vendor_get)
     return e
 
 
-# ── A failure is any exception, and it never costs the good copy ─────────────
+# -- A failure is any exception, and it never costs the good copy -------------
 def test_a_null_field_serves_the_last_good_schedule_and_trips_the_breaker(env):
     """gameDateTimeUTC null on one game: cdn.parse_schedule raises
     AttributeError. That is a feed failure: the memory copy is served stale,
@@ -129,7 +139,7 @@ def test_a_short_player_index_is_a_failure(env, monkeypatch):
     assert live.roster().source == "live"
 
 
-# ── Lines ────────────────────────────────────────────────────────────────────
+# -- Lines --------------------------------------------------------------------
 def test_an_espn_error_body_keeps_the_last_good_lines(env):
     d = dt.date(2026, 10, 20)
     env.answer = _scoreboard()
@@ -221,7 +231,7 @@ def test_a_line_seen_before_tip_survives_espn_dropping_it_at_tip(env, monkeypatc
     assert late["pre_tip"] and late["home_line"] == before[("BOS", "DET")]["home_line"]
 
 
-# ── Memory or committed: the newer one ───────────────────────────────────────
+# -- Memory or committed: the newer one ---------------------------------------
 def _report_at(rep, title):
     return INJ.ParsedReport({**rep.meta, "report_ts_et": title},
                             rep.rows.assign(report_ts_et=title),
@@ -273,7 +283,7 @@ def test_a_newer_committed_schedule_beats_an_older_memory_copy(env):
     assert live.schedule().source == "memory"
 
 
-# ── The injury walk's budget ─────────────────────────────────────────────────
+# -- The injury walk's budget -------------------------------------------------
 def test_no_injury_fetch_can_outlast_the_walks_budget(env, monkeypatch):
     """Each slot answers slowly (absent after 0.7 of the budget). The first
     fetch gets the full per-PDF timeout; the second starts with less than
@@ -304,7 +314,7 @@ def test_every_fetch_fits_the_spec_budget():
     assert live.TIMEOUT <= 5.0 and live.INJURY_TIMEOUT <= live.INJURY_BUDGET <= 5.0
 
 
-# ── Game state ───────────────────────────────────────────────────────────────
+# -- Game state ---------------------------------------------------------------
 def _row(**kw):
     base = {"status": "scheduled", "status_text": "7:00 pm ET",
             "tip_utc": pd.Timestamp("2026-11-03T00:00:00Z"), "postponed": False}
@@ -329,7 +339,7 @@ def test_a_game_whose_time_is_not_set_is_never_called_live_by_the_clock():
     assert live.game_state(_row(status="live", status_text="TBD", time_tbd=True), now=noon) == "live"
 
 
-# ── The box score after tip ──────────────────────────────────────────────────
+# -- The box score after tip --------------------------------------------------
 def test_the_box_score_is_read_through_the_cdn_with_its_own_ttl_and_breaker(env, monkeypatch):
     env.answer = _box()
     b = live.box(BOX_GID)

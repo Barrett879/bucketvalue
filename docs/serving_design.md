@@ -19,6 +19,11 @@ in parallel agree. The spec (BUCKETVALUE_PROJECT_INSTRUCTIONS.md, sections 3.5,
   visitor's pasted board is copied to THAT visitor's browser, localStorage, by
   props_ui.board_keeper, so a reload or a restart brings it back; the server
   still keeps it only in memory.)
+- Licensed player lines (The Odds API) are bought by the APP's live layer only, for today's
+  ET date, and kept in process memory only: the feed anchor, a sys.modules entry outside the
+  bucketlib package, kept across a freshen purge and a Streamlit cache clear, lost on a
+  restart. They never reach disk, git, a visitor's token board or a browser copy
+  (section 10).
 - Freeze per game at tip: no process ever rewrites a projection row for a game
   whose tip has passed.
 - Accuracy stays local (Barrett). The record is derived LOCALLY from the git
@@ -132,6 +137,79 @@ and the readers. A seed for a season other than `manifest["serves"]` raises
   app: committed features + live report + live odds; tipped games come from the
   committed projections untouched; falls back to the committed projections
   (stale notice) when the live layer fails.
+
+The licensed odds feed's modules (2026-11-11; section 10 has the contract):
+
+### bucketlib/live.py: the odds feed
+- `feed_kick(work, *, mem=None, environ=None, pool=None, now=None)`,
+  `feed_view(date, *, mem=None, wait_s=PAGE_WAIT_S, now=None)`,
+  `prop_lines(work, ...)`, `prop_lines_memory(date, *, mem=None, now=None)`,
+  `ensure_refresher(environ=None)`, `refresher_tick(mem, *, environ=None,
+  pool=None, now=None)`, `feed_anchor()`, `new_feed_memory(now, had_ledger)`,
+  `reset_feed_anchor_for_tests()`, and the key reader `_read_key(environ=None)`
+  (BUCKETVALUE_ODDS_API_KEY, else the first line of the regular file that
+  BUCKETVALUE_ODDS_API_KEY_FILE names, opened without blocking). `mem` None is
+  the anchor's ledger. Events (free, 10 min), the per-game governor
+  (bucketlib/oddsbudget.py), one task per game, no paid call within 5 minutes
+  of tip, stale beats empty per game and per book, every possibly billed call
+  counted. `FeedLive(state, value, asof, per_game, loading, generation, report,
+  loading_games)`, state one of off, idle, ok, stale, paused, down.
+### bucketlib/oddsbudget.py: the credit governor
+- Pure: no I/O, no clock, no environment; every function takes `now` and plain
+  values. `reset_window`, `in_reset_window`, `period_of`, `margin`,
+  `default_reserve`, `busiest_month`, `p_max`, `plan`, `spending_ceiling`,
+  `horizon_games`, `period_games`, `games_before`, `waiting_first`, `tip_for`,
+  `before_tip`, `first_pull_time`, `due_kind`, `may_spend`,
+  `first_pull_markets`, `first_kind`, `true_first_pull`, `brake_applies`,
+  `backoff`, `breaker_on`, `breaker_trips`, `reset_seen`, `calls_in_window`.
+- KINDS = ("first", "refresh", "pp") are due_kind's words, and REBUY = "rebuy"
+  is first_kind's word for a first pull that may re-buy (B11) and due_kind's for
+  a braked game's one re-buy (B21). SPEND_KINDS = KINDS + (REBUY,) are the kinds
+  may_spend takes; its `kind` is required and anything else raises. REFUSALS,
+  in may_spend's order: tip_guard, out_of_credits, bad_key, no_balance, paused,
+  reserve, floor, ceiling, rate_cap.
+- Game, Period, Plan and Slot are frozen dataclasses. Slot.has_lines (the game
+  has a stored frame with lines, B12) is required and keyword only, with no
+  default; Slot.braked (B21) is keyword only, default False.
+### bucketlib/sources/oddsapi.py
+- Pure: `read_settings`, `events_request`, `event_odds_request`, `parse_events`,
+  `match_events`, `parse_event_odds`, `merge_refresh` (told `markets_requested`
+  on every call, B3), `usage_from_headers`, `error_code`, `failure_kind`,
+  `empty_feed`. FEED_COLUMNS = props.PARSED_COLUMNS + book, book_title, market,
+  price_over, price_under, last_update, fetched_at, event_id, event_home,
+  event_away, game_id, game_date, tip_utc. BOOKS are the five; BOOK_TITLE equals
+  props.BOOK_TITLE; SEND_REGIONS = False.
+### bucketlib/http.py: vendor_get
+- One attempt, honest User-Agent, no impersonation, no redirects, its own pacing, a size cap
+  during the download, a timeout of at least 0.5 s; returns status, the x-requests-*
+  headers and the body; every failure is a fixed phrase or a documented code.
+  VendorTransportError's kinds are timeout, connect, oversize and transport.
+  `fetch` refuses the vendor's host before any request; `scrub` is the one
+  function that turns vendor text into a string.
+### bucketlib/props.py: the feed's lines and the board (layout B)
+- `prepare_feed(feed, roster, projections)`, `resolve_event_names`,
+  `compare_books(lines, dist_provider, projections, roster=None)` (compare()
+  once per book and game) giving `FeedTables(tables, metas, report, failed)`,
+  and `feed_board(ft, paste_table, paste_meta, pasted_utc, *, selected)` giving
+  `FeedBoard(reference, context, meta, ref_by_game, missing_games, paste_won,
+  feed_won, paste_times)`; `american_breakeven`, `side_words`. BOOK_ORDER =
+  (prizepicks, underdog, draftkings, fanduel, betmgm) is the order of the book
+  pills and of the Other books cell; BOOK_TITLE and BOOK_CODE (PP, UD, DK, FD,
+  MGM) are the only book names a page shows. FeedTables.failed marks a date
+  whose feed holds lines that could not be compared: no table and no meta, so
+  no book has a board to pick and the page explains the failure (B17).
+### bucketlib/props_ui.py: the feed on the page
+- `date_board(token, date, projections, params, roster=None, feed=None,
+  feed_info=None, selected="prizepicks")`, `seed_book_from_url`,
+  `render_book_pills`, `selected_book`, `feed_games`, `feed_notice_html`,
+  `book_missing_html`, `book_missing_game_html`, `after_tip_note_html`,
+  `lines_asof_text`, `loading_line_html`, `books_legend_html`. With feed=None
+  every function returns the HTML it returned before the feed. RG_LINE = "".
+### bucketlib/store.py: the page's side of the feed
+- `feed_on`, `feed_start(view_date, sched) -> FeedTicket`, `feed_result(ticket)`,
+  `feed_work(today, sched)`, `feed_tables(date, feed, served, params, roster)`,
+  `feed_info(feed, today, environ=None)`, `feed_loading_watch(date_iso,
+  generation, game_id=None)`.
 
 ## 3. The projection frame (bot file and app frame, same columns)
 
@@ -274,6 +352,13 @@ fixed by area. What changed in the contract:
   lines mints a NEW token, so a shared link is read-only for everyone else, and a
   board restored from the visitor's browser gets a NEW token too; the record
   refuses mark-out-adjusted rows and rows without a model version.
+  Feed lines are compared once per book and game, cached by the feed's
+  generation and shared by every session; the board ranks, counts and colours
+  by the picked book's line per player and stat (PrizePicks unless the visitor
+  picks another book; a game that book has not posted shows none of its rows,
+  never another book's), and a visitor's pasted PrizePicks line replaces the
+  feed's on that visitor's view only when it is newer, or a typed pick, a Demon
+  or a Goblin.
 
 ## 9. Amendments after the 2026-11-02 rehearsal (the 2026-27 box lists actives only)
 
@@ -377,3 +462,373 @@ contract:
   either, so the 2027-28 seed and any retrain on 2026-27 need an inactive
   source: the bot's rebuilt partitions, or V3 BoxScoreSummaryV3 `inactives` if
   it still lists them.
+
+## 10. The licensed odds feed (2026-11-11)
+
+Player lines for DraftKings, FanDuel, BetMGM, PrizePicks and Underdog, licensed
+from The Odds API, display only (no model reads them). Built to the feed's
+design (architecture_v2.md, whose section numbers "design 3.6" and the like
+cite, and its budget replay RP; both are kept outside the repo) as amended:
+layout B (a row of book pills picks whose lines the board shows, PrizePicks by
+default; the other four books' lines sit in each row's Other books cell; no
+price is shown for any book) and the build amendments B1 to B33, named below
+where they decide a rule. The operator's side is docs/runbook.md section 8.
+With no key configured none of it runs and every page is what it was.
+
+### The anchor (live.feed_anchor)
+- `live.ANCHOR_NAME = "_bucketvalue_feed_anchor"`: a `types.ModuleType` in
+  `sys.modules`, outside the bucketlib package, made once per process (the
+  first `setdefault` wins). Its attributes: `lock`, `state` (the ledger),
+  `births`, `pool` (a ThreadPoolExecutor of ODDS_WORKERS + 1 = 5 threads, the
+  walk taking one), `refresher` (the thread), `refresher_stop` (its Event) and
+  `refresher_version`.
+- freshen pops only `bucketlib` and `bucketlib.*` names, a Streamlit cache
+  clear touches only Streamlit's caches and the sender's session, and the file
+  watcher finds no file for a module with no `__file__` and a None `__spec__`:
+  all three miss it. A restart loses it.
+- Plain data and stdlib objects only (B4): no bucketlib instance or function is
+  ever stored, so no code of a purged module runs from it, except the
+  refresher loop, which looks up the current `bucketlib.live` on every tick.
+- `feed_anchor()` replaces a ledger that is missing, of another
+  FEED_MEMORY_VERSION (2) or of a bad shape, and logs `oddsapi: feed memory
+  created (process start)` the first time in a process, `(replaced: version
+  change)` after.
+
+### The ledger (live.new_feed_memory)
+```
+{"v": FEED_MEMORY_VERSION,                  # 2
+ "born_at": <UTC>, "had_ledger": <bool>,    # the brake and first_kind read both
+ "lock": threading.Lock(),                  # guards every field below
+ "event_locks": {},                         # event_id -> Lock: one call per game, never waited on
+ "queued": set(), "futures": {},            # event_id -> Future, while queued or running
+ "walk": None,                              # the running walk's Future: one walk at a time
+ "events": None,                            # (fetched_at, today's matched events, report)
+ "events_fail": None,                       # (until, kind, fails): the events call backing off
+ "games": {},                               # event_id -> entry (below)
+ "budget": {"remaining": None, "used": None, "last": None, "seen_at": None,
+            "auth": "ok", "auth_until": None, "pending": 0, "mode": None},
+ "calls": [],                               # UTC times of paid calls in the last 10 minutes
+ "streak": 0, "breaker_day": None,          # billed answers in a row; the ET day stopped
+ "generation": 0,                           # bumped on every change to a stored frame
+ "work": None,                              # the latest work order
+ "warned": {},                              # log-line code -> last UTC (once per period)
+ "braked": False,                           # the memory-loss brake was decided (once)
+ "brake_day": None,                         # the ET day it applies to, when it does
+ "brake_used": None}                        # the `used` it was decided on (first_kind)
+```
+- `budget["auth"]` is "ok", "out_of_credits" or "bad_key"; `budget["mode"]` is
+  the last plan's mode, whose change is logged. `pending` is the worst case of
+  the calls in flight. Within one period `remaining` only falls and `used`
+  only rises, unless the vendor's counters move by more than the calls that
+  can be in flight (a reset, or new credits).
+- `brake_used` is the account's `used` when the brake was decided: no paid
+  call goes ahead before that, so it is what the period spent before this
+  ledger, and first_kind's usage test reads it.
+
+One entry per game (`live._new_entry`), keyed by the vendor's event id:
+```
+{"game_id", "game_date" (ISO), "tip_utc", "vendor_tip",
+ "frame",                                   # the stored lines (FEED_COLUMNS), or None
+ "pulls", "first_at", "last_at",            # possibly billed calls (3.5), the brake's included
+ "empty_next",                              # an empty answer: not again before this
+ "pp_missing", "pp_next",                   # the last pull lacked PrizePicks; the next free check
+ "fail_until", "fails",                     # the backoff after a failure; failures in a row
+ "books_at": {book: fetched_at},            # each book's own latest fetch
+ "pulled": [...], "n_pulled",               # lines a book took down: 8 named, all counted
+ "held",                                    # reserve, floor or ceiling refused the latest call
+ "braked",                                  # the brake counted its first pull (B21)
+ "free_failed"}                             # a free call failed with no answer (below)
+```
+- `held` is the budget guard that refused the game's latest paid call, or
+  None once a call goes ahead or another guard decides it. The view reads it
+  (a held game of today makes the day "paused"); the governor never does.
+- `braked` marks a game the memory-loss brake counted as pulled at the
+  ledger's birth: that pull was assumed, never bought by this ledger.
+- `free_failed` (build 6's review): a call expected to be free failed with no
+  answer, may have been billed and was not counted as a pull, and no clean
+  answer has come for the game since (below).
+- Validation (`_valid_ledger`, `_slot_of`): the version, the exact set of
+  top-level and budget keys and each one's type; each entry when read, a
+  malformed one counting as absent (logged). An entry from before `braked` or
+  `free_failed` existed reads them as False, so a ledger kept across a code
+  push stays valid and buys nothing more for it. Any change to the top-level
+  or budget keys replaces the ledger, as a FEED_MEMORY_VERSION bump does.
+- Pruning: each walk drops games dated before yesterday, their locks, old
+  rate-cap times and old log marks.
+
+### The work order (store.feed_work)
+Written on every feed-on view of today (store.feed_start) and read by the walk
+and the refresher. Plain data, cached 10 minutes on the schedule columns it
+reads and the committed files' (path, mtime_ns, size):
+```
+{"date": "<today ET>", "written_at": "<UTC ISO>",
+ "games": [{"game_id", "game_date", "tip_utc", "tbd", "away", "home"}],    # today's buyable games
+ "horizon": [{"game_id", "game_date", "tip_utc", "tbd", "away", "home"}],  # B2 below
+ "serve_files": {"<today>": [projections, features], "<tomorrow>": [...]},
+ "busiest": <the season's busiest month in projected games>}
+```
+- Buyable: projected (pipeline.state_games) and in the date's committed
+  projections file, or its features file when there is none (m26), so a bot
+  outage day costs nothing.
+- The horizon (B2) is every projected game from the earliest day a credit
+  period current today could have opened (the last day of the month before)
+  to the latest close of the next reset window, tipped games too, each with
+  both teams (N4). It gives the governor the period's own games: the
+  spending ceiling, the reset window's `used` test and the brake's usage test
+  count them, and G counts their untipped part.
+
+### The walk (live.feed_kick, _walk)
+`feed_kick` never blocks and never raises. It reads the key and the settings
+on the call (no key, or the switch off: nothing), stores the work order, and
+submits a walk unless one is running. The walk:
+1. reads the key and settings again, logs each settings problem (names, never
+   values), prunes, and takes the order's buyable games of today (none: no
+   call at all);
+2. the free events call when its copy is older than 10 minutes and nothing
+   holds it back (a failure backs off 90 s doubling to 60 min; a bad key waits
+   30 min); events match schedule games on the ET date and the unordered
+   team pair, and a game's tip is the earlier of the vendor's and the
+   schedule's (a TBD schedule tip ignored);
+3. `period_of` and `plan`, the brake (once per ledger), the mode-change log
+   line and the reset watch;
+4. each matched game of today, in tip order, with a due kind and not already
+   queued, goes to the pool (`_pull_game`); the queue never holds more tasks
+   than today's games. The walk's INFO line counts the billed calls and their
+   cost once its last pull is done.
+
+### One paid call (live._ticket, the call, live._settle_pull)
+- Guards, in order (design 3.6): the game's own non-blocking lock; under the
+  ledger lock a fresh `due_kind`; for a "first", `first_kind` (B11) and
+  `true_first_pull` (B23, never while the entry's `free_failed` is set); then
+  `may_spend`: tip_guard (now >= tip - 5 min), the auth state, an unknown
+  balance, a paused plan, the reserve (remaining - pending - cost >= S), the
+  morning-pull floor (remaining - pending - cost - S >= c_core x the
+  horizon's other games still waiting for a first pull; never checked for a
+  "first", B1), the spending ceiling (used + pending + cost <= ceiling(today);
+  never checked for a true first pull, B23), the rate cap
+  (BUCKETVALUE_ODDS_MAX_CALLS_10MIN in any 10 minutes); the key and the kill
+  switch are read again before the call.
+- Markets: a re-buy asks the core markets only (B20); a first pull asks the
+  plan's markets only when the floor holds at their cost, else the core
+  markets (B1, first_pull_markets); a refresh or a top-up asks the plan's.
+  Books: the five, or PrizePicks alone for a "pp" top-up. With the shipped
+  default (points only) every pull asks the same one market.
+- A refusal by the reserve, the floor or the ceiling sets the entry's `held`
+  and logs `oddsapi: budget held a pull today (<code>)` once per guard per ET
+  day (B19).
+- `pending += cost` before the call and back in a `finally`; a raise anywhere
+  after the ticket settles the call once, as a failed one.
+
+What a call's outcome does (design 3.5 as built: `_outcome`, `_answered`,
+`_failed`):
+
+| Outcome | Billed | A pull | The streak | Then |
+|---|---|---|---|---|
+| 200 with no bookmaker entry (nothing posted) | no | no | back to 0 | not again for 10 minutes (`empty_next`, or `pp_next` for a top-up); `free_failed` cleared |
+| 200 with lines kept | yes | yes | back to 0 | `fails` 0, `free_failed` cleared, `pp_missing` when PrizePicks is bought and absent; the generation moves when the frame changed |
+| 200 with entries but no line kept, not JSON, the wrong shape, or an unknown team | yes | yes | +1 | backoff |
+| a body over VENDOR_MAX_BYTES, stopped mid-download ("oversize") | assumed | yes | +1 (B31) | backoff |
+| a timeout, or a failure after the connection (kind "transport", a cut-off download) | possibly | yes, unless the call was expected free | never (B22, B31) | backoff; a free one sets `free_failed` |
+| a connection failure | only when bytes had arrived | only then | never | backoff |
+| 401, 404, 422, 429, 3xx, 5xx | only when x-requests-last > 0 | only then | +1 when billed | backoff; a 401 sets the auth state; a 404 ends the game's pulls for the ET day |
+
+- Backoff after the n-th failure in a row on a game: 90 s, 3, 6, 12, 24 and
+  48 minutes, then 60 minutes each time.
+- The day breaker (B22 as B31 reads it): BREAKER_STREAK = 3 answers in a row,
+  any games, that came back (a complete response, or an oversize one) and
+  were billed and of no use stop paid calls until the next ET day, with one
+  WARNING; the free events call goes on. A clean answer, an empty one
+  included, resets the streak. A transport failure (a timeout, no
+  connection, a download the network cut off) never grows it: it still
+  takes its worst case off the balance, counts per the table and backs the
+  game off.
+- L2-1's free timeout, as it now stands: a call is expected to be free when
+  the game's last answer had nothing (a PrizePicks-only top-up, or a pull
+  with `empty_next` set) and the entry's `free_failed` is not set. A
+  transport failure of such a call takes its worst case off the balance but
+  is not one of the game's P pulls; it sets `free_failed`. Once per clean
+  answer: while `free_failed` is set the game's next call is not taken as
+  free (its failure counts as a pull) and its next first pull is no true
+  first pull (the ceiling checks it). Only an empty answer or lines that land
+  clear it; a failure, answered or not, never does.
+
+### The kinds (oddsbudget.due_kind, first_kind)
+Nothing is due while the plan does not spend, the day breaker is on, the tip
+guard has passed, the game backs off (`fail_until`) or an empty answer is
+under 10 minutes old. Then, with k the game's pulls and P the plan's:
+- "rebuy" (B21): the brake counted the game's first pull (`braked`), that is
+  still its only pull (k = 1), the ledger holds no lines for it, P >= 2, and
+  now < t_last = tip - BUCKETVALUE_ODDS_LAST_PULL_LEAD_MIN: ONE re-buy, at
+  once, guarded as B11's (the floor and the ceiling), core markets only. A
+  re-buy that counts as a pull is the game's second, so one ledger never
+  re-buys a game twice.
+- nothing once k >= P.
+- "first" (k = 0): at or after BUCKETVALUE_ODDS_FIRST_PULL_ET on the game's ET
+  date. `first_kind` keeps it "first" (B1: the floor skipped) when the ledger
+  was born at or before that time (`true_first_pull`: it can never re-buy what
+  an earlier ledger bought, so it skips the ceiling too, B23, unless the
+  entry's `free_failed` is set), or when the period was not spending before
+  the ledger (no earlier ledger in this process, and 2 x brake_used < c_core x
+  the period's earlier games); otherwise "rebuy" (B11): the pull may re-buy
+  what the process before bought, and the floor and the ceiling guard it.
+- "refresh", retried (B12): the game's pulls so far brought no stored lines
+  after a failure (has_lines False, fails > 0): due as soon as its backoff
+  allows, while it has pulls left. On the free plan (P = 2) that retry is the
+  game's second pull, so the game keeps its morning lines but gets no pre-tip
+  refresh.
+- "refresh": pull k is due at t_first + (t_last - t_first) x k / (P - 1), no
+  sooner than last_at + MIN_REFRESH, and only while that time is <= t_last. A
+  late first pull spaces the rest from itself.
+- "pp": a game whose pull lacked PrizePicks, every 10 minutes (`pp_next`),
+  unless BUCKETVALUE_ODDS_PP_TOPUP is off; a due refresh comes first (B5). The
+  check is free while PrizePicks has nothing (an empty answer is free by the
+  vendor's docs, UNVERIFIED: docs/data_notes.md), and the first answer with
+  lines counts as a pull, so on the free plan it takes the place of the
+  evening refresh.
+
+### The plan (oddsbudget.plan)
+S = the reserve, A = used + remaining, B = remaining - S - pending, G = the
+horizon's untipped games, made = their pulls in this ledger, c = the number
+of markets:
+- a bad key or out of credits: paused; the day breaker on: paused; the
+  balance unknown: unknown (no paid call);
+- P_full = floor((B / c_full + made) / G) >= 1: full, P = min(P_full,
+  P_max(c_full)); else the same with the core markets: core; else B >= c_core:
+  short (core markets, P = 1); else paused at the reserve.
+- P_max(c) = min(48, 2 x max(1, floor((A - S) / (c x busiest)))): 4 on the free
+  plan with points.
+- ceiling(today) = min(A - S, ceil(1.5 x (A - S) x n_through(today) /
+  n_period)), over the period's games. It reads the vendor's `used` and bounds
+  every refresh, top-up and re-buy, and every first pull of a ledger born
+  after the game's first-pull time, so no restart or crash loop pushes the
+  period's spending more than half again above its pace. A true first pull
+  skips it (B23), and one ledger never sees what another bought: a second
+  process whose ledger was born at or before 08:50 (a local run with the key
+  file started before 08:50, or left open overnight) buys that morning's
+  games again, bounded only by the reserve.
+- The credit period: credits reset on the 1st (the vendor's FAQ, for every
+  plan); inside the reset window, from 05:00 ET on the last day of a month to
+  08:00 ET on the 1st, `used` decides which period it is. There is no
+  reset-day setting.
+
+### The brake (live._brake, oddsbudget.brake_applies)
+Decided once per ledger, at the first walk that knows `used` (then `braked`
+is True, `brake_used` keeps that `used`, and `brake_day` is today when it
+applies). It applies to a ledger born more than 60 minutes after the day's
+first-pull time (after 09:50 ET by default) when this process had a ledger
+before (a version change) or 2 x used >= c_core x the period's earlier games
+(a feed was running). Each of that day's untipped games with no pull then
+counts as pulled once, at the ledger's birth, and is marked `braked`; one
+WARNING gives the count. The usage test never passes on a period's first day
+(no earlier game) or with an unknown `used`.
+
+### The view (live.feed_view)
+- It waits up to `wait_s` (a page passes 3 s) for the walk and the date's
+  calls, then reads memory: the current frames, and after tip the pre-tip
+  copies, which nothing buys again.
+- State: "paused" when today's paid calls are stopped (the auth state, the day
+  breaker, a paused plan, or a game of today `held` by the reserve, the floor
+  or the ceiling), with or without lines; else "stale" with lines, or "down"
+  without, when the events call or a call of one of the date's games failed;
+  else "ok" with lines, "idle" without. Another day's memory is never paused,
+  stale or down.
+- `per_game`: "asof" (the game's latest pull), "books" ({book: fetched_at}),
+  "pretip", "pp_missing", and "reason" when it has no lines: "not_yet",
+  "none_posted" (its last answer had no bookmaker entry), "paused",
+  "not_published", or "lost_in_restart" (the ledger was born after the game's
+  tip guard and holds no frame for it).
+
+### The refresher (live.ensure_refresher, _refresher_loop, refresher_tick)
+- Started by store.feed_start on a view of today with the feed and
+  BUCKETVALUE_ODDS_REFRESHER on: a daemon thread, at most one per process. A
+  dead one is restarted on the next such view, and a REFRESHER_VERSION change
+  stops the old loop and starts a new one.
+- Every REFRESHER_TICK_S (60 s) the loop calls the CURRENT
+  `bucketlib.live.refresher_tick` on the anchor's ledger, so after a code push
+  it runs the new code. The tick answers "off", "no_work", "idle" or "kicked".
+- The tick: no work order, or one older than 36 hours: "no_work". Today's
+  games come from the order when it is dated today and holds some; otherwise
+  (an order from the evening before, or today's written before the bot
+  published today's files, B15) from the horizon rows dated today whose game
+  ids are in the first of today's committed serve files that exists, rows
+  without both teams left out (logged once a day). It kicks the walk when a
+  game of today is past its first-pull time, before its tip guard, not
+  queued, and the balance is not known yet or due_kind says it is due. An idle
+  tick makes no network call. An order's serve_files name only its own day and
+  the next, so after a full day with no view of today every tick is "no_work"
+  until a view writes a new order.
+- It never calls `st.*`, builds the feed tables or reads Streamlit's caches.
+  Nothing starts it before the first view of today after a process starts.
+
+### The page side (store, props_ui)
+- `feed_on()` is a key and the switch, read on the call: no network, no anchor.
+  `feed_start` returns "off" before any other feed code runs (M9); for today it
+  builds the work order, kicks the walk and starts the refresher inside one try
+  ("kicked", even when that raised); another date is "memory". `feed_result`:
+  "off" is FeedLive.off(), "kicked" waits up to 3 s (feed_view), "memory" reads
+  memory without waiting; any exception is FeedLive.down().
+- `feed_tables` is `st.cache_resource` with 4 entries, keyed by the date, the
+  ledger's generation and strict digests of the feed's rows, the frame, the
+  roster and the simulator parameters; a digest that cannot be made means not
+  cached. Tables that cannot be built while the feed holds lines are
+  `FeedTables(failed=True)`; with a paste for the date the board is then the
+  paste's own, under one note (B17).
+- props_ui draws one book at a time (`selected_book`, seeded from `?book=` only
+  when the URL changed), the pills outside every fragment (a pick reruns the
+  whole page, so the cards count the picked book), the Other books cell
+  (codes from props.BOOK_CODE with each book's line, its own time when over a
+  minute older than the game's latest pull, a pasted PrizePicks line's badge
+  word; no lean, colour, gap or price), and the notices of design 6 and
+  amendment A6, built from the stamps and the `today` the page passes, never
+  from a clock.
+- `feed_loading_watch` (an `st.fragment` every 3 s) is drawn only while games
+  load; from its own timed runs it reruns the app once the generation moves or
+  nothing is loading, and it asks for that only in the first 20 runs of a
+  loading episode (then it only shows the line).
+
+### Restarts, replayed under B21 (tests/test_oddsbudget.py)
+On the 2026-27 schedule (RP; the tests replay it one year earlier, so no date
+in them is in the future), 2027-01-07, 12 games, free plan, points, a period
+that was spending:
+
+| Restarts on Jan 7 | Credits that day | How |
+|---|---|---|
+| none | 24 | an 08:50 pull and a pre-tip refresh per game |
+| one at 15:00 | 24 | the 15:00 ledger re-buys the twelve at its birth, in place of their evening refreshes |
+| three, at 13:00, 14:00 and 15:00 | 27 (24 before B21) | the 13:00 ledger re-buys the twelve; that spends the evening refreshes' credits, so the 14:00 and 15:00 ledgers plan P = 1 and buy nothing until 20:30, when the tips that passed lift P to 2 and the 15:00 ledger re-buys its three late games; 9 games end with 2 pulls, 3 with 3 |
+| five, 09:00 to 09:40 (inside the brake's hour) | 72 | every pull of those ledgers is a re-buy that the floor checks and passes (B11): five re-buys of the twelve, less the twelve evening refreshes the plan then dropped, so 48 more than a normal day, all in the morning; the ceiling and the floor held, and every later game kept its morning pull |
+| every 10 minutes, 10:00 to 18:00 (49) | 27 | 12 first pulls and 15 re-buys: the 10:00 ledger re-buys the twelve, later ones plan P = 1 until 20:30; no game bought more than three times; after every call the floor's promise and the ceiling held |
+
+- Design 3.7's case D holds again under B11: in a morning crash loop the
+  ceiling and the floor held.
+- RP case C (470 used at 10:00 ET on Dec 31, the reset at 19:00): Dec 31 costs
+  5 and Jan 1 12. The 10:00 ledger brakes Dec 31's games; with 5 credits above
+  the reserve for 9 games it plans P = 1 until the 3 PM tips, then P = 2 for
+  the five games still ahead, which are re-bought at 15:00, from the old
+  balance, before the reset.
+- RP case H (a key added at 14:00 on Jan 12 with 15 used): the month was not
+  spending, so no brake: 24 calls for the day's 8 games, P = 3.
+
+### Known limits, accepted as built
+- L2-5: plan() counts the pulls already made at the plan's per-pull cost. It
+  matters only with more than one market configured: a day's last first pull
+  can then read the plan as full and ask every market, spending credits the
+  core plan kept for that evening's refreshes. Fix before adding markets.
+- L2-4 (not changed): a FEED_MEMORY_VERSION bump, or any change to the
+  ledger's keys, replaces the ledger. Pushed between 08:50 and 09:50 ET it
+  re-buys today's games (floor-checked, core markets); after 09:50 the brake
+  applies (had_ledger) and B21 re-buys each braked game once while P >= 2.
+  So such a change is pushed before 08:50 ET, never between 08:50 and 09:50.
+- B32: a vendor that alternates "nothing posted" answers with timeouts it
+  bills re-arms L2-1's free timeout at each empty answer. The backoff bounds
+  it to about 13 credits per game per day, each taken off the local balance
+  as its worst case, so the governor tightens. No cap: a billed timeout means
+  the game had lines, so an empty answer right after one is unlikely.
+- B33, restarts past 09:50 on the free plan: with P = 2, B21's re-buy is the
+  game's last pull, so a book that posts after the restart, PrizePicks
+  included, is not fetched that day; after a second restart the same day the
+  next ledger can plan P = 1, and its braked games then get neither a re-buy
+  nor an evening refresh (in the three-restart replay, 9 of 12 games held no
+  lines from 14:00). Both leave the 9 AM view untouched. Kept as built
+  (Barrett, 2026-11-11), to revisit after the test week or a move to a paid
+  plan.

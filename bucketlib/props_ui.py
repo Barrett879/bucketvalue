@@ -1,5 +1,6 @@
-"""PrizePicks on the page: the nav-bar paste popover, the slate board, the
-per-player rows on the game page, and the card pill counts.
+"""Player lines on the page: the nav-bar paste popover, the slate board (pasted
+PrizePicks lines and the licensed odds feed's five books), the per-player rows
+on the game page, and the card pill counts.
 
 Deliberately NOT a page (sibling precedent: DiamondValue started with a props
 tab and folded it inline). Ported from GridironValue's props_ui and
@@ -22,6 +23,20 @@ Informational model-versus-market readout, never a wager prompt: the gap is a
 difference in the stat's own units, never a percentage column or a dollar
 value. Every string from a paste, a feed or a query param goes through esc().
 The accuracy record is LOCAL ONLY and is not imported or called from here.
+
+THE LICENSED ODDS FEED (design 2.6, layout B: amendments A1 to A8). With a
+key configured the page hands date_board the feed's compared tables
+(props.FeedTables) and the feed's plain facts (store.feed_info); nothing here
+reaches the feed, which lives in the live layer. The board then shows ONE
+book's lines at a time, picked with a row of pills (seed_book_from_url,
+render_book_pills, selected_book), and every row carries an Other books cell
+with the other four books' lines for the same player and stat: the code and
+the number, with a line's own time when it is over a minute older than its
+game's latest pull, or a pasted PrizePicks line's badge word (B28); never a
+lean, a colour, a gap or a price. Every feed text is built from the stamps
+and the `today` the page passes, never from this module's clock. With the
+feed off (feed=None everywhere) every function here returns exactly the HTML
+it returned before the feed.
 """
 from __future__ import annotations
 
@@ -43,7 +58,23 @@ TOAST_KEY = "bv_pp_toast"
 EXPIRED_KEY = "bv_pp_expired"
 TOP_N = 25
 
-# ── The browser's copy of the visitor's board (props.saved_board) ─────────────
+# -- The book pills (layout B, amendment A3) ----------------------------------
+BOOK_KEY = "bv_book"              # the pills' widget key: one of props.BOOK_ORDER
+BOOK_SEEN = "_url_book_seen"      # the ?book= value last reconciled into BOOK_KEY
+BOOK_PARAM = "book"               # the query param the pills write
+# A responsible-gambling line, appended to the break-even note when set
+# (design 15 item 4: none by default).
+RG_LINE = ""
+# A book whose line is more than this older than its game's latest pull shows
+# its own time in the Other books cell (design m23, amendment A5).
+OTHER_BOOKS_AGE = pd.Timedelta(minutes=1)
+# The visitor's pasted PrizePicks lines that win the merge with the feed's
+# (props._paste_wins): a newer one, and whatever its time a typed pick, a
+# Demon or a Goblin. The merge line and the paste caption name them so (build
+# amendment B28).
+PASTE_WINNERS = "newer, typed, Demon or Goblin"
+
+# -- The browser's copy of the visitor's board (props.saved_board) -------------
 # One hidden st.components.v2 component (no iframe: its JS runs in the page and
 # reads and writes ONE localStorage key of this site's own origin). The page
 # talks to it through `data`; it answers through one-shot triggers, read from
@@ -151,9 +182,42 @@ PROPS_CSS = """
 </style>
 """
 
+# The Other books cell (amendment A5), drawn only on a board that carries the
+# odds feed's rows, so it is injected beside PROPS_CSS only then: a page with
+# the feed off keeps exactly the markup it had before the feed. The ledger
+# (theme.py) is a grid; a board with the cell gets a seventh column, and on a
+# phone the cell wraps to its own line under the row. Small muted text: no
+# colour per book, no lean.
+BOOKS_CSS = """
+<style>
+.bv-ledger.has-books .bv-ledger-head, .bv-ledger.has-books .bv-ledger-row {
+    grid-template-columns: minmax(9rem,1.6fr) minmax(7rem,1.2fr)
+                           4.2rem 4.2rem 4.4rem 3.4rem minmax(8rem,1.3fr); }
+.bv-pl.has-books .bv-pl-head, .bv-pl.has-books .bv-pl-row {
+    grid-template-columns: minmax(6rem,1fr) 3.6rem 3.6rem 3.8rem 3rem minmax(7rem,1.2fr); }
+.bv-pl.has-books.has-actual .bv-pl-head, .bv-pl.has-books.has-actual .bv-pl-row {
+    grid-template-columns: minmax(6rem,1fr) 3.6rem 3.6rem 3.8rem 3rem 3.6rem minmax(7rem,1.2fr); }
+.bv-ledger-row .ob, .bv-pl-row .ob { color: var(--fg-5); font-size: 0.7rem; line-height: 1.3;
+    font-weight: 500; }
+.bv-ledger .ob abbr, .bv-pl .ob abbr { text-decoration: none; border: 0; cursor: help; }
+.bv-ob-legend { color: var(--fg-5); font-size: 0.72rem; margin: 0.1rem 0 0.5rem; }
+@media (max-width: 760px) {
+    .bv-ledger.has-books .bv-ledger-head, .bv-ledger.has-books .bv-ledger-row {
+        grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .bv-pl.has-books .bv-pl-head, .bv-pl.has-books .bv-pl-row {
+        grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .bv-pl.has-books.has-actual .bv-pl-head, .bv-pl.has-books.has-actual .bv-pl-row {
+        grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .bv-ledger .ob, .bv-pl .ob { grid-column: 1 / -1; }
+}
+</style>
+"""
 
-def _inject_css() -> None:
+
+def _inject_css(books: bool = False) -> None:
     st.markdown(PROPS_CSS, unsafe_allow_html=True)
+    if books:
+        st.markdown(BOOKS_CSS, unsafe_allow_html=True)
 
 
 def _notice(body_html: str) -> str:
@@ -208,9 +272,18 @@ NO_LINES_SLATE = ("<b>No PrizePicks lines on this page.</b> Paste a board with "
 NO_LINES_GAME = ("<b>No PrizePicks lines on this page.</b> Paste a board with "
                  "<b>Update lines</b> in the top bar: each player's lines open under his "
                  "team, and the biggest discrepancies appear here.")
+# The same prompts with the odds feed on (design 2.6): the board fills by
+# itself, and the paste box stays the backup.
+NO_LINES_SLATE_FEED = ("<b>No lines on this page yet.</b> On game days the board fills from "
+                       "the odds feed from about 9 AM ET. You can also paste a PrizePicks "
+                       "board with <b>Update lines</b> in the top bar.")
+NO_LINES_GAME_FEED = ("<b>No lines for this game yet.</b> On game days they load from the "
+                      "odds feed from about 9 AM ET, and each player's lines open under his "
+                      "team. You can also paste a PrizePicks board with <b>Update lines</b> "
+                      "in the top bar.")
 
 
-# ── The token ────────────────────────────────────────────────────────────────
+# -- The token ----------------------------------------------------------------
 def board_token() -> str | None:
     """This visitor's board token from ?board=, or None when absent, malformed
     or expired. Validated before it touches the store."""
@@ -227,15 +300,49 @@ def keep_params(token: str | None = None) -> dict:
     return {"board": token} if token else {}
 
 
-# ── One definition of what the board shows ───────────────────────────────────
+# -- One definition of what the board shows -----------------------------------
 @dataclass
 class BoardView:
+    """What the board shows for one ET date (board_view, date_board).
+
+    shown, hidden, thin, void   props.board_rows of the board's rows: with the
+                  feed on, the SELECTED book's rows (layout B), which rank,
+                  count and colour.
+    meta          the ledger's counts, balanced over those four.
+    lines         the visitor's pasted lines for the date.
+    With the feed on (date_board's `feed`), props.feed_board's facts too:
+    context       every other book's row for the same keys (the Other books
+                  cell); empty with the feed off.
+    ref_by_game   {game_id: the selected book} for each game it has lines for.
+    missing_games the game ids, in tip order, the selected book has not posted
+                  while another book (or the paste) has (amendment A6).
+    feed          the feed's plain facts (store.feed_info) plus this board's:
+                  "book" (the selected one), "missing_games", "paste_won",
+                  "feed_won", "paste_times", "pasted" (pasted lines for the
+                  date), "counts" ({"feed": F, "pasted": P} lines on file) and
+                  the paste's own unmatched and ambiguous names. None with the
+                  feed off: then every renderer gives today's HTML.
+    paste_won, feed_won, paste_times   the PrizePicks merge (props.FeedBoard).
+    paste_only    build amendment B17: the feed's lines could not be compared
+                  (props.FeedTables.failed) and the visitor has a paste for the
+                  date, so this is the paste's own board exactly as with the
+                  feed off (feed None); the page puts PASTE_ONLY_NOTE above it
+                  and draws no pills (no book has a board).
+    """
     shown: pd.DataFrame
     hidden: pd.DataFrame
     thin: pd.DataFrame
     void: pd.DataFrame
     meta: dict = field(default_factory=dict)
     lines: pd.DataFrame = field(default_factory=pd.DataFrame)
+    context: pd.DataFrame = field(default_factory=pd.DataFrame)
+    ref_by_game: dict = field(default_factory=dict)
+    missing_games: list = field(default_factory=list)
+    feed: dict | None = None
+    paste_won: int = 0
+    feed_won: int = 0
+    paste_times: dict = field(default_factory=dict)
+    paste_only: bool = False
 
     @property
     def matched(self) -> int:
@@ -289,7 +396,8 @@ def _failed_view(token, date) -> BoardView:
     return BoardView(_empty(), _empty(), _empty(), _empty(), {"posted": posted, "error": True})
 
 
-def date_board(token, date, projections: pd.DataFrame | None, params, roster=None) -> BoardView:
+def date_board(token, date, projections: pd.DataFrame | None, params, roster=None,
+               feed=None, feed_info=None, selected: str = "prizepicks") -> BoardView:
     """board_view for one ET date with the simulator provider. The provider is
     simprov.provider_for(projections, params), the one the Game tables' medians
     read, so a line's model value and the table's median come from one
@@ -297,7 +405,18 @@ def date_board(token, date, projections: pd.DataFrame | None, params, roster=Non
 
     `params` None (the simulator parameters did not load) is the failed view
     at once: a provider built on it prices nothing, and every line would read
-    as "no projection: internal error"."""
+    as "no projection: internal error".
+
+    `feed` is the odds feed's compared tables for the date (props.FeedTables,
+    store.feed_tables) and `feed_info` its plain facts (store.feed_info);
+    `selected` is the pills' book (selected_book). With feed=None this is the
+    function it was before the feed. With a feed, the paste is compared as
+    today and props.feed_board makes the board of the selected book (layout B:
+    the paste merged into PrizePicks' rows, newest wins), all inside one try,
+    and the view carries the feed's context and facts (BoardView)."""
+    if feed is not None:
+        return _feed_board_view(token, date, projections, params, roster, feed, feed_info,
+                                selected)
     if params is None:
         logger.warning("date_board: no simulator parameters")
         return _failed_view(token, date)
@@ -307,6 +426,210 @@ def date_board(token, date, projections: pd.DataFrame | None, params, roster=Non
         logger.warning("date_board: no provider (%s: %s)", type(e).__name__, e)
         return _failed_view(token, date)
     return board_view(token, date, provider, projections, roster, void_ids(projections))
+
+
+def _book_of(selected) -> str:
+    """A BOOK_ORDER key: the pick, or PrizePicks for anything else."""
+    return selected if isinstance(selected, str) and selected in props.BOOK_ORDER \
+        else props.PASTE_BOOK
+
+
+def _book_lines(feed, book: str) -> int:
+    """The feed lines `book` posted for the date (every game): the tables'
+    metas count each one, compared or not."""
+    metas = feed.metas if isinstance(feed, props.FeedTables) else {}
+    return sum(int(m.get("posted", 0) or 0) for (b, _gid), m in metas.items()
+               if b == book and isinstance(m, dict))
+
+
+def _failed_feed_view(token, date, feed, facts: dict) -> BoardView:
+    """The explained empty board with the feed on: render_board says the
+    comparison could not be built, and whose lines are still kept (the
+    visitor's pasted ones, or the odds feed's in memory). Tables that could
+    not be built at all (props.FeedTables.failed) compared no book, so the
+    lines counted are every line the feed holds for the date (the facts'
+    "lines"), and the board explains itself whichever book is picked."""
+    try:
+        pasted = len(props.lines_for_date(props.get_board(token) if token else None, date))
+    except Exception:  # noqa: BLE001
+        pasted = 0
+    book = facts.get("book")
+    paste_part = pasted if book == props.PASTE_BOOK else 0
+    feed_part = (int(facts.get("lines", 0) or 0) if getattr(feed, "failed", False)
+                 else _book_lines(feed, book))
+    facts.update(missing_games=[], paste_won=0, feed_won=0, paste_times={}, pasted=pasted,
+                 counts={"feed": feed_part, "pasted": paste_part}, paste_unmatched=[],
+                 paste_ambiguous=[])
+    return BoardView(_empty(), _empty(), _empty(), _empty(),
+                     {"posted": feed_part + paste_part, "error": True}, feed=facts)
+
+
+# Build amendment B17: above the paste's own board when the feed's lines could
+# not be compared (one bv-note, PASTE_ONLY_NOTE).
+PASTE_ONLY_NOTE = ("The odds feed's lines could not be compared just now, so your pasted lines "
+                   "are shown.")
+
+
+def paste_only_note_html() -> str:
+    """B17's one note, drawn by the page above a paste_only board."""
+    return _note(PASTE_ONLY_NOTE)
+
+
+def _paste_board(token, date, projections, params, roster) -> BoardView | None:
+    """Build amendment B17: tables that could not be compared, and a paste
+    for the date. The paste's own board, exactly as with the feed off
+    (date_board with no feed), marked paste_only. None with no pasted line
+    for the date, or when the paste's own board could not be built either:
+    the failure notice as built explains it then."""
+    if not token:
+        return None
+    try:
+        if not len(props.lines_for_date(props.get_board(token), date)):
+            return None
+    except Exception:  # noqa: BLE001 - no paste to show: the failure notice as built
+        return None
+    view = date_board(token, date, projections, params, roster)
+    if view.meta.get("error"):
+        return None
+    view.paste_only = True
+    return view
+
+
+def _feed_board_view(token, date, projections, params, roster, feed, feed_info,
+                     selected) -> BoardView:
+    """date_board with the odds feed on (layout B): the visitor's paste
+    compared as today, then props.feed_board for the selected book, and
+    board_rows on its reference rows, all inside one try. Tables marked
+    failed (store.feed_tables could not compare the feed's lines) are the
+    paste's own board when the visitor has a paste for the date (B17), else
+    the explained empty board at once, as missing simulator parameters
+    are."""
+    book = _book_of(selected)
+    facts = dict(feed_info) if isinstance(feed_info, dict) else {}
+    facts["book"] = book
+    if params is None:
+        logger.warning("date_board: no simulator parameters")
+        return _failed_feed_view(token, date, feed, facts)
+    if getattr(feed, "failed", False):
+        pasted = _paste_board(token, date, projections, params, roster)
+        return pasted if pasted is not None else _failed_feed_view(token, date, feed, facts)
+    lines = pd.DataFrame()
+    try:
+        provider = simprov.provider_for(projections, params)
+        board = props.get_board(token) if token else None
+        lines = props.lines_for_date(board, date)
+        table, pmeta = props.compare(lines, provider, projections, roster)
+        info = props.board_info(token) if token else None
+        fb = props.feed_board(feed, table, pmeta, info.get("pasted_utc") if info else None,
+                              selected=book)
+        shown, hidden, thin, void = props.board_rows(fb.reference, void_ids(projections))
+    except Exception as e:  # noqa: BLE001 - an explained empty board, never a traceback
+        logger.warning("date_board: the feed board failed (%s)", type(e).__name__)
+        return _failed_feed_view(token, date, feed, facts)
+    meta = dict(fb.meta)
+    on_file = int(meta.get("posted", 0) or 0)
+    mine = book == props.PASTE_BOOK
+    # The pasted lines still on file: the paste's own, less the keys the
+    # feed's newer line won (props.feed_board's merge, M5).
+    from_paste = min(on_file, max(0, int(pmeta.get("posted", 0) or 0) - int(fb.feed_won))) \
+        if mine else 0
+    facts.update(missing_games=list(fb.missing_games), paste_won=int(fb.paste_won),
+                 feed_won=int(fb.feed_won), paste_times=dict(fb.paste_times),
+                 pasted=int(len(lines)), counts={"feed": on_file - from_paste, "pasted": from_paste},
+                 paste_unmatched=list(pmeta.get("unmatched_names") or []) if mine else [],
+                 paste_ambiguous=list(pmeta.get("ambiguous_names") or []) if mine else [])
+    return BoardView(shown, hidden, thin, void, meta, lines, context=fb.context,
+                     ref_by_game=dict(fb.ref_by_game), missing_games=list(fb.missing_games),
+                     feed=facts, paste_won=int(fb.paste_won), feed_won=int(fb.feed_won),
+                     paste_times=dict(fb.paste_times))
+
+
+# -- The book pills (layout B, amendment A3) ----------------------------------
+# One row of pills picks the book whose lines are the board's rows. Its value
+# lives in st.session_state[BOOK_KEY], synced with ?book= by the site's own
+# URL pattern (app.py's date, _player_search), never by Streamlit's `bind=`:
+#   seed_book_from_url, at the top of the page BEFORE the board is computed
+#                 (the cards come before the pills and must already count the
+#                 picked book): ?book= is read only when the URL CHANGED since
+#                 the last run (a keyed widget ignores a default after its
+#                 first render, and a sync on disagreement would throw away a
+#                 pick on the rerun before the URL catches up);
+#   render_book_pills, where the page draws them, outside every fragment (a
+#                 pick is a full rerun): its on_change writes ?book= and the
+#                 seen value in the same pass, as _on_pick does;
+#   selected_book, what the page hands date_board and store.view_params.
+# The options never change (a keyed widget's id hashes them), no default= is
+# passed (the value is always seeded first), and a junk ?book= is dropped,
+# never echoed. With the feed off nothing here touches the page or the URL.
+def _url_book() -> str | None:
+    raw = st.query_params.get(BOOK_PARAM)
+    return raw if isinstance(raw, str) else None
+
+
+def seed_book_from_url(feed_on: bool) -> None:
+    """Reconcile ?book= into st.session_state[BOOK_KEY]. Call at the top of
+    the page, before the board is computed. With the feed off it does
+    nothing at all.
+
+    When ?book= differs from the value last seen (BOOK_SEEN): the URL's book
+    when it is a props.BOOK_ORDER key, else PrizePicks, and a junk value is
+    taken off the URL. When the key is missing for any other reason (a new
+    session, or Streamlit dropped the state of pills a run did not draw): the
+    URL's book when it is valid, else PrizePicks."""
+    if not feed_on:
+        return
+    raw = _url_book()
+    valid = raw if raw in props.BOOK_ORDER else None
+    if raw != st.session_state.get(BOOK_SEEN):
+        st.session_state[BOOK_KEY] = valid or props.PASTE_BOOK
+        if raw is not None and valid is None:
+            del st.query_params[BOOK_PARAM]          # junk: dropped, never echoed
+            raw = None
+        st.session_state[BOOK_SEEN] = raw
+    if st.session_state.get(BOOK_KEY) not in props.BOOK_ORDER:
+        st.session_state[BOOK_KEY] = valid or props.PASTE_BOOK
+
+
+def _on_book() -> None:
+    """The pills' on_change: ?book= follows the pick (no param for
+    PrizePicks), and the seen value is updated in the same pass."""
+    book = st.session_state.get(BOOK_KEY)
+    if book in props.BOOK_ORDER and book != props.PASTE_BOOK:
+        st.query_params[BOOK_PARAM] = book
+    elif BOOK_PARAM in st.query_params:
+        del st.query_params[BOOK_PARAM]
+    st.session_state[BOOK_SEEN] = _url_book()
+
+
+def render_book_pills() -> str:
+    """The book pills (amendment A3), in props.BOOK_ORDER, PrizePicks first.
+    The page draws them only with the feed on and feed rows for the date (or
+    the game), outside every fragment. Returns the picked book."""
+    if st.session_state.get(BOOK_KEY) not in props.BOOK_ORDER:
+        st.session_state[BOOK_KEY] = props.PASTE_BOOK      # seeded, never a default=
+    picked = st.pills("Lines from", list(props.BOOK_ORDER), selection_mode="single",
+                      required=True, format_func=props.BOOK_TITLE.get, key=BOOK_KEY,
+                      label_visibility="collapsed", on_change=_on_book)
+    return _book_of(picked)
+
+
+def selected_book(feed_on: bool) -> str:
+    """The picked book, validated: st.session_state[BOOK_KEY] when the feed is
+    on and it is a props.BOOK_ORDER key, else PrizePicks."""
+    if not feed_on:
+        return props.PASTE_BOOK
+    return _book_of(st.session_state.get(BOOK_KEY))
+
+
+def feed_games(feed) -> set[str]:
+    """The game ids the odds feed's tables (props.FeedTables) hold lines for,
+    any book: the pills show only on a date, or a game, in this set
+    (amendment A3). Empty for anything else, so with the feed off, and for
+    tables that could not be built (failed: no book has a board to pick)."""
+    if not isinstance(feed, props.FeedTables) or feed.failed:
+        return set()
+    return {str(gid) for (_book, gid), m in feed.metas.items()
+            if isinstance(m, dict) and int(m.get("posted", 0) or 0) > 0}
 
 
 def line_counts_by_game(shown: pd.DataFrame) -> dict:
@@ -328,7 +651,7 @@ def rows_by_person(shown: pd.DataFrame) -> dict:
     return out
 
 
-# ── The paste flow ───────────────────────────────────────────────────────────
+# -- The paste flow -----------------------------------------------------------
 def ingest(text, token, roster, schedule, now=None, dates=None) -> tuple[str | None, dict]:
     """Parse, prepare and add a paste to the visitor's board. Pure apart from
     the in-process store, so it is testable without a Streamlit runtime.
@@ -672,13 +995,14 @@ def report_messages(report: dict | None) -> list[tuple[str, str]]:
 
 
 def render_update_lines_popover(view_date, schedule, roster, now=None, dates=None,
-                                in_nav_container: bool = True) -> str | None:
+                                in_nav_container: bool = True, feed_on: bool = False) -> str | None:
     """The nav bar's 'Update lines' popover. Call right after render_nav.
     Returns the visitor's board token (or None) for the page's minted URLs.
 
     in_nav_container=False when the page has already opened the keyed
     `bv_nav_actions` container itself (to put Share beside it): opening a keyed
-    container twice is a duplicate-key error."""
+    container twice is a duplicate-key error. `feed_on`: the odds feed is on,
+    and the caption says that the paste is the backup (design 2.6)."""
     raw = st.query_params.get("board")
     if raw and board_token() is None:
         # A token that no longer resolves: expired, or the server restarted.
@@ -687,10 +1011,10 @@ def render_update_lines_popover(view_date, schedule, roster, now=None, dates=Non
     if in_nav_container:
         with st.container(key="bv_nav_actions"):
             with st.popover("Update lines"):
-                _paste_panel(view_date, schedule, roster, now, dates)
+                _paste_panel(view_date, schedule, roster, now, dates, feed_on)
     else:
         with st.popover("Update lines"):
-            _paste_panel(view_date, schedule, roster, now, dates)
+            _paste_panel(view_date, schedule, roster, now, dates, feed_on)
     token = board_token()
     placed = st.session_state.pop(TOAST_KEY, None)
     if placed:
@@ -816,7 +1140,17 @@ def board_keeper(roster) -> str | None:
     return _keeper_answers(res, roster, token)
 
 
-def _paste_panel(view_date, schedule, roster, now, dates) -> None:
+# With the odds feed on, the paste caption says so before its last sentence
+# (design 2.6): the board's PrizePicks lines come from the licensed feed, and
+# the paste merges in by the newest-line rule (props.feed_board, M5), under
+# which a typed pick, a Demon or a Goblin of the visitor's always wins (build
+# amendment B28: the caption names all three, as the merge line does).
+FEED_CAPTION = ("PrizePicks lines on the board come from a licensed odds feed; pasting is the "
+                "backup. For the same player and stat, the feed's line is shown unless yours is "
+                f"{PASTE_WINNERS}. ")
+
+
+def _paste_panel(view_date, schedule, roster, now, dates, feed_on: bool = False) -> None:
     if st.session_state.pop(EXPIRED_KEY, False):
         st.info("Your earlier lines are no longer on this link (the site keeps a pasted "
                 "board for about 18 hours, and a restart clears it). If this browser "
@@ -870,12 +1204,12 @@ def _paste_panel(view_date, schedule, roster, now, dates) -> None:
         "reload or return, until the day of their games has passed. They are never "
         "saved on our server and never enter any accuracy record, but anyone you send "
         "the link to sees them. Clear all removes them from your link and from this "
-        "browser. Nothing "
+        "browser. " + (FEED_CAPTION if feed_on else "") + "Nothing "
         "here fetches from PrizePicks: their API blocks server requests and their "
         "terms prohibit automated access.")
 
 
-# ── Cells ────────────────────────────────────────────────────────────────────
+# -- Cells --------------------------------------------------------------------
 _TIER_CLASS = {"strong": "t-strong", "moderate": "t-mod", "weak": "t-weak",
                "none": "t-none", "negative": "t-neg", "unmeasured": "t-unk"}
 _SRC_BADGE = {
@@ -918,13 +1252,39 @@ def _odds_badge(odds_type) -> str:
     return ""
 
 
-def _sides_tag(sides) -> str:
+def _row_book(r) -> str:
+    """The book of a row: its own `book`, else PrizePicks (a pasted line, and
+    every row before the feed, is a PrizePicks line)."""
+    b = r.get("book") if hasattr(r, "get") else None
+    return b.strip().lower() if isinstance(b, str) and b.strip() else props.PASTE_BOOK
+
+
+def _is_dfs(r) -> bool:
+    return _row_book(r) in props.DFS_BOOKS
+
+
+def _side_word(r, side: str) -> str:
+    """The row's own word for a side (design 2.6 m8, amendment A4): More or
+    Less on a pick'em row (PrizePicks, Underdog), Over or Under on a
+    sportsbook row. The stored lean stays More, Less or Even."""
+    more, less = props.side_words(_row_book(r))
+    return more if side == "More" else less if side == "Less" else side
+
+
+def _lean_text(r) -> str:
+    """The Lean cell's word, escaped."""
+    lean = r.get("lean")
+    return esc(_side_word(r, lean) if lean in ("More", "Less") else lean)
+
+
+def _sides_tag(sides, book=None) -> str:
+    """'More only' / 'Less only' on a pick'em row, 'Over only' / 'Under only'
+    on a sportsbook row (`book`: the row's book; None is PrizePicks)."""
     s = str(sides or "both").lower()
-    if s == "more":
-        return '<span class="bv-pp-tag" title="This line offers More only">More only</span>'
-    if s == "less":
-        return '<span class="bv-pp-tag" title="This line offers Less only">Less only</span>'
-    return ""
+    if s not in ("more", "less"):
+        return ""
+    word = _side_word({"book": book}, "More" if s == "more" else "Less")
+    return f'<span class="bv-pp-tag" title="This line offers {word} only">{word} only</span>'
 
 
 def _pick_tag(r) -> str:
@@ -948,8 +1308,9 @@ def _void_tag(r) -> str:
     half and does not return. Nothing measures how often by role yet (an exit
     model needs play-by-play, v1.1), so a More lean with props' `void_note`
     (a bench role) gets the words and never a number. A provider that does
-    carry a measured `void_risk` (the hook for that model) gets its number."""
-    if r.get("lean") != "More":
+    carry a measured `void_risk` (the hook for that model) gets its number.
+    PrizePicks rows only: Reboot is PrizePicks' rule (design 2.6)."""
+    if r.get("lean") != "More" or _row_book(r) != props.PASTE_BOOK:
         return ""
     if _finite(r.get("void_risk")):
         pct = round(100 * float(r["void_risk"]))
@@ -970,12 +1331,16 @@ def _stat_cell(r) -> str:
     label = props.STAT_LABEL.get(stat) or str(r.get("stat_label") or stat or "")
     tip = ""
     if r.get("tie_possible") and _finite(r.get("p_push")) and _finite(r.get("line")):
-        text = ("Chance of landing exactly on %g: %d in 100. That lowers the payout "
-                "tier; it is not a push." % (float(r["line"]), round(100 * float(r["p_push"]))))
+        # A pick'em book lowers the payout tier on an exact landing; on a
+        # sportsbook line the book's own rule decides (RC G11, UNVERIFIED).
+        rule = ("That lowers the payout tier; it is not a push." if _is_dfs(r)
+                else "On a sportsbook line the book's own rule decides an exact landing.")
+        text = ("Chance of landing exactly on %g: %d in 100. %s"
+                % (float(r["line"]), round(100 * float(r["p_push"])), rule))
         tip = f' title="{esc(text)}"'
     return (f'<span class="st"{tip}>{esc(label)}'
             f'{_tier_badge(r.get("tier"), r.get("tier_edge"))}'
-            f'{_odds_badge(r.get("odds_type"))}{_sides_tag(r.get("sides"))}'
+            f'{_odds_badge(r.get("odds_type"))}{_sides_tag(r.get("sides"), _row_book(r))}'
             f'{_SRC_BADGE.get(str(r.get("source") or ""), "")}{_void_tag(r)}'
             f'{_pick_tag(r)}</span>')
 
@@ -1034,9 +1399,165 @@ def _matchup(r) -> str:
     return esc(team or "")
 
 
-def ledger_html(rows: pd.DataFrame, more: dict | None = None) -> str:
-    """The board's ledger as HTML. Every value escaped."""
+def _line_head(feed: dict | None) -> str:
+    """The Line column's header: "Line", or with the feed's rows the picked
+    book's code ("PP line", "DK line": amendment A4)."""
+    if feed is None:
+        return "Line"
+    return f"{props.BOOK_CODE[_book_of(feed.get('book'))]} line"
+
+
+# -- The Other books cell (amendment A5) ---------------------------------------
+def _day_key(v) -> str | None:
+    """A game date as 'YYYY-MM-DD' (an ISO string, a date or a Timestamp)."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()[:10]
+    return s if len(s) == 10 else None
+
+
+def _pid(v) -> int | None:
+    try:
+        return None if v is None or pd.isna(v) else int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _key_of(r) -> tuple | None:
+    """(game date, person_id, stat): the board's key for a player's line
+    (props.feed_board's merge key)."""
+    day, pid, stat = _day_key(r.get("game_date")), _pid(r.get("person_id")), r.get("stat")
+    if day is None or pid is None or not isinstance(stat, str):
+        return None
+    return day, pid, stat
+
+
+def _stamp_of(v) -> pd.Timestamp | None:
+    """An aware UTC Timestamp, or None for a missing, naive or unreadable one."""
+    if v is None:
+        return None
+    try:
+        ts = pd.Timestamp(v)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(ts) or ts.tzinfo is None:
+        return None
+    return ts.tz_convert("UTC")
+
+
+def _as_day(v):
+    """An ET calendar date from a date or an ISO date string, else None."""
+    if v is None:
+        return None
+    try:
+        return pd.Timestamp(str(v)[:10]).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _clock_text(t, today, zone: bool = True) -> str:
+    """'9:02 AM ET' ('9:02 AM' without the zone) from a stamp, with ', Mar 11'
+    when its ET date is not `today` (store._stamp's rule): text built from
+    the stamps the page passes, never from a clock read here (m1)."""
+    ts = _stamp_of(t)
+    if ts is None:
+        return ""
+    et = to_et(ts.to_pydatetime())
+    text = fmt_tip(et)
+    if not zone and text.endswith(" ET"):
+        text = text[:-3]
+    day = _as_day(today)
+    return text + ("" if day is not None and et.date() == day else f", {et.strftime('%b')} {et.day}")
+
+
+class _OtherBooks:
+    """Every other book's line for each board key (BoardView.context), and
+    each game's latest pull (the feed's per_game facts, else the newest
+    fetched_at among the board's feed rows of that game)."""
+
+    def __init__(self, rows, context, feed: dict | None):
+        self.by_key: dict = {}
+        latest: dict = {}
+        for frame in (context, rows):
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                continue
+            for rec in frame.to_dict(orient="records"):
+                at = _stamp_of(rec.get("fetched_at"))
+                gid = rec.get("game_id")
+                if at is not None and isinstance(gid, str) and (gid not in latest or at > latest[gid]):
+                    latest[gid] = at
+                if frame is context:
+                    key, book = _key_of(rec), rec.get("book")
+                    if key is not None and book in props.BOOK_ORDER:
+                        self.by_key.setdefault(key, {}).setdefault(book, rec)
+        per_game = (feed or {}).get("per_game") or {}
+        for gid, facts in per_game.items():
+            at = _stamp_of((facts or {}).get("asof")) if isinstance(facts, dict) else None
+            if at is not None:
+                latest[str(gid)] = at
+        self.latest = latest
+        self.today = (feed or {}).get("today")
+
+    def cell(self, r) -> str:
+        """The Other books cell of one row: the other books' lines for the
+        same game, player and stat, in BOOK_ORDER, each as its code (with the
+        book's name in an <abbr> title) and its number, and the book's own
+        time when its line is over a minute older than the game's latest
+        pull. A PrizePicks line from the visitor's paste (one that won the
+        merge, or that only the paste has) shows its badge word in place of
+        a time: "(typed)", "(Demon)", "(Goblin)" or "(pasted)" (build
+        amendment B28). Nothing else: no lean, colour, arrow, gap or price.
+        The sentinel, as a whole node, when no other book has a line."""
+        found = self.by_key.get(_key_of(r)) or {}
+        own = _row_book(r)
+        latest = self.latest.get(r.get("game_id"))
+        parts = []
+        for book in props.BOOK_ORDER:
+            rec = found.get(book)
+            if book == own or rec is None or not _finite(rec.get("line")):
+                continue
+            number = f"{float(rec['line']):g}"
+            text = (f'<abbr title="{esc(props.BOOK_TITLE[book])}">{esc(props.BOOK_CODE[book])}'
+                    f'</abbr> {esc(number)}')
+            at = _stamp_of(rec.get("fetched_at"))
+            if book == props.PASTE_BOOK and rec.get("origin") == "pasted":
+                text += f" ({esc(_paste_word(rec))})"
+            elif at is not None and latest is not None and latest - at > OTHER_BOOKS_AGE:
+                text += f" ({esc(_clock_text(at, self.today, zone=False))})"
+            parts.append(text)
+        return f'<span class="ob">{", ".join(parts) if parts else SENTINEL}</span>'
+
+
+def _paste_word(rec) -> str:
+    """The badge word of a pasted PrizePicks line in the Other books cell
+    (B28), in the order the merge reads them (props._paste_wins): a typed
+    pick, then a Demon or a Goblin, else a plain pasted line."""
+    if props.pick_of(rec.get("pick")) is not None:
+        return "typed"
+    kind = str(rec.get("odds_type") or "").lower()
+    if kind in ("demon", "goblin"):
+        return kind.capitalize()
+    return "pasted"
+
+
+def books_legend_html() -> str:
+    """The one legend line under a board with the Other books cell."""
+    names = ", ".join(f"{esc(props.BOOK_CODE[b])} {esc(props.BOOK_TITLE[b])}" for b in props.BOOK_ORDER)
+    return f'<div class="bv-ob-legend">{names}.</div>'
+
+
+def ledger_html(rows: pd.DataFrame, more: dict | None = None, context=None,
+                feed: dict | None = None) -> str:
+    """The board's ledger as HTML. Every value escaped. With the odds feed
+    (`feed`, BoardView.feed) the Line header names the picked book and an
+    Other books cell follows Lean (`context`, BoardView.context)."""
     more = more or {}
+    others = _OtherBooks(rows, context, feed) if feed is not None else None
     out = []
     for r in rows.to_dict(orient="records"):
         n_more = int(more.get(int(r["person_id"]), 0)) if r.get("person_id") is not None else 0
@@ -1045,19 +1566,24 @@ def ledger_html(rows: pd.DataFrame, more: dict | None = None) -> str:
             '<div class="bv-ledger-row">'
             f'<span class="nm">{esc(r.get("player"))}<i>{_matchup(r)}{more_html}</i></span>'
             f"{_stat_cell(r)}{_fmt_model(r)}{_fmt_line(r)}{_fmt_gap(r)}"
-            f'<span class="lean {_lean_cls(r.get("lean"))}">{esc(r.get("lean"))}</span>'
-            "</div>")
+            f'<span class="lean {_lean_cls(r.get("lean"))}">{_lean_text(r)}</span>'
+            + (others.cell(r) if others is not None else "") + "</div>")
     head = ('<div class="bv-ledger-head"><span class="nm">Player</span>'
             '<span class="st">Stat</span><span class="num">Model</span>'
-            '<span class="num">Line</span><span class="num">Gap</span>'
-            '<span class="lean">Lean</span></div>')
-    return f'<div class="bv-ledger">{head}{"".join(out)}</div>'
+            f'<span class="num">{esc(_line_head(feed))}</span><span class="num">Gap</span>'
+            '<span class="lean">Lean</span>'
+            + ('<span class="ob">Other books</span>' if others is not None else "") + "</div>")
+    cls = "bv-ledger has-books" if others is not None else "bv-ledger"
+    return f'<div class="{cls}">{head}{"".join(out)}</div>'
 
 
 # What happened to a line, after tip (store.line_actuals fills `actual` and
 # `settle`). PrizePicks voids a pick on a player who does not play; a value on
 # the line is neither a win nor a loss, and is never called a push.
 VOID_TEXT = "Did not play, pick voided"
+# On an Underdog or a sportsbook row, whose own rule decides the pick or the
+# bet (design 2.6; build amendments B26 and B30), the note claims no void.
+DNP_TEXT = "Did not play"
 EXACT_TEXT = "landed on the line"
 
 
@@ -1080,40 +1606,56 @@ def _fmt_actual(r) -> str:
 
 
 def _settle_note(r) -> str:
-    """The full-width note under a settled line, or ''."""
+    """The full-width note under a settled line, or ''. PrizePicks voids a
+    pick on a player who did not play: VOID_TEXT on a PrizePicks row, and
+    on a row with no book (a pasted line, as before the feed, so the HTML
+    with the feed off is unchanged). Every other book's own rule decides
+    what happens to a pick or a bet on him (Underdog's: build amendments
+    B26 and B30; a sportsbook's: design 2.6), so on its rows the note only
+    says he did not play (DNP_TEXT)."""
     s = r.get("settle")
     if s == "void":
-        return f'<div class="bv-pl-note">{VOID_TEXT}</div>'
+        void = _row_book(r) == props.PASTE_BOOK          # PrizePicks, or no book at all
+        return f'<div class="bv-pl-note">{VOID_TEXT if void else DNP_TEXT}</div>'
     if s == "exact":
         return f'<div class="bv-pl-note">{esc(_actual_text(r))}: {EXACT_TEXT}</div>'
     return ""
 
 
-def render_player_lines(rows) -> str:
+def render_player_lines(rows, context=None, feed: dict | None = None) -> str:
     """One player's SHOWN lines, for his expandable row on the game page.
     `rows` is a list of row dicts (rows_by_person) or a DataFrame. After tip
     (rows carrying `actual`, from store.line_actuals) an Actual column, and
-    a note under a settled line: VOID_TEXT for a player who did not play,
-    EXACT_TEXT for a value on the line."""
+    a note under a settled line: for a player who did not play VOID_TEXT on
+    a PrizePicks row, DNP_TEXT on any other book's (build amendment B30),
+    EXACT_TEXT for a value on the line. With the odds feed (`feed`,
+    BoardView.feed) the Line header names the picked book and each row ends
+    with its Other books cell (`context`, BoardView.context): that is how
+    the Game page lists all five books per player (amendment A7)."""
     if rows is None:
         return ""
     recs = rows.to_dict(orient="records") if isinstance(rows, pd.DataFrame) else list(rows)
     if not recs:
         return ""
     after_tip = any("actual" in r for r in recs)
+    others = _OtherBooks(pd.DataFrame(recs), context, feed) if feed is not None else None
     body = []
     for r in recs:
         body.append(
             '<div class="bv-pl-row">'
             f"{_stat_cell(r)}{_fmt_model(r)}{_fmt_line(r)}{_fmt_gap(r)}"
-            f'<span class="lean {_lean_cls(r.get("lean"))}">{esc(r.get("lean"))}</span>'
-            + (_fmt_actual(r) if after_tip else "") + "</div>" + _settle_note(r))
+            f'<span class="lean {_lean_cls(r.get("lean"))}">{_lean_text(r)}</span>'
+            + (_fmt_actual(r) if after_tip else "")
+            + (others.cell(r) if others is not None else "") + "</div>" + _settle_note(r))
     final = any(r.get("final") for r in recs)
     act_head = (f'<span class="num">{"Final" if final else "So far"}</span>' if after_tip else "")
     head = ('<div class="bv-pl-head"><span class="st">Stat</span>'
-            '<span class="num">Model</span><span class="num">Line</span>'
-            f'<span class="num">Gap</span><span class="lean">Lean</span>{act_head}</div>')
+            f'<span class="num">Model</span><span class="num">{esc(_line_head(feed))}</span>'
+            f'<span class="num">Gap</span><span class="lean">Lean</span>{act_head}'
+            + ('<span class="ob">Other books</span>' if others is not None else "") + "</div>")
     cls = "bv-pl has-actual" if after_tip else "bv-pl"
+    if others is not None:
+        cls += " has-books"
     return f'<div class="{cls}">{head}{"".join(body)}</div>'
 
 
@@ -1128,7 +1670,7 @@ def top_per_player(table: pd.DataFrame, n: int = TOP_N) -> tuple[pd.DataFrame, d
     return first.reset_index(drop=True), more
 
 
-# ── Notes ────────────────────────────────────────────────────────────────────
+# -- Notes --------------------------------------------------------------------
 def count_header(shown, hidden, thin, void) -> str:
     """'N of M lines shown (H hidden / T thin / V void)'."""
     n = [len(x) if x is not None else 0 for x in (shown, hidden, thin, void)]
@@ -1136,11 +1678,20 @@ def count_header(shown, hidden, thin, void) -> str:
             f"{n[3]} void)")
 
 
+def _pp_rows(table):
+    """The PrizePicks rows of a board table (a row with no book is one)."""
+    if table is None or not len(table) or "book" not in table.columns:
+        return table
+    return table[[_row_book({"book": b}) == props.PASTE_BOOK for b in table["book"]]]
+
+
 def odds_footnote(table) -> str:
     """Shown only when a Demon or Goblin is on screen. Dated, and honest that
-    the Less rollout has not been confirmed for the NBA."""
+    the Less rollout has not been confirmed for the NBA. PrizePicks rows only
+    (the odds feed carries no Demons or Goblins)."""
     if table is None or "odds_type" not in getattr(table, "columns", []):
         return ""
+    table = _pp_rows(table)
     kinds = {str(o).lower() for o in table["odds_type"]} & {"demon", "goblin"}
     if not kinds:
         return ""
@@ -1193,8 +1744,101 @@ def _hidden_why(r) -> str:
     return "the model has no lean on it"
 
 
-def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
-    """Every explanation the board owes the reader, as escaped HTML blocks."""
+def _names(items, others: bool = True) -> str:
+    """At most 12 names, escaped, then ', and others' (when `others`)."""
+    items = list(items)
+    more = ", and others" if others and len(items) > 12 else ""
+    return ", ".join(esc(x) for x in items[:12]) + more
+
+
+def _ledger_line(led: dict, meta: dict, parts: list, feed: dict | None) -> str:
+    """The ledger's first line. With the odds feed: the picked book's lines
+    on file and where they came from (design 2.6, m8)."""
+    when = paste_time_text(meta)
+    stamp = f"{' ' + esc(when) if when else ''}"
+    if feed is None:
+        return (f'<div class="bv-pp-ledger-note">{led["posted"]} lines pasted for this '
+                f'date: {", ".join(parts)}.{stamp}</div>')
+    counts = feed.get("counts") or {}
+    f_n, p_n = int(counts.get("feed", 0) or 0), int(counts.get("pasted", 0) or 0)
+    src = (f" ({f_n} from the odds feed, {p_n} pasted)" if f_n and p_n
+           else " (from the odds feed)" if f_n else " (pasted)" if p_n else "")
+    title = props.BOOK_TITLE[_book_of(feed.get("book"))]
+    return (f'<div class="bv-pp-ledger-note">{esc(_plural(led["posted"], title + " line"))} on '
+            f'file for this date{src}: {", ".join(parts)}.{stamp}</div>')
+
+
+# The void note's rule, per kind of book (design 2.6; build amendment B26):
+# PrizePicks removes the pick (today's sentence), Underdog's own rule decides
+# (it is not taken to follow PrizePicks), and so does a sportsbook's.
+_VOID_RULES = (
+    ("prizepicks", "listed out or marked out. PrizePicks removes a pick on a player who does not "
+                   "play a second."),
+    ("underdog", "listed out or marked out; Underdog's own rule decides what happens to a pick "
+                 "on a player who does not play."),
+    ("sportsbook", "listed out or marked out; a sportsbook's own rule decides what happens to a "
+                   "bet on a player who does not play."),
+)
+
+
+def _void_kind(r) -> str:
+    book = _row_book(r)
+    return book if book in props.DFS_BOOKS else "sportsbook"
+
+
+def _void_note(void) -> list[str]:
+    """The void note, one per kind of book on screen: PrizePicks removes a
+    pick on a player who does not play; Underdog's own rule decides what
+    happens to a pick on him (build amendment B26), and a sportsbook's own
+    rule what happens to a bet on him (design 2.6)."""
+    if void is None or not len(void):
+        return []
+    recs = void.to_dict(orient="records")
+    out = []
+    for kind, rule in _VOID_RULES:
+        mine = [r for r in recs if _void_kind(r) == kind]
+        if not mine:
+            continue
+        names = sorted({str(r.get("player")) for r in mine})
+        out.append(_note(f"<b>{_plural(len(mine), 'line')} void:</b> "
+                         f"{esc(', '.join(names[:6]))} {rule}"))
+    return out
+
+
+def breakeven_text(shown, book=None) -> str:
+    """The break-even sentence for the books on screen (design 7). PrizePicks'
+    Power Play range alone is today's wording; Underdog's payouts are not
+    modelled; a sportsbook side gets the -110 example. No price is shown
+    for any book (amendment A1). With no row shown, the board's own book
+    (`book`, the picked one: every row of a feed board is that book's) says
+    which, so a sportsbook board whose lines are all withheld never gets
+    PrizePicks' range (build 4's review, L3-8); with no book either (the
+    feed off), today's wording."""
+    books = {_row_book(r) for r in shown.to_dict(orient="records")} \
+        if shown is not None and len(shown) else set()
+    if not books and book in props.BOOK_ORDER:
+        books = {book}
+    pp = (f"a leg has to hit {props.BREAKEVEN_LO:.1f}% to {props.BREAKEVEN_HI:.1f}% just to "
+          "break even.")
+    if books <= {props.PASTE_BOOK}:
+        return f": {pp}"
+    said = []
+    if props.PASTE_BOOK in books:
+        said.append(f"A PrizePicks {pp[2:]}")
+    if "underdog" in books:
+        said.append("Underdog's payouts are not modelled here, so no break-even is shown for "
+                    "its lines.")
+    if books - props.DFS_BOOKS:
+        even = 100 * props.american_breakeven(-110)
+        said.append(f"A sportsbook side at -110 needs about {even:.1f}% to break even.")
+    return ". " + " ".join(said)
+
+
+def notes_html(meta: dict, shown, hidden, thin, void, feed: dict | None = None) -> list[str]:
+    """Every explanation the board owes the reader, as escaped HTML blocks.
+    With the odds feed (`feed`, BoardView.feed) the words follow where each
+    line came from (design 2.6, m8): the lines on file, the names the feed
+    spells differently, the paste-only hints."""
     meta = meta or {}
     out: list[str] = []
     led = props.ledger(meta, shown, hidden, thin, void)
@@ -1203,20 +1847,29 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
                       ("n_refused", "not priced"), ("unprojected", "no projection")):
         if led[key]:
             parts.append(f"{led[key]} {word}")
-    when = paste_time_text(meta)
-    out.append(f'<div class="bv-pp-ledger-note">{led["posted"]} lines pasted for this '
-               f'date: {", ".join(parts)}.{" " + esc(when) if when else ""}</div>')
-    if meta.get("unmatched_names"):
-        names = ", ".join(esc(x) for x in meta["unmatched_names"][:12])
-        out.append(_note(f"<b>Not matched to a current roster:</b> {names}"
-                         + (", and others" if len(meta["unmatched_names"]) > 12 else "")
+    out.append(_ledger_line(led, meta, parts, feed))
+    pasted = set(feed.get("paste_unmatched") or []) if feed is not None else None
+    names = list(meta.get("unmatched_names") or [])
+    fed = [x for x in names if pasted is not None and x not in pasted]
+    mine = [x for x in names if pasted is None or x in pasted]
+    if fed:
+        out.append(_note(f"<b>Not matched to a current roster:</b> {_names(fed)}. The odds "
+                         "feed spells these differently from the NBA roster; they are added "
+                         "to the name list as they are found."))
+    if mine:
+        out.append(_note(f"<b>Not matched to a current roster:</b> {_names(mine)}"
                          + ". Check the spelling, or the player may not be on an NBA "
                          "roster yet."))
-    if meta.get("ambiguous_names"):
-        names = ", ".join(esc(x) for x in meta["ambiguous_names"][:12])
-        out.append(_note(f"<b>More than one player by that name:</b> {names}. A paste "
-                         "that carries the team (the board's TEAM - POS line) resolves "
-                         "it."))
+    pasted = set(feed.get("paste_ambiguous") or []) if feed is not None else None
+    names = list(meta.get("ambiguous_names") or [])
+    fed = [x for x in names if pasted is not None and x not in pasted]
+    mine = [x for x in names if pasted is None or x in pasted]
+    if fed:
+        out.append(_note(f"<b>More than one player by that name:</b> {_names(fed, False)}."))
+    if mine:
+        out.append(_note(f"<b>More than one player by that name:</b> {_names(mine, False)}. "
+                         "A paste that carries the team (the board's TEAM - POS line) "
+                         "resolves it."))
     refused = meta.get("refused") or {}
     if refused:
         out.append(_note("<b>Not priced:</b> " + "; ".join(
@@ -1260,12 +1913,7 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
         out.append(_note(f"<b>{_plural(len(hidden), 'line')} hidden:</b> "
                          + " and ".join(bits) + ". There is no pick to show on those."
                          + hidden_picks_text(hidden)))
-    if void is not None and len(void):
-        names = sorted({str(x) for x in void["player"]})
-        out.append(_note(
-            f"<b>{_plural(len(void), 'line')} void:</b> {esc(', '.join(names[:6]))} "
-            "listed out or marked out. PrizePicks removes a pick on a player who "
-            "does not play a second."))
+    out += _void_note(void)
     foot = odds_footnote(shown)
     if foot:
         out.append(foot)
@@ -1284,14 +1932,16 @@ def notes_html(meta: dict, shown, hidden, thin, void) -> list[str]:
         "measured reliability, then by how far the chance sits from a coin flip, "
         "never by the size of the gap. The posted line already carries almost "
         "everything a model knows, so read a gap as where the model disagrees, not "
-        f"as an edge: a leg has to hit {props.BREAKEVEN_LO:.1f}% to "
-        f"{props.BREAKEVEN_HI:.1f}% just to break even. Not betting advice."))
+        f"as an edge{breakeven_text(shown, feed.get('book') if feed is not None else None)} "
+        "Not betting advice."
+        + (f" {esc(RG_LINE)}" if RG_LINE else "")))
     return out
 
 
 def reboot_note(shown) -> str:
-    """The Reboot footnote, when a More lean is on screen (the void tags on
-    bench roles point at it), else ''."""
+    """The Reboot footnote, when a PrizePicks More lean is on screen (the void
+    tags on bench roles point at it), else ''. Reboot is PrizePicks' rule."""
+    shown = _pp_rows(shown)
     if shown is None or not len(shown) or "lean" not in shown or not (shown["lean"] == "More").any():
         return ""
     return _note(
@@ -1301,7 +1951,7 @@ def reboot_note(shown) -> str:
         "bench roles carry more void risk than the lean suggests.")
 
 
-# ── The board ────────────────────────────────────────────────────────────────
+# -- The board ----------------------------------------------------------------
 def _game_label(gid, sub: pd.DataFrame, labels: dict | None) -> str:
     if labels and gid in labels:
         return str(labels[gid])
@@ -1317,13 +1967,17 @@ def window_html(shown, hidden, thin, void, scope_label) -> str:
             f'<span class="lock">{esc(scope_label)}</span></div>')
 
 
-def none_matched_html(posted: int, scope_label) -> str:
-    return _notice(f"<b>{_plural(int(posted), 'line')} saved for {esc(scope_label)}, but "
+def none_matched_html(posted: int, scope_label, feed: bool = False) -> str:
+    """The board with lines but none matched. With the odds feed's lines
+    counted (`feed`), they are lines on file, not saved ones."""
+    kept = "on file" if feed else "saved"
+    return _notice(f"<b>{_plural(int(posted), 'line')} {kept} for {esc(scope_label)}, but "
                    "none matched a projected player and stat.</b> The reasons are below.")
 
 
 @st.fragment
-def _board_fragment(shown: pd.DataFrame, key: str, game_labels: dict | None) -> None:
+def _board_fragment(shown: pd.DataFrame, key: str, game_labels: dict | None,
+                    context=None, feed: dict | None = None) -> None:
     fams_here = set(shown["stat"].map(props.STAT_FAMILY).dropna())
     options = ["All"] + [f for f in props.FAMILY_ORDER if f in fams_here]
     # Options built from the WHOLE shown set in a fixed order, so they never
@@ -1355,19 +2009,33 @@ def _board_fragment(shown: pd.DataFrame, key: str, game_labels: dict | None) -> 
         rows, more = t.reset_index(drop=True), {}
     else:
         rows, more = top_per_player(t, TOP_N)
-    st.markdown(ledger_html(rows, more), unsafe_allow_html=True)
+    st.markdown(ledger_html(rows, more, context, feed), unsafe_allow_html=True)
     if not show_all:
         n_players = t["person_id"].nunique()
         st.caption(f"Top {min(TOP_N, n_players)} of {n_players} players, one row each "
                    "(their best-ranked line). Show all lists every line.")
 
 
+def _kept_text(feed: dict | None) -> str:
+    """Whose lines survive a comparison that could not be built (design 2.6)."""
+    if feed is None:
+        return "Your lines are still saved"
+    if int(feed.get("pasted", 0) or 0):
+        return "Your pasted lines are still saved"
+    return "The odds feed's lines are still in memory"
+
+
 def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None = None,
-                 key: str = "bv_board", game_labels: dict | None = None) -> int:
+                 key: str = "bv_board", game_labels: dict | None = None, context=None,
+                 feed: dict | None = None) -> int:
     """'Model vs the board' for a slate (or one game). Returns lines shown.
 
     Renders nothing when nothing was pasted for this scope. A board that has
-    lines but shows none EXPLAINS why rather than going silent.
+    lines but shows none EXPLAINS why rather than going silent. With the odds
+    feed (`feed` = BoardView.feed, `context` = BoardView.context) the rows
+    are the picked book's, each with its Other books cell, and a legend line
+    of the book codes follows the ledger; the page renders feed_notice_html
+    above this, so its notice shows even when this renders nothing (m7).
     """
     meta = meta or {}
     shown = shown if shown is not None else _empty()
@@ -1376,11 +2044,11 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
     posted = int(meta.get("posted", matched) or 0)
     if posted == 0 and matched == 0:
         return 0
-    _inject_css()
+    _inject_css(books=feed is not None)
     st.markdown(window_html(shown, hidden, thin, void, scope_label), unsafe_allow_html=True)
     if meta.get("error"):
         st.markdown(_notice("<b>The comparison could not be built for this date.</b> "
-                            "Your lines are still saved; try reloading the page."),
+                            f"{_kept_text(feed)}; try reloading the page."),
                     unsafe_allow_html=True)
         return 0
     period = int(meta.get("period_withheld", 0) or 0) if meta.get("period_board_suspect") else 0
@@ -1388,7 +2056,8 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
         st.success(f"{_plural(posted, 'line')} on file for "
                    f"{md_escape(scope_label)}, {n[0]} shown.")
     elif matched == 0 and not period:
-        st.markdown(none_matched_html(posted, scope_label), unsafe_allow_html=True)
+        st.markdown(none_matched_html(posted, scope_label, feed is not None),
+                    unsafe_allow_html=True)
     elif matched:
         st.markdown(_notice(
             f"<b>All {matched} matched lines are withheld.</b> The reasons are below."),
@@ -1401,13 +2070,299 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
             "board.</b> Those lines sit far below the full-game projections. Period props "
             "are not priced; paste the full-game board."), unsafe_allow_html=True)
     if n[0]:
-        _board_fragment(shown, key, game_labels)
-    for block in notes_html(meta, shown, hidden, thin, void):
+        if feed is None:
+            _board_fragment(shown, key, game_labels)
+        else:
+            _board_fragment(shown, key, game_labels, context, feed)
+            st.markdown(books_legend_html(), unsafe_allow_html=True)
+    for block in notes_html(meta, shown, hidden, thin, void, feed):
         st.markdown(block, unsafe_allow_html=True)
     return n[0]
 
 
-# ── Biggest discrepancies (DiamondValue's biggest-gaps strip, 2026-11-05) ────
+# -- The odds feed's notices (design 2.6, 6; amendments A6, N1 to N3) ---------
+# The page renders feed_notice_html ABOVE render_board, so a notice shows even
+# when the board draws nothing (m7). `info` is store.feed_info (plain values:
+# state, asof, loading, per_game, report, today, lines) or a BoardView's
+# `feed`, which adds the board's own facts (the picked book, the games it has
+# not posted, the paste merge). Every time in it is a stamp the page passed,
+# and `today` is the page's: nothing here reads a clock (m1). Visitors never
+# see a balance, a credit, an error code or the vendor's name.
+FEED_DOWN = ("<b>Lines are unavailable right now.</b> The odds feed did not answer. To "
+             "compare a PrizePicks board, paste it with <b>Update lines</b> in the top bar.")
+FEED_PAUSED_EMPTY = ("<b>No lines from the odds feed today.</b> To compare a PrizePicks "
+                     "board, paste it with <b>Update lines</b> in the top bar.")
+NAMED_GAMES = 2         # the A6 notice names at most this many games, then "and N more"
+
+
+def _own_times(info: dict, book) -> dict:
+    """{game_id: the picked book's own latest fetch} for each game it has
+    feed lines for (feed_info's per_game books, m23)."""
+    out = {}
+    for gid, facts in (info.get("per_game") or {}).items():
+        books = facts.get("books") if isinstance(facts, dict) else None
+        at = _stamp_of(books.get(book)) if isinstance(books, dict) else None
+        if at is not None:
+            out[str(gid)] = at
+    return out
+
+
+def _asof_of(info: dict, game_id=None):
+    """The time the shown lines are as of. On a board that names its book
+    (BoardView.feed's "book"), that book's OWN fetch time: one game's, or
+    the oldest over the games it has feed lines for, so a book whose lines
+    were kept from an earlier pull is never stamped with a later pull's
+    time (build 4's review, L3-1). Otherwise, or where the book has no feed
+    line, the feed's: one game's latest pull, or the date's oldest latest
+    pull."""
+    book = info.get("book")
+    if book in props.BOOK_ORDER:
+        own = _own_times(info, book)
+        if game_id is None and own:
+            return min(own.values())
+        if game_id is not None and str(game_id) in own:
+            return own[str(game_id)]
+    if game_id is None:
+        return _stamp_of(info.get("asof"))
+    facts = (info.get("per_game") or {}).get(str(game_id))
+    return _stamp_of(facts.get("asof")) if isinstance(facts, dict) else None
+
+
+def _has_lines(info: dict, game_id=None) -> bool:
+    if game_id is not None:
+        return _asof_of(info, game_id) is not None
+    return int(info.get("lines", 0) or 0) > 0 or _asof_of(info) is not None
+
+
+def lines_asof_text(info, today=None, game_id=None) -> str:
+    """'Lines as of 9:02 AM ET.' (', Mar 11' when not `today`), or for a game
+    whose lines are its pre-tip copies 'Pre-tip lines, as of 6:52 PM ET.';
+    '' when there are no lines. `game_id` scopes it to one game (the Game
+    page's note), else the date's oldest latest pull."""
+    info = info if isinstance(info, dict) else {}
+    today = today if today is not None else info.get("today")
+    at = _asof_of(info, game_id)
+    if at is None:
+        return ""
+    facts = (info.get("per_game") or {}).get(str(game_id)) if game_id is not None else None
+    if isinstance(facts, dict) and facts.get("pretip"):
+        return f"Pre-tip lines, as of {_clock_text(at, today)}."
+    return f"Lines as of {_clock_text(at, today)}."
+
+
+def loading_line_html(n: int) -> str:
+    """The loading line (design 1.3), or '' with nothing loading."""
+    n = int(n or 0)
+    if n <= 0:
+        return ""
+    return _note(f"Lines for {_plural(n, 'game')} are still loading; this board fills in by "
+                 "itself.")
+
+
+def _state_html(info: dict, today, game_id=None) -> str:
+    """The feed's state phrase (design 6): stale, down, paused, or the
+    'as of' line; '' when idle (no lines and nothing wrong, N1)."""
+    state = info.get("state")
+    at = _asof_of(info, game_id)
+    when = _clock_text(at, today) if at is not None else ""
+    lines = _has_lines(info, game_id)
+    if state == "stale" and lines:
+        return _notice(f"<b>Lines as of {esc(when)}.</b> The odds feed did not answer just now, "
+                       "so the board shows the last lines it had.")
+    if state in ("stale", "down"):
+        return _notice(FEED_DOWN)
+    if state == "paused":
+        if lines:
+            return _notice(f"<b>Lines as of {esc(when)}.</b> The board is not refreshing these "
+                           "lines for now.")
+        return _notice(FEED_PAUSED_EMPTY)
+    if state == "ok" and lines:
+        return _note(esc(lines_asof_text(info, today, game_id)))
+    return ""
+
+
+def _merge_html(info: dict, today) -> str:
+    """The paste merge (M5, N3): which line the board shows where the
+    visitor's pasted PrizePicks line and the feed's meet. The feed's time is
+    the OLDEST fetch of the feed lines that won (the safe one to quote). A
+    pasted line wins when it is newer, or whatever its time when it is a
+    typed pick, a Demon or a Goblin, and the line names all four (B28)."""
+    feed_won, paste_won = int(info.get("feed_won", 0) or 0), int(info.get("paste_won", 0) or 0)
+    if not (feed_won or paste_won):
+        return ""
+    times = info.get("paste_times") or {}
+    if feed_won:
+        pasted = _clock_text(times.get("pasted_utc"), today, zone=False)
+        theirs = _clock_text(times.get("feed_oldest"), today, zone=False)
+        text = (f"Your pasted PrizePicks lines{' from ' + pasted if pasted else ''} are older "
+                f"than the odds feed's{' (' + theirs + ')' if theirs else ''}, so the feed's "
+                f"line is shown for {_player_stats(feed_won)}.")
+        if paste_won:
+            text += f" Your {PASTE_WINNERS} lines are shown for {paste_won}."
+        return _note(esc(text))
+    return _note(esc(f"Your {PASTE_WINNERS} PrizePicks lines are shown for "
+                     f"{_player_stats(paste_won)}."))
+
+
+def _player_stats(n: int) -> str:
+    return f"{n} {'player and stat' if n == 1 else 'players and stats'}"
+
+
+def _games_text(gids, labels: dict | None) -> str:
+    """At most NAMED_GAMES games by name (the schedule's own 'DEN at SAS',
+    away at home, N2), then 'and N more games'."""
+    gids = [str(g) for g in gids]
+    names = [str(labels[g]) for g in gids if labels and g in labels]
+    n = len(gids)
+    if names and len(names) == n and n <= NAMED_GAMES:
+        return " and ".join(esc(x) for x in names)
+    if names:
+        rest = n - 1
+        return f"{esc(names[0])} and {rest} more {'game' if rest == 1 else 'games'}"
+    return f"{n} {'game' if n == 1 else 'games'}"
+
+
+# Amendment A6's pointer to the pills. It names no direction (build amendment
+# B24): the slate's notice sits above the pills, the Game page's note below.
+PICK_ANOTHER = "Pick another book to see theirs."
+
+
+def _is_loaded(book: str, loaded) -> bool:
+    """Whether the site buys `book`: `loaded` is the books
+    BUCKETVALUE_ODDS_BOOKS names (feed_info's "books"); None, when the facts
+    do not say, is all five (the default setting)."""
+    if loaded is None:
+        return True
+    try:
+        return book in {str(b) for b in ((loaded,) if isinstance(loaded, str) else loaded)}
+    except TypeError:
+        return True
+
+
+def book_missing_html(book, games, labels: dict | None = None, *, tipped=(),
+                      loaded=None) -> str:
+    """Amendment A6 above the slate's board: the picked book has not posted
+    these games (game ids in tip order), and the other books' lines are one
+    pick away. Never another book's lines under its header. The list names
+    only games that have not tipped (build amendment B25: `tipped` holds the
+    game ids the page's schedule calls live or final, where no book will
+    post again), and with none left it says nothing. A book
+    BUCKETVALUE_ODDS_BOOKS leaves out (not in `loaded`, the books the site
+    buys) has lines nowhere, so instead of the "yet" sentence it says its
+    lines are not loaded on this site (B25)."""
+    games = list(games or [])
+    if not games:
+        return ""
+    book = _book_of(book)
+    title = props.BOOK_TITLE[book]
+    if not _is_loaded(book, loaded):
+        return _notice(f"<b>{esc(title)} lines are not loaded on this site.</b> {PICK_ANOTHER}")
+    done = {str(g) for g in (tipped or ())}
+    games = [g for g in games if str(g) not in done]
+    if not games:
+        return ""
+    return _notice(f"<b>No {esc(title)} lines yet for {_games_text(games, labels)}.</b> "
+                   f"{PICK_ANOTHER}")
+
+
+def book_missing_game_html(book, *, tipped: bool = False, loaded=None) -> str:
+    """Amendment A6 on the Game page of a game the picked book has not posted
+    (the page draws it as a note, with the pills above it). After the game's
+    tip (`tipped`, the page's state live or final) it says the odds feed did
+    not load the book's lines for the game before tip: true whether the book
+    posted none or the site had stopped asking for it (its pulls used up, a
+    PrizePicks top-up in place of the evening refresh, a re-buy as the
+    game's last pull), so it never says the book posted none (build
+    amendment B29, in place of B25's "were posted" sentence). For a book
+    BUCKETVALUE_ODDS_BOOKS leaves out (not in `loaded`) it says, tipped or
+    not, that its lines are not loaded on this site (B25). Either way in
+    place of the "yet" sentence."""
+    book = _book_of(book)
+    title = props.BOOK_TITLE[book]
+    if not _is_loaded(book, loaded):
+        lead = f"<b>{esc(title)} lines are not loaded on this site.</b>"
+    elif tipped:
+        lead = f"<b>The odds feed did not load {esc(title)} lines for this game before tip.</b>"
+    else:
+        lead = f"<b>No {esc(title)} lines for this game yet.</b>"
+    return f"{lead} {PICK_ANOTHER}"
+
+
+AFTER_TIP_NONE_POSTED = "<b>No lines were posted for this game before tip.</b>"
+AFTER_TIP_NOT_LOADED = "<b>The odds feed did not load lines for this game before tip.</b>"
+
+
+def after_tip_note_html(reason) -> str:
+    """The Game page's note for a tipped game with no feed lines (m22, build
+    amendment B18): "No lines were posted" only when its books really posted
+    none (reason none_posted); lost_in_restart its own note; a game the
+    budget held, a paused day or a game never pulled (any other reason)
+    says the odds feed did not load its lines."""
+    if reason == "lost_in_restart":
+        return ("<b>The odds feed's pre-tip lines for this game were not kept.</b> The site "
+                "restarted after its last update. A pasted board still shows here.")
+    if reason == "none_posted":
+        return AFTER_TIP_NONE_POSTED
+    return AFTER_TIP_NOT_LOADED
+
+
+def _pulled_html(info: dict) -> str:
+    """Lines a book took down since its last update (design 6): up to the
+    report's eight, named by player, stat and our own book title."""
+    report = info.get("report") or {}
+    pulled = [p for p in (report.get("pulled") or []) if isinstance(p, (list, tuple)) and len(p) == 3]
+    n = max(int(report.get("n_pulled", 0) or 0), len(pulled))
+    if not n:
+        return ""
+    named = []
+    for book, name, stat in pulled:
+        title = props.BOOK_TITLE.get(book)
+        named.append(f"{esc(name)} {esc(stat)}" + (f" ({esc(title)})" if title else ""))
+    more = ", and others" if n > len(named) else ""
+    return _note(f"<b>{_plural(n, 'line')} taken down by their book since the last update:</b> "
+                 f"{', '.join(named)}{more}.")
+
+
+def feed_notice_html(info, today=None, labels: dict | None = None, *, game_id=None,
+                     with_loading: bool = True, tipped=()) -> str:
+    """Everything the odds feed owes the reader above the board (design 2.6,
+    6), as escaped HTML; '' with the feed off or nothing to say.
+
+      the state      stale, down or paused (design 6's phrases; N1), else
+                     'Lines as of 9:02 AM ET.' while there are lines;
+      loading        'Lines for 2 games are still loading ...' (with_loading:
+                     pass False when the page draws store.feed_loading_watch,
+                     which shows the line itself);
+      the merge      which line shows where the paste and the feed meet;
+      amendment A6   the games the picked book has not posted, named from
+                     `labels` ({game_id: 'DEN at SAS'}, the schedule's
+                     orientation, N2), at most two, then 'and N more': only
+                     those not in `tipped` (the game ids the page's schedule
+                     calls live or final, build amendment B25), or for a book
+                     the info's "books" (feed_info's: the books the site
+                     buys) leave out, that its lines are not loaded here;
+      taken down     lines a book pulled since its last update.
+
+    `today` is the page's date (', Mar 11' marks an older stamp); `game_id`
+    scopes the state line to one game (the Game page, whose own note says
+    what A6 says there) and leaves out the date's merge, A6 and taken-down
+    lines."""
+    info = info if isinstance(info, dict) else {}
+    if not info or info.get("state") in (None, "off"):
+        return ""
+    today = today if today is not None else info.get("today")
+    parts = [_state_html(info, today, game_id)]
+    if with_loading:
+        parts.append(loading_line_html(info.get("loading", 0)))
+    if game_id is None:
+        parts.append(_merge_html(info, today))
+        parts.append(book_missing_html(info.get("book"), info.get("missing_games"), labels,
+                                       tipped=tipped, loaded=info.get("books")))
+        parts.append(_pulled_html(info))
+    return "".join(p for p in parts if p)
+
+
+# -- Biggest discrepancies (DiamondValue's biggest-gaps strip, 2026-11-05) ----
 # Barrett asked for DiamondValue's section at the bottom: the lines ranked by
 # the gap between our number and the posted line, in each stat's own units,
 # as chips with a bar for the size of the gap, then the rest on demand. It
@@ -1488,7 +2443,7 @@ def _gap_chip(r, top: float) -> str:
             f'<span class="gc-player">{esc(r.get("player"))}</span>'
             f'<span class="gc-stat">{esc(r.get("stat_label"))}</span>'
             f'<span class="gc-nums">{_fmt_model(r)} <span class="gc-vs">vs</span> {_fmt_line(r)}'
-            f' &middot; {_fmt_gap(r)} <span class="gc-lean">{esc(r.get("lean"))}</span></span>'
+            f' &middot; {_fmt_gap(r)} <span class="gc-lean">{_lean_text(r)}</span></span>'
             f'<span class="gc-bar"><i style="width:{width}%"></i></span></div>')
 
 
@@ -1504,10 +2459,14 @@ def discrepancy_note(picker: bool) -> str:
         "measured reliability instead. Informational, not a wager recommendation."))
 
 
-def discrepancies_window(rows, scope_label) -> str:
-    """The section's title bar, styled like the board's."""
+def discrepancies_window(rows, scope_label, book_label=None) -> str:
+    """The section's title bar, styled like the board's. With the odds feed
+    the page passes the picked book's title as `book_label`, and the count
+    names it ("6 standard PrizePicks lines", amendment A8); None keeps the
+    title it had before the feed."""
+    what = "standard line" if book_label is None else f"standard {book_label} line"
     return ('<div class="bv-window"><span class="lab">Biggest discrepancies</span>'
-            f'<span class="meta">{esc(_plural(len(rows), "standard line"))}, largest gap '
+            f'<span class="meta">{esc(_plural(len(rows), what))}, largest gap '
             f'first</span><span class="lock">{esc(scope_label)}</span></div>')
 
 
@@ -1528,7 +2487,7 @@ def discrepancy_strip_html(rows) -> str:
         body = "".join(
             f'<tr><td class="l">{esc(r.get("player"))}</td><td class="l">{esc(r.get("stat_label"))}</td>'
             f"<td>{_fmt_model(r)}</td><td>{_fmt_line(r)}</td><td>{_fmt_gap(r)}</td>"
-            f'<td class="l lean {_lean_cls(r.get("lean"))}">{esc(r.get("lean"))}</td></tr>'
+            f'<td class="l lean {_lean_cls(r.get("lean"))}">{_lean_text(r)}</td></tr>'
             for r in listed.to_dict(orient="records"))
         cap = (f'<div class="bv-gap-cap">The next {len(listed)} of {len(rest)}, largest gap '
                "first. The board lists every line.</div>" if len(rest) > len(listed) else "")
@@ -1540,14 +2499,14 @@ def discrepancy_strip_html(rows) -> str:
     return f'<div class="bv-gap-strip">{strip}</div>{more}'
 
 
-def discrepancies_html(shown, scope_label) -> str:
+def discrepancies_html(shown, scope_label, book_label=None) -> str:
     """The whole section for every family (the unfiltered view): title bar,
     strip, '+N more' and the note. Empty string when the board shows no
-    standard line with a gap."""
+    standard line with a gap. `book_label` as discrepancies_window."""
     rows = discrepancies(shown)
     if rows.empty:
         return ""
-    return (discrepancies_window(rows, scope_label) + discrepancy_strip_html(rows)
+    return (discrepancies_window(rows, scope_label, book_label) + discrepancy_strip_html(rows)
             + discrepancy_note(len(discrepancy_families(rows)) > 2))
 
 
@@ -1575,23 +2534,27 @@ def _discrepancy_fragment(rows: pd.DataFrame, key: str) -> None:
     st.markdown(discrepancy_strip_html(in_family(rows, fam)), unsafe_allow_html=True)
 
 
-def render_discrepancies(shown, scope_label, key: str = "bv_gaps") -> int:
+def render_discrepancies(shown, scope_label, key: str = "bv_gaps", book_label=None) -> int:
     """'Biggest discrepancies' (DiamondValue's strip) under a board, with a
     stat-family filter when the lines span more than one family. Renders
-    nothing when there is nothing to rank. Returns how many lines it ranks."""
+    nothing when there is nothing to rank. Returns how many lines it ranks.
+    With the odds feed `shown` is the picked book's shown rows and
+    `book_label` its title (amendment A8)."""
     rows = discrepancies(shown)
     if rows.empty:
         return 0
     st.markdown(DISCREPANCY_CSS, unsafe_allow_html=True)
-    st.markdown(discrepancies_window(rows, scope_label), unsafe_allow_html=True)
+    st.markdown(discrepancies_window(rows, scope_label, book_label), unsafe_allow_html=True)
     _discrepancy_fragment(rows, key)
     st.markdown(discrepancy_note(len(discrepancy_families(rows)) > 2), unsafe_allow_html=True)
     return len(rows)
 
 
-def render_player_lines_block(rows) -> None:
-    """Convenience: render one player's lines with the module CSS."""
-    html = render_player_lines(rows)
+def render_player_lines_block(rows, context=None, feed: dict | None = None) -> None:
+    """Convenience: render one player's lines with the module CSS. With the
+    odds feed (`feed`, `context`: BoardView's) each line carries its Other
+    books cell (render_player_lines)."""
+    html = render_player_lines(rows, context, feed)
     if html:
-        _inject_css()
+        _inject_css(books=feed is not None)
         st.markdown(html, unsafe_allow_html=True)

@@ -1,0 +1,22 @@
+[
+  {"id": "c4f1a9e2b7d3058f6a1e9c2b4d7f0953", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-12T23:00:00Z", "home_team": "Detroit Pistons", "away_team": "Philadelphia 76ers"},
+  {"id": "1b8e3f6a9c2d5074e1b8a3f6c9d20954", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-12T23:00:00Z", "home_team": "Indiana Pacers", "away_team": "Phoenix Suns"},
+  {"id": "f2a7d4c9e6b1035af2d7c4a9e6b13014", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-14T02:30:00Z", "home_team": "Los Angeles Clippers", "away_team": "Golden State Warriors"},
+  {"id": "9d3a6c1f4b7e2058d9a3c6f1b4e70955", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-12T23:00:00Z", "home_team": "Orlando Magic", "away_team": "Washington Wizards"},
+  {"id": "2f7c4a9e1d6b3085f2c7a4e9d1b60956", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-12T23:30:00Z", "home_team": "Atlanta Hawks", "away_team": "Brooklyn Nets"},
+  {"id": "6e1d8b3a5f9c2047e6d1b8a3f5c90957", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-12T23:30:00Z", "home_team": "Miami Heat", "away_team": "Milwaukee Bucks"},
+  {"id": "e7b2d9f4a1c6083e5b9d2f7a4c1e0958", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-13T01:00:00Z", "home_team": "San Antonio Spurs", "away_team": "Denver Nuggets"},
+  {"id": "a5c2e7f9b1d4068ca5e2c7f9d1b41111", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-13T00:00:00Z", "home_team": "Memphis Grizzlies", "away_team": "Dallas Mavericks"},
+  {"id": "4a9f2c7e6b1d3058a4f9c2e7b6d10959", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-13T01:30:00Z", "home_team": "Oklahoma City Thunder", "away_team": "Boston Celtics"},
+  {"id": "8c3e6a1f9d4b2075c8e3a6f1d9b40960", "sport_key": "basketball_nba", "sport_title": "NBA",
+   "commence_time": "2026-03-13T02:30:00Z", "home_team": "Los Angeles Lakers", "away_team": "Chicago Bulls"}
+]
