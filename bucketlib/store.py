@@ -6,7 +6,7 @@ reasons come from third-party feeds and are not trusted input). URLs are MINTED
 with readable params and carry view state, because every internal link is a full
 page load and therefore a fresh Streamlit session.
 
-THE ODDS FEED (design 2.7, layout B). feed_start and feed_result are the
+THE ODDS FEED (design 2.7, layout C). feed_start and feed_result are the
 page's two calls into the live layer's licensed feed: with no key,
 feed_start returns "off" before any feed code runs (M9), so nothing about the
 page changes. feed_tables compares the feed's lines once per ledger
@@ -72,21 +72,16 @@ def game_url(date: dt.date, away: str, home: str, keep: dict | None = None) -> s
     return page_url("/Game", keep, date=date.isoformat(), away=away, home=home)
 
 
-def view_params(token: str | None = None, marks=(), book: str | None = None) -> dict:
+def view_params(token: str | None = None, marks=()) -> dict:
     """The view state every minted internal URL carries besides the date and
     the theme (spec 5): the pasted board (?board=, props_ui.keep_params) and
     the visitor's mark-outs (?out=). One definition for the slate, the Game
     page and About, so no page's links drop either.
 
-    `book` is the picked book (props_ui.selected_book): it rides as ?book=
-    only while the odds feed is on and it is not PrizePicks, so the links
-    between the slate and the Game page keep the pick (amendment A3). With
-    the feed off a ?book= is never carried."""
+    No book rides in a link: the board shows every book at once (layout C,
+    amendment C14), so an old ?book= is never read and never carried."""
     out = out_param(marks)
-    params = {**props_ui.keep_params(token), **({"out": out} if out else {})}
-    if book in props.BOOK_ORDER and book != props.PASTE_BOOK and feed_on():
-        params[props_ui.BOOK_PARAM] = book
-    return params
+    return {**props_ui.keep_params(token), **({"out": out} if out else {})}
 
 
 # -- Small pieces -------------------------------------------------------------
@@ -229,7 +224,8 @@ def render_slate_card(row, date: dt.date, keep: dict, odds: dict | None = None,
     score, back-to-back chips and the card's extra line. A placeholder whose
     teams are not known yet is an unlinked card in the same panel. `feed`:
     the board carries the odds feed's rows, so the pill's title counts the
-    board's lines, not "your" lines (design 2.7)."""
+    board's shown lines, every book's (layout C), not "your" lines (design
+    2.7)."""
     away, home = row["away"], row["home"]
     if not (isinstance(away, str) and isinstance(home, str)):
         label = _placeholder_label(row)
@@ -595,8 +591,9 @@ def _lines_chip(p, feed: bool = False) -> str:
     """DiamondValue's teal count: how many of the visitor's SHOWN PrizePicks
     lines this player has (the page fills `n_lines` from the board), so a
     reader sees whose lines open under the table. Nothing at zero or unset.
-    `feed`: the board carries the odds feed's rows, so the count is the
-    picked book's lines on the board, not the visitor's (design 2.7)."""
+    `feed`: the board carries the odds feed's rows, so the count is his
+    shown lines on the board, every book's (layout C), not the visitor's
+    (design 2.7)."""
     try:
         n = int(p.get("n_lines") or 0)
     except (TypeError, ValueError):
@@ -1600,7 +1597,7 @@ def table_medians(frame: pd.DataFrame | None) -> pd.DataFrame:
     return simprov.provider_for(frame, sim_params()).medians(MEDIAN_STATS)
 
 
-# -- The licensed odds feed (design 2.7; layout B; build amendments B2, B10, N4) --
+# -- The licensed odds feed (design 2.7; layout C; build amendments B2, B10, N4) --
 # The page's side of the feed the live layer buys (design 2.4). One page view
 # of today: feed_start(view, SCHED) before the projection load, so the walk
 # overlaps it (M6 item 4), then feed_result(ticket) after it, then
@@ -1948,9 +1945,9 @@ def feed_info(feed, today: dt.date, environ=None) -> dict:
     "pretip", "pp_missing", "reason"}}), report, the page's `today`, from
     which props_ui writes ', Nov 9' beside an older stamp (m1), and books:
     the books the site buys (BUCKETVALUE_ODDS_BOOKS, read on this call from
-    `environ`, the process environment when None), so a pick of a book the
-    setting leaves out says its lines are not loaded here (build amendment
-    B25). Book keys only: never a setting's raw text."""
+    `environ`, the process environment when None), so a book the setting
+    leaves out says its lines are not loaded here (build amendment B25).
+    Book keys only: never a setting's raw text."""
     value = getattr(feed, "value", None)
     per_game = {}
     for gid, facts in (getattr(feed, "per_game", None) or {}).items():
@@ -1971,7 +1968,7 @@ def feed_info(feed, today: dt.date, environ=None) -> dict:
 def _fragment_run() -> bool:
     """True inside a fragment's own timed run; False in a full script run,
     where an st.rerun() would cut the script short and drop the state of
-    every widget drawn after it (the pills, the board's filters)."""
+    every widget drawn after it (the board's filters)."""
     ctx = get_script_run_ctx(suppress_warning=True)
     return bool(ctx is not None and ctx.fragment_ids_this_run)
 
@@ -2009,8 +2006,8 @@ def feed_loading_watch(date_iso: str, generation: int, game_id=None) -> None:
     loads, FeedLive.loading_games). Every run reads memory (live.feed_view,
     no wait) and shows the loading line, of the date's games or of the one
     game. From its own timed runs, once the generation moves or nothing is
-    loading, it asks for a full app rerun (st.rerun), so the cards, the
-    pills and the board fill in; never from the page's own run. Its runs
+    loading, it asks for a full app rerun (st.rerun), so the cards and the
+    board fill in; never from the page's own run. Its runs
     are counted per loading episode (the date, the game and the generation
     the page drew it with: a new episode starts the count again, build 4's
     review, L3-4), and after WATCH_MAX_RUNS (a minute) it only shows the

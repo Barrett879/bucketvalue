@@ -1,9 +1,9 @@
 """bucketlib.store's side of the licensed odds feed (design 2.7 and 14 step 15;
-layout B, amendment A3; build amendments B2, B10 and N4): feed_on,
+layout C, amendment C14; build amendments B2, B10 and N4): feed_on,
 feed_start and feed_result, the work order (_feed_work, feed_work), the feed
 tables cache (_feed_tables, feed_tables, _strict_digest), feed_info, the
-loading watch, the pill and chip wording behind a feed flag, and view_params
-carrying the picked book.
+loading watch, the pill and chip wording behind a feed flag, and view_params,
+which never carries a book.
 
 Nothing here reaches a network or holds a key: conftest blocks the vendor and
 deletes the key variables for the session, and the tests that turn the feed on
@@ -657,19 +657,25 @@ def test_the_teal_chip_counts_the_boards_lines_with_the_feed(world):
 
 
 # -- view_params and the picked book (amendment A3) -------------------------------------------
-def test_view_params_carry_the_book_only_with_the_feed_on_and_not_prizepicks(monkeypatch):
-    base = store.view_params("tok", (5, 3))
-    assert base == {"board": "tok", "out": "3,5"} == store.view_params("tok", (5, 3), book=None)
-    # The feed off: a ?book= is never carried, whatever the page passes.
-    for book in ("draftkings", "prizepicks", "nope"):
-        assert store.view_params("tok", (5, 3), book=book) == base
-    monkeypatch.setenv(live.KEY_ENV, KEY)
-    assert store.view_params("tok", (5, 3), book="draftkings") == {**base, "book": "draftkings"}
-    assert list(store.view_params("", (), book="betmgm")) == ["book"]
-    for book in ("prizepicks", "nope", "", None, "DraftKings", ["draftkings"]):
-        assert store.view_params("tok", (5, 3), book=book) == base, book
-    url = store.game_url(DAY, "PHI", "DET", store.view_params("", (), book="underdog"))
-    assert url == "/Game?date=2026-03-12&away=PHI&home=DET&book=underdog"
+def test_view_params_never_carry_a_book(monkeypatch):
+    """Layout C (amendment C14): the board shows every book at once, so no
+    book rides in a link, with the feed off or on; view_params takes no
+    book at all."""
+    import inspect
+    assert list(inspect.signature(store.view_params).parameters) == ["token", "marks"]
+    base = {"board": "tok", "out": "3,5"}
+    for on in (False, True):
+        if on:
+            monkeypatch.setenv(live.KEY_ENV, KEY)
+        assert store.feed_on() is on
+        assert store.view_params("tok", (5, 3)) == base
+        assert store.view_params("", ()) == {}
+        with pytest.raises(TypeError):
+            store.view_params("tok", (5, 3), "draftkings")
+        with pytest.raises(TypeError):
+            store.view_params("tok", (5, 3), book="draftkings")
+        url = store.game_url(DAY, "PHI", "DET", store.view_params("", ()))
+        assert url == "/Game?date=2026-03-12&away=PHI&home=DET" and "book" not in url
 
 
 # -- The loading watch (design 2.7, M6 item 3) ------------------------------------------------

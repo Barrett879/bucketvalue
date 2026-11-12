@@ -186,25 +186,33 @@ The licensed odds feed's modules (2026-11-11; section 10 has the contract):
   VendorTransportError's kinds are timeout, connect, oversize and transport.
   `fetch` refuses the vendor's host before any request; `scrub` is the one
   function that turns vendor text into a string.
-### bucketlib/props.py: the feed's lines and the board (layout B)
+### bucketlib/props.py: the feed's lines and the board (layout C)
 - `prepare_feed(feed, roster, projections)`, `resolve_event_names`,
   `compare_books(lines, dist_provider, projections, roster=None)` (compare()
   once per book and game) giving `FeedTables(tables, metas, report, failed)`,
-  and `feed_board(ft, paste_table, paste_meta, pasted_utc, *, selected)` giving
-  `FeedBoard(reference, context, meta, ref_by_game, missing_games, paste_won,
-  feed_won, paste_times)`; `american_breakeven`, `side_words`. BOOK_ORDER =
-  (prizepicks, underdog, draftkings, fanduel, betmgm) is the order of the book
-  pills and of the Other books cell; BOOK_TITLE and BOOK_CODE (PP, UD, DK, FD,
-  MGM) are the only book names a page shows. FeedTables.failed marks a date
-  whose feed holds lines that could not be compared: no table and no meta, so
-  no book has a board to pick and the page explains the failure (B17).
+  `feed_board(ft, paste_table, paste_meta, pasted_utc)` giving
+  `FeedBoard(lines, meta, books_by_game, missing, paste_won, feed_won,
+  paste_times)`, `grid_rows(shown, hidden=None)` (one row per player and stat
+  with a shown line, ranked by its strongest shown line, each carrying its
+  `cells`; frames or lists of row dicts) and `split_hidden(shown, hidden)`
+  (the hidden lines the grid draws as the number alone, and those it never
+  draws); `american_breakeven`, `side_words`. BOOK_ORDER = (draftkings,
+  fanduel, betmgm, prizepicks, underdog) is the grid's column order;
+  BOOK_TITLE and BOOK_CODE (DK, FD, MGM, PP, UD) are the only book names a
+  page shows. FeedTables.failed marks a date whose feed holds lines that could
+  not be compared: no table and no meta, so the board has no feed line to draw
+  and the page explains the failure (B17: with a paste for the date, the board
+  is the paste's own).
 ### bucketlib/props_ui.py: the feed on the page
 - `date_board(token, date, projections, params, roster=None, feed=None,
-  feed_info=None, selected="prizepicks")`, `seed_book_from_url`,
-  `render_book_pills`, `selected_book`, `feed_games`, `feed_notice_html`,
-  `book_missing_html`, `book_missing_game_html`, `after_tip_note_html`,
-  `lines_asof_text`, `loading_line_html`, `books_legend_html`. With feed=None
-  every function returns the HTML it returned before the feed. RG_LINE = "".
+  feed_info=None)`, `feed_notice_html`, `books_missing_html`,
+  `books_missing_game_html`, `after_tip_note_html`, `lines_asof_text`,
+  `loading_line_html`, `grid_legend_html` (GRID_LEGEND), `HIDDEN_DRAWN`,
+  `merge_books` (Biggest discrepancies: one row per player, stat, line and
+  side word, naming every book that posts it); ledger_html and
+  render_player_lines draw the grid when handed the feed's facts. With
+  feed=None every function returns the HTML it returned before the feed.
+  RG_LINE = "".
 ### bucketlib/store.py: the page's side of the feed
 - `feed_on`, `feed_start(view_date, sched) -> FeedTicket`, `feed_result(ticket)`,
   `feed_work(today, sched)`, `feed_tables(date, feed, served, params, roster)`,
@@ -353,12 +361,13 @@ fixed by area. What changed in the contract:
   board restored from the visitor's browser gets a NEW token too; the record
   refuses mark-out-adjusted rows and rows without a model version.
   Feed lines are compared once per book and game, cached by the feed's
-  generation and shared by every session; the board ranks, counts and colours
-  by the picked book's line per player and stat (PrizePicks unless the visitor
-  picks another book; a game that book has not posted shows none of its rows,
-  never another book's), and a visitor's pasted PrizePicks line replaces the
-  feed's on that visitor's view only when it is newer, or a typed pick, a Demon
-  or a Goblin.
+  generation and shared by every session; the board shows every book's line at
+  once, one column per book, each shown line coloured by the model's lean
+  against that book's own line, counts every book's lines, ranks a player and
+  stat by its strongest shown line, and shows the sentinel where a book has not
+  posted a game, never another book's line; and a visitor's pasted PrizePicks
+  line replaces the feed's on that visitor's view only when it is newer, or a
+  typed pick, a Demon or a Goblin.
 
 ## 9. Amendments after the 2026-11-02 rehearsal (the 2026-27 box lists actives only)
 
@@ -469,11 +478,11 @@ Player lines for DraftKings, FanDuel, BetMGM, PrizePicks and Underdog, licensed
 from The Odds API, display only (no model reads them). Built to the feed's
 design (architecture_v2.md, whose section numbers "design 3.6" and the like
 cite, and its budget replay RP; both are kept outside the repo) as amended:
-layout B (a row of book pills picks whose lines the board shows, PrizePicks by
-default; the other four books' lines sit in each row's Other books cell; no
-price is shown for any book) and the build amendments B1 to B33, named below
-where they decide a rule. The operator's side is docs/runbook.md section 8.
-With no key configured none of it runs and every page is what it was.
+layout C (Barrett, 2026-11-11: every book at once, one column per book in the
+order DK, FD, MGM, PP, UD, each line with the model's lean arrow; no price is
+shown for any book) and the build amendments B1 to B33, named below where they
+decide a rule. The operator's side is docs/runbook.md section 8. With no key
+configured none of it runs and every page is what it was.
 
 ### The anchor (live.feed_anchor)
 - `live.ANCHOR_NAME = "_bucketvalue_feed_anchor"`: a `types.ModuleType` in
@@ -773,14 +782,16 @@ WARNING gives the count. The usage test never passes on a period's first day
   cached. Tables that cannot be built while the feed holds lines are
   `FeedTables(failed=True)`; with a paste for the date the board is then the
   paste's own, under one note (B17).
-- props_ui draws one book at a time (`selected_book`, seeded from `?book=` only
-  when the URL changed), the pills outside every fragment (a pick reruns the
-  whole page, so the cards count the picked book), the Other books cell
-  (codes from props.BOOK_CODE with each book's line, its own time when over a
-  minute older than the game's latest pull, a pasted PrizePicks line's badge
-  word; no lean, colour, gap or price), and the notices of design 6 and
-  amendment A6, built from the stamps and the `today` the page passes, never
-  from a clock.
+- props_ui draws every book at once: grid_rows makes one row per player and
+  stat with a shown line, ranked by its strongest shown line; each cell is its
+  book's line with the model's lean at it (an arrow and a text equivalent on a
+  shown line, the number alone on a hidden one, the whole-node sentinel for
+  none); a feed line's title adds its own time when it is over a minute older
+  than its game's latest pull, and a pasted PrizePicks line's title its B28
+  word; the board's stamp is the oldest of the books' own fetch times; the
+  notices of design 6 and the notes on the books that have not posted a game
+  are built from the stamps and the `today` the page passes, never from a
+  clock. No `?book=` is read or carried.
 - `feed_loading_watch` (an `st.fragment` every 3 s) is drawn only while games
   load; from its own timed runs it reruns the app once the generation moves or
   nothing is loading, and it asks for that only in the first 20 runs of a

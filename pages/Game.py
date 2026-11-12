@@ -1,6 +1,6 @@
 """One game: header, context, and both teams' projected players.
 
-URL: /Game?date=YYYY-MM-DD&away=BOS&home=DET[&out=pid,pid][&board=token][&book=key].
+URL: /Game?date=YYYY-MM-DD&away=BOS&home=DET[&out=pid,pid][&board=token].
 Team params go through teams.canonical, which returns None for anything
 unknown (never a pass-through into HTML), and every rendered string goes
 through util.esc.
@@ -16,16 +16,19 @@ only when the URL itself changes, never because the two disagree. After tip,
 each player's box-score line (live.box, 120 s) sits under his projected one,
 and his pasted lines show what happened to them.
 
-The licensed odds feed (design 2.8; layout B, amendments A3 to A7): with a key
-configured the board is the date's, built from the feed's lines and filtered
-to this game as the paste board is, so this page's counts equal the slate
-card's for every pick. The book pills sit directly above the "Lines on this
-game" note, outside every fragment, and each player's lines carry the other
-books' lines for the same stat. With no key none of it runs and the page is
-what it was.
+The licensed odds feed (design 2.8; layout C, amendments C7 to C14): with a
+key configured the board is the date's, built from every book's lines and
+filtered to this game as the paste board is, so this page's counts equal the
+slate card's. Each player's expander holds his grid: one row per stat, one
+column per book (DK, FD, MGM, PP, UD), each cell that book's line with the
+model's lean at it, the hidden lines beside a shown one drawn as the number
+alone. After the board's notes a note names the books that have not posted
+this game. No ?book= is read or carried (an old link still loads). With no
+key none of it runs and the page is what it was.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import sys
 from pathlib import Path
@@ -65,15 +68,12 @@ except RuntimeError:
 # browser kept comes back onto the link for this whole run.
 TOKEN = props_ui.board_keeper(ROSTER)
 MARKS = store.parse_out(qp.get("out"))
-# The odds feed's book pills (amendment A3): ?book= is reconciled into the
-# pills' state now, only when the URL changed, before any link is minted or
-# the board is built, so every link and count follows the pick.
+# With a key configured the paste popover says where the board's lines come
+# from (no ?book= is read: the board shows every book, amendment C14).
 FEED_ON = store.feed_on()
-props_ui.seed_book_from_url(FEED_ON)
-BOOK = props_ui.selected_book(FEED_ON)
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
-        **store.view_params(TOKEN, MARKS, BOOK)}
-FOOT_KEEP = {"date": date.isoformat() if date else "", **store.view_params(TOKEN, MARKS, BOOK)}
+        **store.view_params(TOKEN, MARKS)}
+FOOT_KEEP = {"date": date.isoformat() if date else "", **store.view_params(TOKEN, MARKS)}
 render_nav("Game", keep=FOOT_KEEP)
 back = store.page_url("/", keep, date=date.isoformat() if date else None)
 
@@ -105,9 +105,9 @@ with st.container(key="bv_nav_actions"):
                                                      ROSTER, dates=_route_dates,
                                                      in_nav_container=False,
                                                      feed_on=FEED_ON) or TOKEN
-        keep.update(store.view_params(TOKEN, MARKS, BOOK))
+        keep.update(store.view_params(TOKEN, MARKS))
         back = store.page_url("/", keep, date=date.isoformat())
-        FOOT_KEEP = {"date": date.isoformat(), **store.view_params(TOKEN, MARKS, BOOK)}
+        FOOT_KEEP = {"date": date.isoformat(), **store.view_params(TOKEN, MARKS)}
     render_share(store.game_url(date, away, home, keep))
 
 g = sched[(sched["game_date"] == date) & (sched["away"] == away) & (sched["home"] == home)]
@@ -338,19 +338,15 @@ board = None
 if TOKEN or (FT is not None and (FT.tables or FT.failed)):
     board = props_ui.date_board(TOKEN, date, served.frame, params, ROSTER, feed=FT,
                                 feed_info=(store.feed_info(FEED, today_et())
-                                           if FT is not None else None),
-                                selected=props_ui.selected_book(FEED_LIVE))
+                                           if FT is not None else None))
 FEED_BOARD = board is not None and board.feed is not None
 # Build amendment B17: the feed's lines could not be compared, and the board is
 # the visitor's paste, exactly as with the feed off.
 PASTE_ONLY = board is not None and board.paste_only
 if FEED_LIVE:
     # The odds feed for this game, directly above the board's note: the feed's
-    # state when it is stale, down or paused (design 6), the loading watch
-    # while this game loads (build 4's review, L3-4: its own game only), and
-    # the pills when the feed has lines for this game, or the board has lines
-    # here some pick can show: a game only the paste posted, whose A6 note
-    # points at the pills (amendment A3, A6; L3-2).
+    # state when it is stale, down or paused (design 6), and the loading watch
+    # while this game loads (build 4's review, L3-4: its own game only).
     if FEED.state in ("stale", "down", "paused") and not PASTE_ONLY:
         _info = board.feed if FEED_BOARD else store.feed_info(FEED, today_et())
         _notice = props_ui.feed_notice_html(_info, today_et(), game_id=gid, with_loading=False)
@@ -358,14 +354,22 @@ if FEED_LIVE:
             st.markdown(_notice, unsafe_allow_html=True)
     if gid in FEED.loading_games:
         store.feed_loading_watch(date.isoformat(), FEED.generation, game_id=gid)
-    if gid in props_ui.feed_games(FT) or (FEED_BOARD and (gid in board.ref_by_game
-                                                          or gid in board.missing_games)):
-        props_ui.render_book_pills()
-by_person = {}
+by_person, hidden_by_person, _missing = {}, {}, ""
 if board is not None:
     mine = [x[x["game_id"].astype(str) == gid] if len(x) else x
             for x in (board.shown, board.hidden, board.thin, board.void)]
     by_person = props_ui.rows_by_person(mine[0])
+    if FEED_BOARD:
+        # Layout C (amendments C4, C8, C9, C14): each player's hidden lines go
+        # to his grid; a hidden line in a row with a shown line is drawn there
+        # as its number alone (_drawn), the rest are never drawn (_undrawn);
+        # and the books with no line for this game get a note of their own.
+        hidden_by_person = props_ui.rows_by_person(mine[1])
+        _drawn, _undrawn = props.split_hidden(mine[0], mine[1])
+        if not board.meta.get("error"):
+            _missing = props_ui.books_missing_game_html(
+                [b for b in props.BOOK_ORDER if gid in board.missing.get(b, ())],
+                tipped=state in ("live", "final"), loaded=board.feed.get("books"))
     if board.meta.get("error"):
         if not FEED_BOARD:
             st.markdown(store.render_notice(
@@ -382,29 +386,25 @@ if board is not None:
         st.markdown(store.render_notice(
             "<b>The comparison with the board's lines could not be built just now.</b> "
             "Your pasted lines are still saved; try reloading the page."), unsafe_allow_html=True)
-    elif FEED_BOARD and gid in board.missing_games:
-        # Amendment A6: the picked book has not posted this game, so it has no
-        # rows here, never another book's. After tip it says the odds feed did
-        # not load the book's lines before tip (build amendment B29), and for a
-        # book the site does not buy that its lines are not loaded here (B25).
-        _missing = props_ui.book_missing_game_html(board.feed.get("book"),
-                                                   tipped=state in ("live", "final"),
-                                                   loaded=board.feed.get("books"))
-        st.markdown(f'<div class="bv-note">{_missing}</div>', unsafe_allow_html=True)
     elif sum(len(x) for x in mine) and FEED_BOARD:
         # The feed's lines say when they were pulled (after tip, that they are
-        # the pre-tip copies); pasted ones say when they were pasted.
+        # the pre-tip copies); pasted ones say when they were pasted. A hidden
+        # line drawn beside a shown one is said to be (amendment C8), and the
+        # pick sentence names only the hidden picks the grids do not draw
+        # (C1R-05): a drawn one sits on screen under this note.
         _came = _origins(mine)
         _when = " ".join(s for s in (
             props_ui.lines_asof_text(board.feed, today_et(), game_id=gid)
             if "feed" in _came else "",
             props_ui.paste_time_text(board.meta) if "pasted" in _came else "") if s)
+        _said = f" {props_ui.HIDDEN_DRAWN}" if len(_drawn) else ""
         st.markdown(
             f'<div class="bv-note"><b>Lines on this game:</b> '
-            f"{esc(props_ui.count_header(*mine))}.{' ' + esc(_when) if _when else ''} A teal "
+            f"{esc(props_ui.count_header(*mine))}.{' ' + esc(_when) if _when else ''}"
+            f"{esc(_said)} A teal "
             "count beside a name is how many lines he has: open him under his team's table "
             "to compare each line with his median."
-            f"{props_ui.hidden_picks_text(mine[1], game_page=True)}</div>",
+            f"{props_ui.hidden_picks_text(_undrawn, game_page=True)}</div>",
             unsafe_allow_html=True)
     elif sum(len(x) for x in mine):
         if PASTE_ONLY:
@@ -417,6 +417,10 @@ if board is not None:
             "to compare each line with his median."
             f"{props_ui.hidden_picks_text(mine[1], game_page=True)}</div>",
             unsafe_allow_html=True)
+    if _missing:
+        # Drawn after the notes, on its own (amendment C14, C1R-15): also for a
+        # game whose posted lines all went unmatched, which has no rows.
+        st.markdown(f'<div class="bv-note">{_missing}</div>', unsafe_allow_html=True)
 
 positions = (dict(zip(ROSTER["person_id"].astype("int64"), ROSTER["position"].astype(str)))
              if ROSTER is not None and "position" in ROSTER.columns else {})
@@ -428,32 +432,31 @@ if gid in info.frozen:
 elif len(stamp):
     t = to_et(pd.Timestamp(stamp.max()).to_pydatetime())
     asof = f"Projected {fmt_tip(t)}"
-_game_context = None
-for team in TEAMS:
-    trows = rows[rows["team"] == team]
-    view = store.team_view(trows, MED, positions, STARTERS)
-    view = view.assign(n_lines=[len(by_person.get(int(p), ())) for p in view["person_id"]])
-    st.markdown(store.render_projection_table(team, view, asof_note=asof,
-                                              team_note=store.team_report_label(trows) or "",
-                                              actuals=ACT, feed=FEED_BOARD),
-                unsafe_allow_html=True)
-    for pid, name in zip(view["person_id"], view["name"]):
-        recs = by_person.get(int(pid))
-        if recs:
-            if FEED_BOARD and _game_context is None:
-                # The Other books index is built from this game's rows only,
-                # once, not from the whole date's per player (L3-5).
-                _ctx = board.context
-                _game_context = (_ctx[_ctx["game_id"].astype(str) == gid]
-                                 if isinstance(_ctx, pd.DataFrame) and len(_ctx)
-                                 and "game_id" in _ctx.columns else _ctx)
-            with st.expander(f"{props_ui.md_escape(name)}: {len(recs)} "
-                             f"line{'s' if len(recs) != 1 else ''}"):
-                # With the feed's rows each line carries the other books' lines
-                # for the same stat: all five books per player (amendment A7).
-                props_ui.render_player_lines_block(store.line_actuals(recs, ACT),
-                                                   _game_context if FEED_BOARD else None,
-                                                   board.feed if FEED_BOARD else None)
+# With the feed's rows the tables and their expanders sit in one keyed
+# container, which BOOKS_CSS's guard finds (amendment C13); with the feed off
+# nothing wraps them, so the page is what it was, element for element.
+with (st.container(key="bv_game_lines") if FEED_BOARD else contextlib.nullcontext()):
+    for team in TEAMS:
+        trows = rows[rows["team"] == team]
+        view = store.team_view(trows, MED, positions, STARTERS)
+        view = view.assign(n_lines=[len(by_person.get(int(p), ())) for p in view["person_id"]])
+        st.markdown(store.render_projection_table(team, view, asof_note=asof,
+                                                  team_note=store.team_report_label(trows) or "",
+                                                  actuals=ACT, feed=FEED_BOARD),
+                    unsafe_allow_html=True)
+        for pid, name in zip(view["person_id"], view["name"]):
+            recs = by_person.get(int(pid))
+            if recs:
+                with st.expander(f"{props_ui.md_escape(name)}: {len(recs)} "
+                                 f"line{'s' if len(recs) != 1 else ''}"):
+                    # With the feed's rows: his grid of every book's lines, his
+                    # hidden lines in this game beside his shown ones, each
+                    # settled after tip (amendment C7).
+                    props_ui.render_player_lines_block(
+                        store.line_actuals(recs, ACT),
+                        store.line_actuals(hidden_by_person.get(int(pid), []), ACT)
+                        if FEED_BOARD else None,
+                        board.feed if FEED_BOARD else None)
 
 st.markdown(
     '<div class="bv-note">MIN is the projected average for a player who plays. The other '
@@ -467,17 +470,15 @@ st.markdown(
     unsafe_allow_html=True)
 
 # DiamondValue's biggest-gaps strip for this game, at the bottom. With the
-# feed's rows its title names the picked book (amendment A8).
+# feed's rows each chip names the books posting its line (amendment C11).
 if board is not None:
-    props_ui.render_discrepancies(mine[0], f"{away} at {home}",
-                                  book_label=props.BOOK_TITLE.get(board.feed.get("book"))
-                                  if FEED_BOARD else None)
+    props_ui.render_discrepancies(mine[0], f"{away} at {home}", books=FEED_BOARD)
 if not FEED_LIVE:
     if board is None and ROSTER is not None and state == "upcoming":
         # DiamondValue's empty-board prompt, while a paste can still land here.
         st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_GAME}</div>', unsafe_allow_html=True)
 elif not (board is not None and (board.meta.get("error") or PASTE_ONLY or sum(len(x) for x in mine)
-                                 or (FEED_BOARD and gid in board.missing_games))):
+                                 or _missing)):
     # The feed is on and this game has no lines on the board: before tip the
     # prompt, only while the feed holds no line for this game (unless the
     # feed's own notice above already says what to do, or its lines are

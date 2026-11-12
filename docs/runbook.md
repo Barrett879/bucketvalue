@@ -213,8 +213,7 @@ site should not show games frozen hours before tip.
        (section 8).
 
      Two are normal, not faults: the note `Lines as of <time>.` and, before a
-     book posts a game, the notice `No <Book> lines yet for <game>. Pick another
-     book to see theirs.`
+     book posts a game, the note `No <Book> lines yet for <game>.`
    - `Showing the published projections. The live update could not run (<why>)`
      means the live recompute failed: the committed rows are served, without
      mark-outs. `<why>` names the cause (`bucketlib/store.py`, `_STALE_WHY`):
@@ -418,13 +417,15 @@ hours, or Actions is down.
 **What it is.** The app's live layer (`bucketlib/live.py`) buys today's player
 lines for DraftKings, FanDuel, BetMGM, PrizePicks and Underdog from The Odds
 API, one call per game, for today's ET date only and only for games the bot has
-published. The board shows one book's lines at a time: a row of book buttons
-above it picks the book, PrizePicks by default, and each row's Other books cell
-shows the other four books' lines for the same player and stat. A game the
-picked book has not posted shows none of its rows (never another book's) and a
-notice. No price is shown for any book. The paste box stays as the backup
-(outages, typed picks, Demons and Goblins). The bot and Actions never call the
-vendor, and nothing ever fetches PrizePicks itself.
+published. The board shows every book at once: one row per player and stat,
+one column per book (DK, FD, MGM, PP, UD), each line with an up arrow where the
+model leans More (Over) at it, a down arrow where it leans Less (Under), the
+number alone where it has no lean or the line does not offer the side it
+leans, and the dash where that book has no line. A book that has not posted a
+game shows the dash on that game's rows, and a note names the game. No price
+is shown for any book. The paste box stays as the backup (outages, typed
+picks, Demons and Goblins). The bot and Actions never call the vendor, and
+nothing ever fetches PrizePicks itself.
 
 - **When it buys.** After the first view of today's slate or of a game today,
   a background thread (the refresher, unless `BUCKETVALUE_ODDS_REFRESHER` is
@@ -464,7 +465,7 @@ reloads them by itself is UNVERIFIED.
 | `BUCKETVALUE_ODDS_ENABLED` | `"1"` | on: `"1"`, `"true"`, `"yes"`, `"on"`; off: `"0"`, `"false"`, `"no"`, `"off"` | The kill switch. Off stops every vendor call, the free one too, and the refresher. A value it cannot read also means off. |
 | `BUCKETVALUE_ODDS_MARKETS` | `"player_points"` | market keys, comma separated | What a pull asks for when the budget allows (a re-buy asks the core markets). Alternate, quarter or half, yes/no, first-basket and unknown keys are dropped; an empty list falls back to the default. |
 | `BUCKETVALUE_ODDS_CORE_MARKETS` | `"player_points"` | market keys from the list above | What the budget keeps when the full list does not fit, and what every re-buy asks. Keys outside the market list are ignored; with none left, its first market is used. |
-| `BUCKETVALUE_ODDS_BOOKS` | `"draftkings,fanduel,betmgm,prizepicks,underdog"` | some of those five | May only narrow the five; any other name is dropped, and an empty list means all five. The buttons still show all five, and a book left out reads `<Book> lines are not loaded on this site.` |
+| `BUCKETVALUE_ODDS_BOOKS` | `"draftkings,fanduel,betmgm,prizepicks,underdog"` | some of those five | May only narrow the five; any other name is dropped, and an empty list means all five. The board keeps all five columns: a book left out shows the dash on every row (PrizePicks' column still shows a visitor's pasted lines), and while it has no line for a game another book has, the note reads `<Book> lines are not loaded on this site.` |
 | `BUCKETVALUE_ODDS_RESERVE` | unset: the larger of 25 and 5% of the plan's credits | a whole number, 0 to 100000000 | Credits the site never plans and never spends: room for the probe, local runs and surprises. |
 | `BUCKETVALUE_ODDS_FIRST_PULL_ET` | `"08:50"` | `"HH:MM"`, ET | The earliest first pull of a game, on its own ET date. The restart brake starts 60 minutes later (09:50 by default). |
 | `BUCKETVALUE_ODDS_LAST_PULL_LEAD_MIN` | `"30"` | 0 to 720 | The last planned refresh, this many minutes before tip. |
@@ -545,15 +546,48 @@ buys today's games that have not tipped (the restart rules below say how).
 - **9:00 to 9:15 AM ET, the slate.**
   - "Model vs the board" shows without a paste, with the note `Lines as of
     8:50 AM ET.`
-  - The book buttons sit above it, PrizePicks first. The Line header reads `PP
-    line`, each row has its Other books cell (for example `UD 24.5, DK 25.5,
-    FD 25.5, MGM 25.5`), and one legend line under the board spells out the
-    codes.
-  - A game PrizePicks has not posted has no rows, and the notice names it:
-    `No PrizePicks lines yet for <game>. Pick another book to see theirs.` The
-    free PrizePicks checks fill it in once PrizePicks posts.
-  - No `did not answer` or `not refreshing` notice. Pick each book in turn:
-    each card's count equals its Game page's.
+  - The grid has five book columns, DK, FD, MGM, PP and UD, each cell a line,
+    with an up or down arrow where the model leans at it, and one legend line
+    under it: `Up arrow: model leans More (Over) at that line. Down arrow: Less
+    (Under). No arrow: no lean there, or the line does not offer that side. A
+    dash: no line from that book.`
+  - A game PrizePicks has not posted shows the dash in the PP column, and the
+    note names it: `No PrizePicks lines yet for <game>.` (books missing the
+    same games share one sentence: `No PrizePicks or Underdog lines yet for
+    <game>.`). The free PrizePicks checks fill it in once PrizePicks posts.
+  - No `did not answer` or `not refreshing` notice. Each card's count equals
+    its Game page's `Lines on this game` count.
+  - On a phone, measure, do not eyeball: at 375 px, on the slate and on a Game
+    page with one expander open, in light and with the Dark toggle, run this
+    check in the browser console:
+    ```js
+    (() => {
+      const m = document.querySelector('[data-testid="stMain"]');
+      const all = [...document.querySelectorAll('.bv-grid-wrap')];
+      const wraps = all.filter((w) => w.getClientRects().length).map((w) => {
+        let ok = true;
+        for (let a = w.parentElement; a && a !== m; a = a.parentElement)
+          if (a.scrollWidth > a.clientWidth + 1) ok = false;
+        return {ancestorsFit: ok, scrolls: w.scrollWidth > w.clientWidth,
+                focusable: w.tabIndex === 0, role: w.getAttribute('role')};
+      });
+      const guard = document.querySelectorAll(
+        '[data-testid="stVerticalBlock"].st-key-bv_board_grid [data-testid="stElementContainer"]:has(.bv-grid-wrap),' +
+        '[data-testid="stVerticalBlock"].st-key-bv_game_lines [data-testid="stElementContainer"]:has(.bv-grid-wrap)').length;
+      return {mainFits: m.scrollWidth <= m.clientWidth, wraps, grids: all.length, guard};
+    })()
+    ```
+    The page's scroller is `section[data-testid="stMain"]`, not the document
+    (Streamlit 1.59 never scrolls the document), so it must have scrollWidth <=
+    clientWidth; every ancestor of each grid up to stMain must have scrollWidth
+    <= clientWidth + 1 while the grid's own box has scrollWidth > clientWidth
+    (it is the one that scrolls); the grid's box is focusable with role region;
+    and the CSS guard matches exactly one element per grid. So it passes when
+    `mainFits` is true, every entry of `wraps` has `ancestorsFit`, `scrolls`
+    and `focusable` true and `role` "region", and `guard` equals `grids` (0
+    means the guard no longer matches, more means it matches too much). Then
+    scroll a grid sideways: the Player column (on a Game page, the Stat column)
+    stays put.
   - Note how long the first view after the 08:50 pull took: it compares every
     book's lines once (the cost is UNVERIFIED). If it is often over a couple of
     seconds, say so.
@@ -570,12 +604,12 @@ buys today's games that have not tipped (the restart rules below say how).
   time on the lines moves, and the balance drops again by about the evening's
   untipped games, fewer when PrizePicks checks took those credits.
 - **After the first tip**, a tipped game's page shows `Pre-tip lines, as of
-  <time>.` and its lines settle against the box score. A tipped game with no
-  lines of the picked book reads `The odds feed did not load <Book> lines for
-  this game before tip. Pick another book to see theirs.` One with no feed
-  lines at all reads `No lines were posted for this game before tip.` only
-  when its books posted none, else `The odds feed did not load lines for this
-  game before tip.`
+  <time>.` and its lines settle against the box score. On a tipped game's page,
+  a book with no lines for that game reads `The odds feed did not load <Book>
+  lines for this game before tip.` A tipped game with no feed lines at all
+  reads `No lines were posted for this game before tip.` only when its books
+  posted none, else `The odds feed did not load lines for this game before
+  tip.`
 - **The next morning**: the balance against the plan, and the number of
   `oddsapi: feed memory created (process start)` lines (each is a restart).
 

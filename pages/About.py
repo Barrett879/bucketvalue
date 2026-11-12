@@ -40,14 +40,11 @@ def _date_param() -> str:
 
 # The nav and the footer carry the board and the mark-outs like every other
 # page's (a link that drops them loses the visitor's paste on the way back to
-# the slate), and with the odds feed on the picked book (amendment A3): a
-# ?book= is validated as the pills' own (a junk value is dropped, never
-# carried), and with the feed off it is never read.
+# the slate). An old ?book= is never read and never carried: the board shows
+# every book at once (layout C, amendment C14).
 FEED_ON = store.feed_on()
-props_ui.seed_book_from_url(FEED_ON)
 KEEP = {"date": _date_param(),
-        **store.view_params(props_ui.board_token(), store.parse_out(st.query_params.get("out")),
-                            props_ui.selected_book(FEED_ON))}
+        **store.view_params(props_ui.board_token(), store.parse_out(st.query_params.get("out")))}
 render_nav("About", keep=KEEP)
 
 # Read from the code, so the page cannot drift from what is served.

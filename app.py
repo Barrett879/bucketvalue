@@ -8,15 +8,14 @@ card's line-count pill (SHOWN rows of the board only) equals the count on that
 game's page, and "Model vs the board" uses the same simulator provider as the
 Game tables.
 
-The licensed odds feed (design 2.8; layout B, amendments A3 to A8). With a key
-configured, store.feed_start kicks the live layer's walk before the
+The licensed odds feed (design 2.8; layout C, amendments C6 to C14). With a
+key configured, store.feed_start kicks the live layer's walk before the
 projection load, so the two overlap, and store.feed_result reads the lines
-after it. The board then shows one book's lines at a time, picked with a row
-of pills drawn outside every fragment, so a pick reruns the whole page and the
-cards count the picked book. ?book= is reconciled into the pills' state at the
-top, only when the URL changed, before the board, the cards or any link is
-built, and every minted link carries the pick. With no key none of it runs
-and the page is what it was.
+after it. The board then shows every book at once: one row per player and
+stat, one column per book (DK, FD, MGM, PP, UD), each cell that book's line
+with the model's lean at it, and the cards count every book's shown lines.
+No ?book= is read or carried (an old link still loads). With no key none of
+it runs and the page is what it was.
 """
 from __future__ import annotations
 
@@ -101,12 +100,10 @@ MARKS = store.parse_out(st.query_params.get("out"))
 # -- The licensed odds feed (design 2.8) --------------------------------------
 # Kicked here, before the projection load below, so the walk runs while the
 # projections load (M6 item 4); with no key it is "off" before any feed code
-# runs (M9). The pills' book is reconciled from ?book= now, before the board,
-# the cards and every link are built: they all follow the pick (amendment A3).
+# runs (M9). FEED_ON tells the paste popover to say where the board's lines
+# come from.
 FEED_TICKET = store.feed_start(view, SCHED)
 FEED_ON = FEED_TICKET.mode != "off"
-props_ui.seed_book_from_url(FEED_ON)
-BOOK = props_ui.selected_book(FEED_ON)
 
 try:
     ROSTER = live.roster().value
@@ -118,8 +115,8 @@ except RuntimeError:
 # kept comes back onto the link for this whole run (props_ui.board_keeper).
 TOKEN = props_ui.board_keeper(ROSTER)
 keep = {"theme": "dark" if st.session_state.get("theme_dark") else "light",
-        **store.view_params(TOKEN, MARKS, BOOK)}
-render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS, BOOK)})
+        **store.view_params(TOKEN, MARKS)}
+render_nav("Home", keep={"date": view.isoformat(), **store.view_params(TOKEN, MARKS)})
 with st.container(key="bv_nav_actions"):
     if ROSTER is not None:
         # Board text carries no dates: lines route to each player's game
@@ -130,10 +127,10 @@ with st.container(key="bv_nav_actions"):
                                                      ROSTER, dates=_route_dates,
                                                      in_nav_container=False,
                                                      feed_on=FEED_ON) or TOKEN
-        keep.update(store.view_params(TOKEN, MARKS, BOOK))
+        keep.update(store.view_params(TOKEN, MARKS))
     render_share(store.page_url("/", keep, date=view.isoformat(),
                                 player=st.query_params.get("player")))
-FOOT_KEEP = {"date": view.isoformat(), **store.view_params(TOKEN, MARKS, BOOK)}
+FOOT_KEEP = {"date": view.isoformat(), **store.view_params(TOKEN, MARKS)}
 
 # -- Date bar -----------------------------------------------------------------
 today = today_et()
@@ -170,8 +167,8 @@ IDS = store.projected_ids(SCHED, view)
 served = store.load_projections(view, MARKS) if IDS else None
 FRAME = served.frame if served is not None else None
 FEATS = store.display_features(view) if IDS else None
-# The feed's lines for the date, read once the projection load is done: the
-# picked book's rows are the board, with or without a paste (design 2.8).
+# The feed's lines for the date, read once the projection load is done: every
+# book's lines are the board, with or without a paste (design 2.8).
 FEED = store.feed_result(FEED_TICKET)
 FEED_LIVE = FEED.state != "off"
 _params = None
@@ -188,10 +185,9 @@ BOARD = None
 # board fills from the odds feed.
 if (TOKEN or (FT is not None and (FT.tables or FT.failed))) and FRAME is not None and len(FRAME):
     BOARD = props_ui.date_board(TOKEN, view, FRAME, _params, ROSTER, feed=FT,
-                                feed_info=store.feed_info(FEED, today) if FT is not None else None,
-                                selected=props_ui.selected_book(FEED_LIVE))
-# The board carries the feed's rows: its header names the picked book, each
-# row has its Other books cell, and the pills' counts are the board's lines.
+                                feed_info=store.feed_info(FEED, today) if FT is not None else None)
+# The board carries the feed's rows: it is the grid of every book, and the
+# cards count its shown lines, every book's (amendment C8).
 FEED_BOARD = BOARD is not None and BOARD.feed is not None
 
 states = {r["game_id"]: live.game_state(r) for _, r in nba.iterrows()} if len(nba) else {}
@@ -304,16 +300,15 @@ else:
 # -- Model vs the board (a pasted board, the odds feed, or both) --------------
 _labels = {str(r["game_id"]): f"{r['away']} at {r['home']}" for _, r in nba.iterrows()}
 if FEED_LIVE and len(nba):
-    # The feed's notice goes above the board, so it shows even when the board
-    # draws nothing (m7): its state, the paste merge, the games the picked
+    # The feed's notice goes right above the board, so it shows even when the
+    # board draws nothing (m7): its state, the paste merge, the games each
     # book has not posted (named the schedule's way, N2; only those not yet
-    # tipped, by the schedule's own state, build amendment B25) and the lines
-    # taken down. The loading line is the watch's while it runs. Then the
-    # pills, when the feed has lines for the date (amendment A3).
+    # tipped, by the schedule's own state, build amendment B25; amendment C9)
+    # and the lines taken down. The loading line is the watch's while it runs.
     if BOARD is not None and BOARD.paste_only:
         # Build amendment B17: the feed's lines could not be compared, so the
         # visitor's paste is the board, exactly as with the feed off, under
-        # one note (and no pills: no book has a board).
+        # one note.
         st.markdown(props_ui.paste_only_note_html(), unsafe_allow_html=True)
     else:
         _tipped = {str(g) for g, s in states.items() if s in ("live", "final")}
@@ -322,17 +317,13 @@ if FEED_LIVE and len(nba):
                                             tipped=_tipped)
         if _notice:
             st.markdown(_notice, unsafe_allow_html=True)
-    if props_ui.feed_games(FT):
-        props_ui.render_book_pills()
 if BOARD is not None:
     props_ui.render_board(BOARD.shown, BOARD.hidden, BOARD.thin, BOARD.void,
                           scope_label=view.strftime("%B %-d"), meta=BOARD.meta,
-                          game_labels=_labels, context=BOARD.context, feed=BOARD.feed)
+                          game_labels=_labels, feed=BOARD.feed)
     # DiamondValue's biggest-gaps strip, as its own section at the bottom. With
-    # the feed's rows its title names the picked book (amendment A8).
-    props_ui.render_discrepancies(BOARD.shown, view.strftime("%B %-d"),
-                                  book_label=props.BOOK_TITLE.get(BOARD.feed.get("book"))
-                                  if FEED_BOARD else None)
+    # the feed's rows each chip names the books posting its line (amendment C11).
+    props_ui.render_discrepancies(BOARD.shown, view.strftime("%B %-d"), books=FEED_BOARD)
 elif TOKEN:
     board = props.get_board(TOKEN)
     todays = props.lines_for_date(board, view) if board is not None else None

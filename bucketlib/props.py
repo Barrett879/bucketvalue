@@ -4836,19 +4836,21 @@ def lean_from(q_more: float, band: float = EVEN_BAND) -> str:
     return "Even"
 
 
-# -- The licensed odds feed: its books and columns (design 2.5, layout B) -----
+# -- The licensed odds feed: its books and columns (design 2.5, layout C) -----
 # The page hands this module the feed's lines as a DataFrame, exactly as it
 # hands it the schedule mark: nothing here fetches, and this module imports
 # nothing of the feed (tests/test_props.py's guards). The rows come from The
 # Odds API under licence (Barrett, 2026-11-09), for five books. The board shows
-# ONE book at a time, picked with a row of pills (layout B, amendment A1), and
-# lists the other four books' lines beside each row.
+# every book at once (layout C, amendment C1): one row per player and stat
+# (grid_rows), one column per book, each cell that book's line with the
+# model's lean at it.
 FEED_SOURCE = "oddsapi"      # the line-level `source` of a feed row; TYPED_SOURCE is untouched
 PASTE_BOOK = "prizepicks"    # every pasted line is a PrizePicks line, as before the feed
-# The pill order and the Other books order (amendment A2). sources.oddsapi
-# keeps the same five as BOOKS and the same titles (tests/test_props_feed.py
-# pins both), and this module never imports it.
-BOOK_ORDER = ("prizepicks", "underdog", "draftkings", "fanduel", "betmgm")
+# The grid's column order, the mockup's (layout C, amendment C2): DraftKings,
+# FanDuel, BetMGM, PrizePicks, Underdog. Every list of the five books follows it.
+# sources.oddsapi keeps the same five as BOOKS and the same titles
+# (tests/test_props_feed.py pins both), and this module never imports it.
+BOOK_ORDER = ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog")
 BOOK_TITLE = {"prizepicks": "PrizePicks", "underdog": "Underdog", "draftkings": "DraftKings",
               "fanduel": "FanDuel", "betmgm": "BetMGM"}
 BOOK_CODE = {"prizepicks": "PP", "underdog": "UD", "draftkings": "DK", "fanduel": "FD",
@@ -5402,11 +5404,14 @@ def ledger(meta: dict, shown=None, hidden=None, thin=None, void=None) -> dict:
 #                  It never routes by the clock: the event match placed every
 #                  row on its game, and route_lines drops started games (T2).
 #   compare_books  runs compare() once per (book, game).
-#   feed_board     takes the SELECTED book's rows for every game (layout B,
-#                  amendment A1), merges the visitor's paste into PrizePicks'
-#                  rows (newest wins, M5), and lists the other books' rows
-#                  for the same keys as context. Its meta balances under
-#                  ledger(meta, *board_rows(reference)) for every pick.
+#   feed_board     takes EVERY book's rows for every game (layout C,
+#                  amendment C3), one per (key, book), and merges the
+#                  visitor's paste into PrizePicks' rows (newest wins, M5).
+#                  Its meta balances under ledger(meta, *board_rows(lines)).
+#   grid_rows      makes the grid's rows from the board's shown and hidden
+#                  lines: one per player and stat with a shown line, ranked
+#                  by its strongest shown line, each carrying every book's
+#                  line as its cells (amendment C4).
 # Storage stays apart (RC R5): the visitor's token board and its browser copy
 # hold only the paste. Nothing here calls new_board, add_to_board,
 # saved_board or restore_saved, and feed rows never reach _cap.
@@ -5730,9 +5735,10 @@ class FeedTables:
 
     `failed` marks a date whose feed holds lines that could not be compared
     (store.feed_tables: the simulator parameters missing, a step that raised,
-    or no line left to compare). It has no table and no meta, so no book has
-    a board to pick, and the page's board explains the failure (props_ui's
-    failed view) instead of promising lines the feed already holds."""
+    or no line left to compare). It has no table and no meta, so the board
+    has nothing of the feed's to draw, and the page's board explains the
+    failure (props_ui's failed view, or the visitor's paste as its own board:
+    build amendment B17) instead of promising lines the feed already holds."""
     tables: dict = field(default_factory=dict)
     metas: dict = field(default_factory=dict)
     report: dict = field(default_factory=dict)
@@ -5798,33 +5804,34 @@ def compare_books(lines, dist_provider, projections, roster=None) -> FeedTables:
 
 @dataclass
 class FeedBoard:
-    """What the board shows for one date and one selected book (layout B).
+    """What the board shows for one date with the feed on (layout C: every
+    book at once, amendment C3).
 
-    reference     the selected book's rows for every game, one per
-                  (game_date, person_id, stat), ranked (rank_rows): what
-                  ranks, counts and colours. PrizePicks' rows are the
-                  feed's merged with the visitor's paste.
-    context       every OTHER book's row for the reference keys (PrizePicks'
-                  merged rows when another book is selected), in the
-                  reference's order and then BOOK_ORDER: the Other books cell.
+    lines         every book's rows for the date, one per (game_date,
+                  person_id, stat, book), ranked (rank_rows): the feed's rows
+                  of DraftKings, FanDuel, BetMGM and Underdog, and PrizePicks'
+                  rows, which are the feed's merged with the visitor's paste
+                  (M5). board_rows(lines) is what the board shows, counts and
+                  colours, line by line; grid_rows makes the grid's rows.
     meta          the merged meta, balanced under
-                  ledger(meta, *board_rows(reference)).
-    ref_by_game   game_id -> the selected book, for each game it has lines
-                  for, in (tip, game_id) order.
-    missing_games the games, in (tip, game_id) order, where another book (or
-                  the paste) has lines and the selected book has none.
+                  ledger(meta, *board_rows(lines)).
+    books_by_game {game_id: the books with lines for it, in BOOK_ORDER}, the
+                  games in (tip, game_id) order. A book has lines for a game
+                  when compare_books holds a meta for it with posted > 0,
+                  matched or not; the paste's games count as PrizePicks'.
+    missing       {book: the games, in (tip, game_id) order, that another
+                  book or the paste has lines for and this book has none},
+                  every book of BOOK_ORDER a key (an empty list when none).
     paste_won, feed_won   the PrizePicks keys both the feed and the paste
-                  hold, by whose line the merge kept (whichever book is
-                  selected, since PrizePicks' rows are context otherwise).
+                  hold, by whose line the merge kept.
     paste_times   {"pasted_utc": the paste's time, "feed_oldest" and
                   "feed_newest": the range of fetch times of the feed lines
                   that beat the paste}, each an aware UTC Timestamp or None.
     """
-    reference: pd.DataFrame
-    context: pd.DataFrame
+    lines: pd.DataFrame
     meta: dict
-    ref_by_game: dict = field(default_factory=dict)
-    missing_games: list = field(default_factory=list)
+    books_by_game: dict = field(default_factory=dict)
+    missing: dict = field(default_factory=dict)
     paste_won: int = 0
     feed_won: int = 0
     paste_times: dict = field(default_factory=dict)
@@ -5967,36 +5974,33 @@ def _game_tips(ft: FeedTables, frames: list) -> dict:
     return tips
 
 
-def feed_board(ft, paste_table, paste_meta, pasted_utc, *, selected: str) -> FeedBoard:
-    """The board for one date with the feed on (layout B, amendment A1).
+def feed_board(ft, paste_table, paste_meta, pasted_utc) -> FeedBoard:
+    """The board for one date with the feed on (layout C, amendment C3):
+    every book's lines at once.
 
     `ft` is compare_books' FeedTables for the date; `paste_table` and
     `paste_meta` are compare() of the visitor's pasted lines for the date,
     as the board compares them today (None or empty with no paste), and
-    `pasted_utc` the board's paste time (board_info). `selected` is a
-    BOOK_ORDER key (the page's pills; "prizepicks" by default there);
-    anything else raises ValueError.
+    `pasted_utc` the board's paste time (board_info).
 
-    - reference: the selected book's rows for every game, and only that
-      book's: a game it has not posted has no rows (amendment A6), never
-      another book's. For PrizePicks they are the feed's rows merged with the
-      paste by the M5 rule (_paste_wins: newest wins; a typed pick, a Demon or
-      a Goblin always wins; a board with no paste time counts as older).
+    - lines: every book's rows for every game, one per (key, book), ranked
+      (rank_rows); a game a book has not posted has no rows of that book,
+      never another book's. PrizePicks' rows are the feed's merged with the
+      paste by the M5 rule (_paste_wins: newest wins; a typed pick, a Demon
+      or a Goblin always wins; a board with no paste time counts as older).
       Pasted rows the paste path withheld are not in the paste table, so the
-      feed's line stays for those keys.
-    - context: every other book's rows for the reference keys; PrizePicks'
-      are the same merged rows.
-    - meta: the sum of the selected book's per-game metas, plus the paste's
-      meta when PrizePicks is selected, less the rows the merge left out
-      (_sum_metas), with by_tier counted on the reference and pasted_utc the
-      paste's when PrizePicks is selected (None otherwise). It balances
-      under ledger(meta, *board_rows(reference)).
-    - ref_by_game, missing_games, paste_won, feed_won and paste_times as
+      feed's line stays for those keys. A (book, game) outside BOOK_ORDER is
+      ignored.
+    - meta: every book's per-game metas summed, plus the paste's meta, less
+      the rows the per-book dedupe and the merge left out (_sum_metas, every
+      one of them a matched row), with by_tier counted on the lines and
+      pasted_utc the paste's time whenever there is one (None otherwise).
+      It balances under ledger(meta, *board_rows(lines)).
+    - books_by_game, missing, paste_won, feed_won and paste_times as
       FeedBoard says. A book "has lines" for a game when compare_books holds
-      a meta for it (every line it posted, compared or not), and the paste
-      when its table or its unresolved lines name the game."""
-    if not isinstance(selected, str) or selected not in BOOK_ORDER:
-        raise ValueError("selected must be a BOOK_ORDER key")
+      a meta for it with posted > 0 (every line it posted, compared or not),
+      and PrizePicks when the paste's table or its unresolved lines name the
+      game."""
     ft = ft if isinstance(ft, FeedTables) else FeedTables()
     paste = paste_table if isinstance(paste_table, pd.DataFrame) and not paste_table.empty \
         else pd.DataFrame(columns=TABLE_COLUMNS)
@@ -6024,31 +6028,13 @@ def feed_board(ft, paste_table, paste_meta, pasted_utc, *, selected: str) -> Fee
     paste_games = _games_of(paste) | _games_of(unresolved)
     posted[PASTE_BOOK] |= paste_games
 
-    reference = rank_rows(rows[selected]) if len(rows[selected]) else rows[selected]
-    reference = reference.reset_index(drop=True)
-    parts = metas[selected] + ([pmeta] if selected == PASTE_BOOK and pmeta else [])
-    meta = _sum_metas(parts, removed[selected])
-    if not reference.empty:
-        meta["by_tier"] = reference["tier"].value_counts().to_dict()
-    meta["pasted_utc"] = pasted_utc if selected == PASTE_BOOK and pasted is not None else None
-
-    order = {k: i for i, k in enumerate(_row_keys(reference))}
-    context_parts = []
-    for b in BOOK_ORDER:
-        if b == selected or rows[b].empty:
-            continue
-        keys = _row_keys(rows[b])
-        hit = np.array([k in order for k in keys], dtype=bool)
-        if hit.any():
-            context_parts.append(rows[b][hit])
-    context = _concat_rows(context_parts)
-    if not context.empty:
-        pos = [order[k] for k in _row_keys(context)]
-        rank = [_book_rank(b) for b in context["book"]]
-        context = (context.assign(_o=pos, _b=rank)
-                   .sort_values(["_o", "_b"], kind="mergesort")
-                   .drop(columns=["_o", "_b"]).reset_index(drop=True))
-
+    lines = _concat_rows([rows[b] for b in BOOK_ORDER])
+    lines = rank_rows(lines).reset_index(drop=True) if len(lines) else lines
+    parts = [m for b in BOOK_ORDER for m in metas[b]] + ([pmeta] if pmeta else [])
+    meta = _sum_metas(parts, sum(removed.values()))
+    if not lines.empty:
+        meta["by_tier"] = lines["tier"].value_counts().to_dict()
+    meta["pasted_utc"] = pasted_utc if pasted is not None else None
     tips = _game_tips(ft, [*ft.tables.values(), paste, unresolved,
                            *[m.get("unresolved") for m in ft.metas.values()
                              if isinstance(m, dict)]])
@@ -6056,15 +6042,71 @@ def feed_board(ft, paste_table, paste_meta, pasted_utc, *, selected: str) -> Fee
 
     def by_tip(gid):
         return (gid not in tips, tips.get(gid, far), gid)
-    mine = posted[selected]
-    every = set().union(*posted.values())
+    every = sorted(set().union(*posted.values()), key=by_tip)
     return FeedBoard(
-        reference=reference, context=context, meta=meta,
-        ref_by_game={g: selected for g in sorted(mine, key=by_tip)},
-        missing_games=sorted(every - mine, key=by_tip),
+        lines=lines, meta=meta,
+        books_by_game={g: tuple(b for b in BOOK_ORDER if g in posted[b]) for g in every},
+        missing={b: [g for g in every if g not in posted[b]] for b in BOOK_ORDER},
         paste_won=merge["paste_won"], feed_won=merge["feed_won"],
         paste_times={"pasted_utc": pasted, "feed_oldest": merge["feed_oldest"],
                      "feed_newest": merge["feed_newest"]})
+
+
+# -- Layout C: the grid's rows (amendment C4) ----------------------------------
+GRID_CELLS = "cells"          # grid_rows' column of {book: line record}
+
+
+def _as_rows(rows) -> pd.DataFrame:
+    """A frame of line rows from a frame, a list of row dicts (what
+    rows_by_person and store.line_actuals hand the Game page) or None."""
+    return rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(list(rows or []))
+
+
+def grid_rows(shown, hidden=None) -> pd.DataFrame:
+    """Layout C's rows (amendment C4): one per (game_date, person_id, stat)
+    that holds at least one SHOWN line (board_rows' shown), every book's.
+    Each row is that key's lead line, its strongest shown line by rank_rows
+    (reliability tier, then confidence, never the gap), ties going to the
+    first book of BOOK_ORDER; the rows are ranked by their lead lines, so a
+    row ranks by the strongest lean any book's shown line has. Hidden lines
+    (no lean, or a side the line does not offer) never lift a row and never
+    make one. GRID_CELLS holds {book: the line's record plus "shown": True or
+    False} for every shown and hidden line of the key. Thin and void lines
+    are never cells: thin and void belong to the player and game, so a key
+    with a shown line has none. Either argument may be a frame or a list of
+    row dicts (amendment C1V, C1R-04): the Game page hands lists."""
+    shown, hidden = _as_rows(shown), _as_rows(hidden)
+    if shown.empty:
+        return pd.DataFrame(columns=[*TABLE_COLUMNS, GRID_CELLS])
+    recs = shown.to_dict(orient="records")
+    order = sorted(range(len(recs)), key=lambda i: _book_rank(_line_book(recs[i])))
+    ranked = rank_rows(shown.iloc[order].reset_index(drop=True))
+    first = ~pd.Series(_row_keys(ranked)).duplicated(keep="first").to_numpy()
+    lead = ranked[first].reset_index(drop=True)
+    wanted = set(_row_keys(lead))
+    cells: dict = {}
+    for frame, flag in ((shown, True), (hidden, False)):
+        if frame.empty:
+            continue
+        for k, rec in zip(_row_keys(frame), frame.to_dict(orient="records")):
+            book = _line_book(rec)
+            if k in wanted and book in BOOK_ORDER:
+                cells.setdefault(k, {}).setdefault(book, {**rec, "shown": flag})
+    return lead.assign(**{GRID_CELLS: [cells.get(k, {}) for k in _row_keys(lead)]})
+
+
+def split_hidden(shown, hidden) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(drawn, undrawn) (amendments C8 and C14): the hidden lines whose
+    (game_date, person_id, stat) holds a shown line, which grid_rows puts in
+    that row's cells and the grid draws as the number alone, and the rest,
+    which nothing draws. Lists or frames, as grid_rows."""
+    shown, hidden = _as_rows(shown), _as_rows(hidden)
+    if hidden.empty:
+        return hidden, hidden
+    keys = set(_row_keys(shown)) if not shown.empty else set()
+    on = [k in keys for k in _row_keys(hidden)]
+    off = [not x for x in on]
+    return hidden[on].reset_index(drop=True), hidden[off].reset_index(drop=True)
 
 
 def american_breakeven(price) -> float | None:

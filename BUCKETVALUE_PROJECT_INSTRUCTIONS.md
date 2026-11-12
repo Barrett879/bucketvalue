@@ -16,7 +16,7 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 | Name | **BucketValue**, one constant (`theme.SITE_NAME`) | Barrett, 2026-10-08 |
 | League | NBA only (WNBA season is over; SwishValue covers WNBA contracts) | default |
 | Shape | Same as the siblings: Streamlit, HistGB models, walk-forward validation, scheduled bot refresh, public Streamlit Cloud deploy | "the same as gridiron and diamond value" |
-| Player lines | INLINE on the board and game pages, never a tab. LICENSED FEED (Barrett, 2026-11-09): lines from DraftKings, FanDuel, BetMGM, PrizePicks and Underdog come from The Odds API under Barrett's key, fetched only by the app's live layer (never the bot, never Actions, never a visitor's browser), for today's ET date, display only. A row of book buttons picks whose lines the board shows, PrizePicks by default, and the other four books' lines sit beside each row. The paste box stays as the backup (outages, typed picks, Demons and Goblins). PrizePicks itself is never fetched by anything, ever (403 to servers and ToS 16(l) bars automation) | Barrett, 2026-11-09 (was PASTE ONLY, sibling precedent) |
+| Player lines | INLINE on the board and game pages, never a tab. LICENSED FEED (Barrett, 2026-11-09): lines from DraftKings, FanDuel, BetMGM, PrizePicks and Underdog come from The Odds API under Barrett's key, fetched only by the app's live layer (never the bot, never Actions, never a visitor's browser), for today's ET date, display only. The board shows all five books at once, one column per book, and an up or down arrow on a line marks the model's lean at that line. The paste box stays as the backup (outages, typed picks, Demons and Goblins). PrizePicks itself is never fetched by anything, ever (403 to servers and ToS 16(l) bars automation) | Barrett, 2026-11-09 (was PASTE ONLY, sibling precedent) |
 | Repo | `Desktop/Claude/NBA Predict`, package `bucketlib/` | default |
 | Accuracy page | **LOCAL ONLY**: `pages/Accuracy.py` and its summary outputs are gitignored, never in the nav of the deployed site (DiamondValue precedent) | Barrett, 2026-10-08 |
 | GitHub repo | `Barrett879/bucketvalue`, created PRIVATE 2026-10-08 (token has `workflow` scope, verified) (approved by Barrett; public creation needs his explicit visibility call, and Streamlit only shares apps from public repos, so flip it at deploy) | Barrett, 2026-10-08 |
@@ -75,10 +75,12 @@ this file holds the decisions. Where the two disagree, the data notes are newer.
 15. **Rank by confidence, never by raw gap.** The gap is an argmax over the model's
     own error and is not comparable across stats. One display is exempt, by Barrett's
     request (2026-11-05): "Biggest discrepancies" under the board, DiamondValue's strip.
-    It sorts the board's shown STANDARD lines of the picked book (PrizePicks', or the book
-    the visitor chose), one row per player and stat, by the raw gap, names that book when
-    the odds feed is on, offers a stat-family filter, and never changes the board's own
-    order (props_ui.discrepancies).
+    It sorts the board's shown STANDARD lines by the raw gap (with the odds feed on, every
+    book's: the books posting the same line for a player and stat with the same side word
+    share one row that names each of them, so a player and stat appear once per line and
+    side word, and no book's line is preferred to another's), offers a stat-family filter,
+    and never changes the board's own order (props_ui.discrepancies and
+    props_ui.merge_books).
 16. **The board is at its ceiling.** DiamondValue measured that the posted line is a
     near-sufficient statistic for its projection (incremental R^2 0.0007). Present
     projections honestly; never sell the props comparison as an edge. Always report a
@@ -414,32 +416,36 @@ percentiles. Targets that fail ship a labelled baseline.
   screen); player search (`?player=`, sync-on-URL-change); cards grouped by tip time
   (team-colour split stripe, tip time, DraftKings spread/total or the sentinel, B2B
   chips, "Out: X, Y +2" for 15+ MPG players excluding G League/two-way, Upcoming /
-  Live / Final, line-count pill top-left counting the picked book's SHOWN lines only
-  (one per player and stat)); "Model vs the board": green confirmation, "N of M shown
-  (hidden / thin / void)", top 25 one row per player with "+N more", stat-family pills
-  and a game filter inside an @st.fragment, "Show all", footnotes (Demon/Goblin and
-  Reboot on PrizePicks rows only, break-even per source, board-at-its-ceiling); while
-  the odds feed holds lines for the date, a row of book buttons above the board
-  (PrizePicks, Underdog, DraftKings, FanDuel, BetMGM; PrizePicks by default, any other
-  pick kept in `?book=`) picks whose lines are the board's rows, the Line header
-  names that book ("PP line", "DK line"), each row's Other books cell lists the other
-  four books' lines for the same player and stat (each book's code and line, with
-  that line's own time when it is older, or a pasted PrizePicks line's badge word;
-  never a lean, colour, gap or price), and a game the picked book has not posted
-  shows none of its rows, never another book's, and a notice names such games (two
-  at most, then "and N more").
+  Live / Final, line-count pill top-left counting the board's SHOWN lines only (one
+  per player and stat, and with the odds feed on one per player, stat and book));
+  "Model vs the board": green confirmation, "N of M shown (hidden / thin / void)", top
+  25 one row per player with "+N more", stat-family pills and a game filter inside an
+  @st.fragment, "Show all", footnotes (Demon/Goblin and Reboot on PrizePicks rows
+  only, break-even per source, board-at-its-ceiling); while the odds feed holds lines
+  for the date, the board is a grid: one row per player and stat with a shown line
+  (Player with the matchup under it, Stat, Model) and one column per book (DK, FD,
+  MGM, PP, UD), each cell that book's line with the model's lean at it (a green up
+  arrow for More or Over, a red down arrow for Less or Under, the number alone where
+  the model has no lean or the line does not offer its side, the sentinel where the
+  book has no line); rows rank by their strongest shown line (tier, then confidence,
+  never the gap); on a phone the grid scrolls sideways inside its box with the Player
+  column pinned; one legend line under it; and a note names the games a book has not
+  posted yet (two at most, then "and N more").
 - `/Game`: team-colour header (spread, total, implied team totals, rest/B2B, injury
   report as-of or "report not filed"); 5-chip strip; two team tables with
   team-tinted headers: status badge, player (headshot, projected-starter dot), P(play)
   only when listed or below 90%, **MIN** as the bold lead column, PTS REB AST 3PM STL
   BLK TOV PRA FS as mid-p medians under "if he plays"; starters by minutes then bench;
   deep bench collapsed; Out rows greyed at the bottom with the reason and no numbers;
-  expandable rows with each player's lines (the picked book's, with the other four
-  books' lines beside each when the odds feed is on; sides offered, badges, void risk
-  on PrizePicks rows) and, after tip, actuals from the cdn box score (120s cache; "Did
-  not play, pick voided" on a PrizePicks line, "Did not play" on an Underdog or
-  sportsbook line; an exact landing reads "landed on the line", never "push", and on a
-  sportsbook line the chance-of-landing tooltip says the book's own rule decides it);
+  expandable rows with each player's lines (with the odds feed on, the same grid per
+  player: one row per stat with a shown line, one column per book; sides offered,
+  badges, void risk on PrizePicks lines) and, after tip, actuals from the cdn box
+  score (120s cache; "Did not play, pick voided" on a PrizePicks line, "Did not play"
+  on an Underdog or sportsbook line; a row holding a PrizePicks line and other books'
+  lines names the books, "PP: Did not play, pick voided. DK, UD: Did not play"; an exact
+  landing reads "landed on the line" (with the odds feed on, followed by the codes of
+  the books whose line it was), never "push", and on a sportsbook line the
+  chance-of-landing tooltip says the book's own rule decides it);
   per-team mark-out / mark-in (stable options) writing `?out=` with a "your
   adjustments, not the published projection" banner.
 - Status badges: Out, Doubtful, Questionable, Probable, G League, Two-way, Not with
@@ -448,9 +454,8 @@ percentiles. Targets that fail ship a labelled baseline.
 - `board_rows` returns (shown, hidden, thin, void); void = Out / inactive / marked
   out. Pills, ledger and rows all read it. Ledger balances per book and game: posted =
   matched + unmatched + ambiguous + refused + unprojected (props.ledger); the board's
-  ledger (the picked book's lines for every game it has posted, plus the paste with each
-  overlap counted once when PrizePicks is picked) balances too, with unmatched names
-  listed.
+  ledger (every book's lines for every game, plus the paste with each overlap counted
+  once) balances too, with unmatched names listed.
 - Ported from GridironValue props_ui (acceptance items): Demon/Goblin badge and
   footnote, hidden-side counts, "N of M lines" header and refusal reasons, GAP column
   not a percentage, green banner + toast after a paste, each line routed to its own
