@@ -1496,3 +1496,78 @@ def test_the_runbooks_books_setting_row_is_what_the_pages_do_r8_04(monkeypatch, 
     pasted = {frozenset(r["matchup"].split(" vs ")) for r in GP.grid(s, show_all=True)
               if r["cells"]["PP"]["cls"] != "none"}
     assert pasted == {frozenset(teams) for teams, _gid in GAMES}
+
+
+# -- Round P1 (2026-11-12): a past date read from memory, every game final -----------------------
+NEXT_NIGHT = et(1, 4, day=13)          # 01:04 ET on Mar 13: the page's ET date is the next day
+FINAL_HEAD = '<th class="num" scope="col">Final</th>'
+
+
+def test_a_past_date_read_from_memory_with_every_game_final_shows_its_lines_p1(
+        monkeypatch, tmp_path):
+    """The view that went empty on the live site after a code push (round P1,
+    2026-11-12: the evening's slate after midnight ET), which no page test
+    drew before. At 01:04 ET on Mar 13 the page's ET date is the next day, so
+    store.feed_start gives "memory" for 2026-03-12 and store.feed_result reads
+    live.prop_lines_memory: no kick, no refresher, no wait. The schedule
+    calls both games final, with their scores as cdn sends them: PHI at
+    DET's real final score (the box payload's) and a CONSTRUCTED one for DEN
+    at SAS, whose result is not in the fixtures.
+
+    The slate's cards count the feed's shown lines, production's for the
+    same inputs, under the feed's stamp with its date. Each Game page draws
+    its players' grids inside bv_game_lines, its counts the card's, under the
+    pre-tip stamp; PHI at DET's grids, with its real final box (serve_box),
+    carry the Final column with every row's actual, and DEN at SAS's (no box
+    served) carry none."""
+    w, feed = feed_world(monkeypatch, tmp_path, at=NEXT_NIGHT)
+    box = H.box_payload()["game"]
+    scores = {EARLY: (box["awayTeam"]["score"], box["homeTeam"]["score"]),
+              LATE: (112, 118)}                                      # CONSTRUCTED
+    final = w.sched.assign(status="final", status_text="Final",
+                           away_score=[scores[g][0] for g in w.sched["game_id"]],
+                           home_score=[scores[g][1] for g in w.sched["game_id"]])
+    monkeypatch.setattr(live, "schedule", lambda: live.Live(final, 0.0))
+    H.serve_box(monkeypatch)
+    reads, other = [], []
+    monkeypatch.setattr(live, "prop_lines_memory",
+                        lambda date, *a, **k: reads.append(date) or feed.view(date))
+    monkeypatch.setattr(live, "feed_view",
+                        lambda *a, **k: other.append("feed_view") or feed.view(*a, **k))
+    monkeypatch.setattr(live, "feed_kick", lambda *a, **k: other.append("feed_kick"))
+    monkeypatch.setattr(live, "ensure_refresher", lambda *a, **k: other.append("ensure_refresher"))
+    at = slate()
+    assert reads == [H.DATE] and other == []
+    cards = PS.cards(at)
+    for (away, home), gid in GAMES:
+        card = cards[f"{away} at {home}"]
+        assert '<span class="bv-slate-tag final">Final</span>' in card, away
+        shown = re.search(r'<div class="bv-slate-final"><span[^>]*>(\d+)</span> - '
+                          r'<span[^>]*>(\d+)</span></div>', card)
+        assert shown and shown.groups() == tuple(str(s) for s in scores[gid]), away
+    assert "Lines as of 12:20 PM ET, Mar 12." in text(at) and GP.grid(at)
+    prod = production()
+    counts = pill_counts(at)
+    assert counts == {gid: props_ui.line_counts_by_game(prod.shown).get(gid, 0) for _t, gid in GAMES}
+    assert all(counts.values()) and sum(counts.values()) == len(prod.shown)
+    for (away, home), gid in GAMES:
+        reads.clear()
+        other.clear()
+        g = game(away, home)
+        assert reads == [H.DATE] and other == [], away
+        grids = GP.player_grid(g)
+        inside = GP.keyed_markdown(g, "bv_game_lines")
+        mine = [m.value for m in g.markdown if GP.PLAYER_LABEL + '"' in m.value]
+        assert grids and inside is not None and mine and all(m in inside for m in mine), away
+        words = text(g)
+        noted = re.search(r"Lines on this game: (\d+) of \d+ lines shown \([^)]*\)\. Pre-tip lines, "
+                          r"as of 12:20 PM ET, Mar 12\.", words)
+        opened = sum(int(m.group(1)) for m in (re.match(r".+: (\d+) lines?$", str(e.label))
+                                               for e in g.expander) if m)
+        assert noted and int(noted.group(1)) == opened == counts[gid], (away, words)
+        actuals = [r["actual"] for rows in grids.values() for r in rows]
+        if gid == EARLY:
+            assert sum(m.count(FINAL_HEAD) for m in mine) == len(mine), away
+            assert None not in actuals and SENTINEL not in actuals, away
+        else:
+            assert not any(FINAL_HEAD in m for m in mine) and set(actuals) == {None}, away

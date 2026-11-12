@@ -674,6 +674,7 @@ Failures (WARNING):
 | `oddsapi: <n> game(s) of today have no teams in the work order's horizon; the refresher waits for a view` | Once a day: the same. |
 | `oddsapi: the date's published file is unreadable (<why>)` | Nothing is bought for that date. |
 | `oddsapi: a malformed game entry counted as absent` | A bug: tell the developer. |
+| `oddsapi: feed tables from older code (<Type>); rebuilt` | Tables cached by the code before a push reached the code after it; that view rebuilt them. It should never appear, since the cache's key names the tables' class (B34): tell the developer. |
 | `oddsapi: kick failed (<Type>)`, `oddsapi: walk failed (<Type>)`, `oddsapi: worker failed (<Type>)`, `oddsapi: feed view failed (<Type>)`, `oddsapi: feed check failed (<Type>)`, `oddsapi: feed start failed (<Type>)`, `oddsapi: feed result failed (<Type>)`, `oddsapi: feed tables failed (<Type>)`, `oddsapi: loading watch failed (<Type>)`, `oddsapi: refresher start failed (<Type>)`, `oddsapi: refresher tick failed (<Type>)` | An error inside the feed code, logged by its type only. The page falls back to a notice or the paste board. Tell the developer. |
 | `prepare_feed failed (<Type>)`, `compare_books: <book> <game> failed (<Type>)`, `date_board: the feed board failed (<Type>)`, `date_board: no simulator parameters` | The board could not be built from the feed's lines; the page says so. Tell the developer. |
 

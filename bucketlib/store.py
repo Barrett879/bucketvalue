@@ -1878,7 +1878,8 @@ def feed_work(today: dt.date, sched) -> dict:
 # -- The feed's tables and facts for props_ui (design 2.7, m19) -------------------
 @st.cache_resource(max_entries=FEED_TABLES_MAX, show_spinner=False)
 def _feed_tables(date_iso: str, generation: int, feed_key: str, frame_key: str, roster_key: str,
-                 params_key: str, _feed, _frame, _params, _roster) -> props.FeedTables:
+                 params_key: str, tables_class: str, _feed, _frame, _params, _roster
+                 ) -> props.FeedTables:
     return _tables_now(_feed, _frame, _params, _roster)
 
 
@@ -1916,7 +1917,14 @@ def feed_tables(date, feed, served, params, roster) -> props.FeedTables | None:
     rows, the frame, the roster and the parameters; a digest that cannot be
     made is never cached (computed every time). At most FEED_TABLES_MAX
     entries; a cache clear costs one recompute, never a credit (the credits
-    live in the anchor). The feed never enters _live_frame or its keys (RC N3)."""
+    live in the anchor). The feed never enters _live_frame or its keys (RC N3).
+
+    The key also names the props.FeedTables class this call sees (round P1,
+    2026-11-12): Streamlit's resource cache outlives freshen's purge, and the
+    code after a push reads tables of the old class as no tables at all, so
+    each import of props gets tables of its own. A cached value of another
+    class (impossible with that key) is logged by its type and rebuilt,
+    uncached."""
     has_lines = False
     try:
         value = getattr(feed, "value", None)
@@ -1931,8 +1939,14 @@ def feed_tables(date, feed, served, params, roster) -> props.FeedTables | None:
                 _params_digest(params))
         if any(k is None for k in keys):
             return _tables_now(value, frame, params, roster)
-        return _feed_tables(S.as_date(date).isoformat(), int(feed.generation), *keys,
-                            _feed=value, _frame=frame, _params=params, _roster=roster)
+        tables = _feed_tables(S.as_date(date).isoformat(), int(feed.generation), *keys,
+                              f"{id(props.FeedTables):x}", _feed=value, _frame=frame,
+                              _params=params, _roster=roster)
+        if not isinstance(tables, props.FeedTables):
+            C.logger.warning("oddsapi: feed tables from older code (%s); rebuilt",
+                             type(tables).__name__)
+            return _tables_now(value, frame, params, roster)
+        return tables
     except Exception as e:  # noqa: BLE001 - the type only; the board explains itself
         C.logger.warning("oddsapi: feed tables failed (%s)", type(e).__name__)
         return props.FeedTables(failed=True) if has_lines else None

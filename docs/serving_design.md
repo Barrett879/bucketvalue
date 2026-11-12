@@ -480,7 +480,7 @@ design (architecture_v2.md, whose section numbers "design 3.6" and the like
 cite, and its budget replay RP; both are kept outside the repo) as amended:
 layout C (Barrett, 2026-11-11: every book at once, one column per book in the
 order DK, FD, MGM, PP, UD, each line with the model's lean arrow; no price is
-shown for any book) and the build amendments B1 to B33, named below where they
+shown for any book) and the build amendments B1 to B34, named below where they
 decide a rule. The operator's side is docs/runbook.md section 8. With no key
 configured none of it runs and every page is what it was.
 
@@ -779,9 +779,15 @@ WARNING gives the count. The usage test never passes on a period's first day
 - `feed_tables` is `st.cache_resource` with 4 entries, keyed by the date, the
   ledger's generation and strict digests of the feed's rows, the frame, the
   roster and the simulator parameters; a digest that cannot be made means not
-  cached. Tables that cannot be built while the feed holds lines are
-  `FeedTables(failed=True)`; with a paste for the date the board is then the
-  paste's own, under one note (B17).
+  cached. The key also names the `props.FeedTables` class the call sees
+  (B34): Streamlit's resource cache outlives freshen's purge, so each import
+  of the code after a push rebuilds a date's tables once, never a credit,
+  rather than handing tables of the old class to code that reads them as
+  none. One push can mean several imports: up to one by freshen's purge, and
+  one for each session open at the push, whose Streamlit file watcher drops
+  the whole package at that session's next run. Tables that cannot be built
+  while the feed holds lines are `FeedTables(failed=True)`; with a paste for
+  the date the board is then the paste's own, under one note (B17).
 - props_ui draws every book at once: grid_rows makes one row per player and
   stat with a shown line, ranked by its strongest shown line; each cell is its
   book's line with the model's lean at it (an arrow and a text equivalent on a

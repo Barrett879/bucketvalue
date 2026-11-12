@@ -5,6 +5,11 @@ tables cache (_feed_tables, feed_tables, _strict_digest), feed_info, the
 loading watch, the pill and chip wording behind a feed flag, and view_params,
 which never carries a book.
 
+The tables cache across a code push (round P1, 2026-11-12): one test purges
+bucketlib for real (freshen.ensure(), with Streamlit's real st.cache_resource)
+and imports it again, then puts the saved modules back, so no later test sees
+a re-imported module or a cached entry of another import.
+
 Nothing here reaches a network or holds a key: conftest blocks the vendor and
 deletes the key variables for the session, and the tests that turn the feed on
 set a fake key built at run time ("K" * 40, from tests/test_live_feed.py)
@@ -19,7 +24,9 @@ construction (the comments say how), never read back from the code.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
+import importlib
 import logging
 import sys
 import types
@@ -34,7 +41,7 @@ from bucketlib import http
 from bucketlib import live
 from bucketlib import oddsbudget as OB
 from bucketlib import pipeline as P
-from bucketlib import props, simprov, store
+from bucketlib import props, props_ui, simprov, store
 from bucketlib import state as S
 from bucketlib.util import ET, UTC
 
@@ -558,6 +565,211 @@ def test_lines_left_with_nothing_to_compare_are_failed_tables_never_cached_f1(
     assert [m for m in said if m.startswith("oddsapi:")] == \
         ["oddsapi: feed tables failed (_NothingCompared)"] * 3
     assert said.count("prepare_feed failed (ValueError)") == 2 and "xyzzy" not in logs.text
+
+
+# -- The tables cache across a code push (round P1, 2026-11-12) ------------------------------
+def _bucketlib_modules() -> dict:
+    """Every bucketlib module in sys.modules, by name: the names freshen's
+    purge pops."""
+    return {n: m for n, m in sys.modules.items() if n == "bucketlib" or n.startswith("bucketlib.")}
+
+
+def _card_counts(ui, st_mod, ft, fl, frame, params, roster) -> dict:
+    """What the slate's cards count for DAY on these tables: app.py's own
+    calls (props_ui.date_board with store.feed_info, then line_counts_by_game
+    of its shown lines), through the given import of props_ui and store."""
+    view = ui.date_board(None, DAY, frame, params, roster, feed=ft,
+                         feed_info=st_mod.feed_info(fl, DAY))
+    return ui.line_counts_by_game(view.shown)
+
+
+def test_tables_cached_before_a_code_push_are_never_served_to_the_code_after_it_p1(
+        world, feed_frame, logs, monkeypatch):
+    """Round P1 (2026-11-12, live, right after the layout C push af6960b): the
+    slate's cards counted no line and the Game page drew no grid, with no
+    error. freshen.ensure() purges bucketlib, so the imports after it make
+    NEW classes; Streamlit's st.cache_resource keys _feed_tables by its
+    module, name and source, so its entries outlive the purge; and the new
+    props.feed_board's isinstance test turned the pre-purge FeedTables into
+    an empty board. A past date's key moves only with the ledger's
+    generation, which a pull of any game that changes its stored frame
+    bumps, so that view stayed empty until the next such pull (the next
+    morning's, from 08:50 ET).
+
+    A real purge, with Streamlit's real cache. Tables are built and cached;
+    the package is purged by freshen.ensure() itself (its stamp made stale,
+    as a push leaves it) and imported again; conftest's vendor block, which
+    sits on the session's http module only, is put on the new import's
+    before anything else runs (round P1's review, P1R-6); and the NEW
+    store.feed_tables is called for the same date and generation with equal
+    copies of the inputs, as the page's next view makes them, and the
+    PRE-purge simulator parameters, which store.sim_params()
+    (st.cache_resource too) still hands out. The tables must be the new
+    class's, cached under the new import (a second call is the same object,
+    and no WARNING is logged), and the new board's lines and the cards'
+    counts must be those of before the purge. The saved modules go back into
+    sys.modules afterwards, and the cache is cleared, so no later test sees
+    this import's modules or entries."""
+    import freshen
+    pkg = sys.modules["bucketlib"]
+    store._feed_tables.clear()
+    params = store.sim_params()               # production's, from st.cache_resource
+    fl = _feed_live(feed_frame)
+    before = store.feed_tables(DAY, fl, types.SimpleNamespace(frame=world.proj), params,
+                               world.roster)
+    assert type(before) is props.FeedTables and len(before.tables) == 9
+    lines = props.feed_board(before, None, None, None).lines
+    counts = _card_counts(props_ui, store, before, fl, world.proj, params, world.roster)
+    assert len(lines) and set(counts) == {EARLY, LATE} and all(counts.values())
+    saved, stamp = _bucketlib_modules(), (pkg.CODE_QUICK, pkg.CODE_DIGEST)
+    try:
+        # A push: the code on disk is no longer the code the package was imported from.
+        pkg.CODE_QUICK, pkg.CODE_DIGEST = ("older code",), "older code"
+        assert freshen.ensure() is True and _bucketlib_modules() == {}
+        new_store = importlib.import_module("bucketlib.store")
+        new_http = sys.modules["bucketlib.http"]
+        assert new_http is not http and http.vendor_get is http._vendor_session   # the block
+        monkeypatch.setattr(new_http, "vendor_get", http.vendor_get)
+        monkeypatch.setattr(new_http, "_vendor_session", http._vendor_session)
+        new_props, new_ui, new_live = (sys.modules[f"bucketlib.{m}"]
+                                       for m in ("props", "props_ui", "live"))
+        assert new_store is not store and new_props.FeedTables is not props.FeedTables
+        assert new_store.sim_params() is params           # the resource cache outlived the purge
+        fl2 = new_live.FeedLive(state="ok", value=feed_frame.copy(), asof=MORNING_UTC,
+                                per_game={}, generation=fl.generation)
+        frame2, roster2 = world.proj.copy(), world.roster.copy()
+        logs.clear()
+        after = new_store.feed_tables(DAY, fl2, types.SimpleNamespace(frame=frame2), params,
+                                      roster2)
+        lines2 = new_props.feed_board(after, None, None, None).lines
+        counts2 = _card_counts(new_ui, new_store, after, fl2, frame2, params, roster2)
+        assert isinstance(after, new_props.FeedTables), (
+            f"the pre-purge FeedTables came back (the old class: {type(after) is props.FeedTables}): "
+            f"the board has {len(lines2)} lines ({len(lines)} before the purge) and the cards "
+            f"count {counts2} ({counts} before)")
+        pd.testing.assert_frame_equal(lines2, lines)
+        assert counts2 == counts
+        # Cached under the new import: the next rerun gets the same object,
+        # and nothing had to be rebuilt from tables of another class.
+        assert new_store.feed_tables(DAY, fl2, types.SimpleNamespace(frame=frame2), params,
+                                     roster2) is after
+        assert [r.getMessage() for r in logs.records
+                if r.name == "bucketvalue" and r.levelno >= logging.WARNING] == []
+    finally:
+        for name in _bucketlib_modules():
+            sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        pkg.CODE_QUICK, pkg.CODE_DIGEST = stamp
+        store._feed_tables.clear()
+    assert sys.modules["bucketlib"] is pkg and sys.modules["bucketlib.store"] is store
+    assert sys.modules["bucketlib.props"] is props and _bucketlib_modules() == saved
+
+
+def test_within_one_import_a_rerun_gets_the_cached_tables_p1(world, feed_frame, counted):
+    """Round P1's key keeps the cache: within one import of props the class it
+    names is the same on every call, so a rerun, whose inputs are equal
+    copies (Streamlit's data caches hand out copies, and memory a new
+    FeedLive), gets the very same tables, built once."""
+    first = store.feed_tables(DAY, _feed_live(feed_frame), types.SimpleNamespace(frame=world.proj),
+                              D.SimParams(), world.roster)
+    again = store.feed_tables(DAY, _feed_live(feed_frame.copy()),
+                              types.SimpleNamespace(frame=world.proj.copy()), D.SimParams(),
+                              world.roster.copy())
+    assert type(first) is props.FeedTables and len(first.tables) == 9
+    assert again is first and len(counted) == 1
+
+
+def _feed_tables_of_another_import() -> type:
+    """props.FeedTables as another import of bucketlib.props makes it, which
+    is what tables cached before a push are to the code after it: the same
+    module, name and fields, under another class object, so only an identity
+    test tells the two apart and a test of the name waves it through (round
+    P1's review, P1R-1). Its text, which must never reach the log, carries a
+    marker."""
+    fields = [(f.name, f.type,
+               dataclasses.field(default=f.default, default_factory=f.default_factory))
+              for f in dataclasses.fields(props.FeedTables)]
+    return dataclasses.make_dataclass(
+        props.FeedTables.__name__, fields, module=props.FeedTables.__module__,
+        namespace={"__repr__": lambda self: "FeedTables(vendor-said-xyzzy)"})
+
+
+class _NotTables:
+    """A cached value of no tables class at all, whose text must never reach
+    the log either."""
+
+    def __repr__(self) -> str:
+        return "_NotTables(vendor-said-xyzzy)"
+
+    __str__ = __repr__
+
+
+def test_tables_of_another_class_are_rebuilt_and_logged_by_their_type_only_p1(
+        world, feed_frame, counted, monkeypatch, logs):
+    """Round P1's guard: should the cache ever hand back a value that is not
+    the current props.FeedTables (the key names the class, so it cannot),
+    feed_tables logs one WARNING naming its type, never any of its text, and
+    builds the tables afresh, uncached, through _tables_now: the same tables
+    as the cached path. The value is a FeedTables of another import of
+    props, the case the guard exists for: the same module, name and fields
+    as the current class, and another class object. A value of another type
+    altogether is named by its own type. A rebuild that fails is failed
+    tables, logged by type, as every failure of feed_tables is."""
+    served = types.SimpleNamespace(frame=world.proj)
+    params = D.SimParams()
+    fl = _feed_live(feed_frame)
+    want = store.feed_tables(DAY, fl, served, params, world.roster)       # the cached path
+    assert len(counted) == 1 and len(want.tables) == 9
+    older = _feed_tables_of_another_import()
+    stale = older(tables=want.tables, metas=want.metas, report=want.report)
+    assert (older.__module__, older.__qualname__, older.__name__) == (
+        props.FeedTables.__module__, props.FeedTables.__qualname__, props.FeedTables.__name__)
+    assert [(f.name, f.type) for f in dataclasses.fields(older)] == [
+        (f.name, f.type) for f in dataclasses.fields(props.FeedTables)]
+    assert older is not props.FeedTables and not isinstance(stale, props.FeedTables)
+    logs.clear()
+    monkeypatch.setattr(store, "_feed_tables", lambda *a, **k: stale)
+    got = store.feed_tables(DAY, fl, served, params, world.roster)
+    assert type(got) is props.FeedTables and not got.failed and got is not want
+    assert len(counted) == 2                                     # built again, through prepare_feed
+    assert set(got.tables) == set(want.tables) and got.report == want.report
+    for k in want.tables:
+        pd.testing.assert_frame_equal(got.tables[k], want.tables[k])
+        assert got.metas[k]["posted"] == want.metas[k]["posted"]
+    said = [(r.levelname, r.getMessage()) for r in logs.records if r.name == "bucketvalue"]
+    assert said == [("WARNING", "oddsapi: feed tables from older code (FeedTables); rebuilt")]
+    assert "xyzzy" not in logs.text
+    # Uncached: the next call with the same inputs builds and warns again.
+    again = store.feed_tables(DAY, fl, served, params, world.roster)
+    assert type(again) is props.FeedTables and again is not got and len(counted) == 3
+    assert _messages(logs) == ["oddsapi: feed tables from older code (FeedTables); rebuilt"] * 2
+    # A value of another type altogether: named by its own type, never its text.
+    with monkeypatch.context() as mp:
+        mp.setattr(store, "_feed_tables", lambda *a, **k: _NotTables())
+        logs.clear()
+        other = store.feed_tables(DAY, fl, served, params, world.roster)
+        assert type(other) is props.FeedTables and set(other.tables) == set(want.tables)
+        assert len(counted) == 4
+        assert _messages(logs) == ["oddsapi: feed tables from older code (_NotTables); rebuilt"]
+        assert "xyzzy" not in logs.text
+    # A rebuild that raises, or leaves no line to compare: failed tables, by type.
+    def boom(*a, **k):
+        raise KeyError("vendor-said-xyzzy")
+    with monkeypatch.context() as mp:
+        mp.setattr(props, "compare_books", boom)
+        logs.clear()
+        assert store.feed_tables(DAY, fl, served, params, world.roster) == \
+            props.FeedTables(failed=True)
+        assert _messages(logs) == ["oddsapi: feed tables from older code (FeedTables); rebuilt",
+                                   "oddsapi: feed tables failed (KeyError)"]
+        assert "xyzzy" not in logs.text
+    logs.clear()
+    junk = _feed_live(feed_frame.assign(line=-1.0))             # every line outside the paste rule
+    assert store.feed_tables(DAY, junk, served, params, world.roster) == props.FeedTables(failed=True)
+    assert [m for m in _messages(logs) if m.startswith("oddsapi:")] == [
+        "oddsapi: feed tables from older code (FeedTables); rebuilt",
+        "oddsapi: feed tables failed (_NothingCompared)"]
+    assert len(counted) == 6 and "xyzzy" not in logs.text
 
 
 # -- B10: the anchor check through store.feed_start --------------------------------------------
