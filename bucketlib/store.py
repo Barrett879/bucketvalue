@@ -24,17 +24,22 @@ through models.load(). The slate and the Game page call it with the same
 arguments for the same view, so the card pill, the board and the tables read
 ONE frame, and their medians come from ONE shared simulator provider
 (simprov.provider_for). The app never runs features.build and never writes
-to disk.
+to disk. The recompute runs the model trees on one OpenMP thread, and a
+recompute or a board build that takes SLOW_BUILD_S seconds or more logs one
+WARNING line (docs/serving_design.md section 11).
 """
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -44,6 +49,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
+from threadpoolctl import threadpool_info, threadpool_limits
 
 from . import cache as C
 from . import context as CTX
@@ -1355,6 +1361,94 @@ def render_trust_table(table: pd.DataFrame) -> str:
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+# -- Slow builds (2026-11-15, round BKS) --------------------------------------
+# One WARNING line when the page's frame recompute (the live_projections call
+# in _live_frame) or its board build (_tables_now) takes SLOW_BUILD_S seconds
+# or more, so the Streamlit Cloud log says which step a slow view spent its
+# time in and what CPU the process saw (docs/runbook.md section 9). Fixed
+# words and numbers only: never a key, URL, path, setting value, player or
+# game. The facts are read only when the line is about to be logged, and the
+# timing touches no cached value and no cache key.
+SLOW_BUILD_S = 20.0
+CGROUP_DIR = Path("/sys/fs/cgroup")
+_build_clock = time.perf_counter
+_CGROUP_NUMBER = re.compile(r"[0-9]{1,18}")
+
+
+def _cgroup_text(path: Path) -> str | None:
+    """One cgroup file's text, or None when it is not a regular file, cannot
+    be read or runs past 64 bytes (no cgroup number file does). Never
+    raises."""
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as fh:
+            data = fh.read(65)
+        return data.decode("ascii", "replace") if len(data) <= 64 else None
+    except Exception:  # noqa: BLE001 - a missing or odd file reads as no limit
+        return None
+
+
+def _cpus(quota, period) -> str:
+    """quota / period in CPUs ("1.50"), or "none" unless both are whole
+    numbers above zero."""
+    q, p = ("" if v is None else str(v).strip() for v in (quota, period))
+    if not (_CGROUP_NUMBER.fullmatch(q) and _CGROUP_NUMBER.fullmatch(p)):
+        return "none"
+    q, p = int(q), int(p)
+    return f"{q / p:.2f}" if q > 0 and p > 0 else "none"
+
+
+def _cgroup_cpus(root: Path | None = None) -> str:
+    """The process's cgroup CPU limit in CPUs ("2.00"): cgroup v2's cpu.max
+    ("<quota> <period>") when that file exists, else cgroup v1's
+    cpu/cpu.cfs_quota_us over cpu/cpu.cfs_period_us. "none" when there is no
+    limit ("max", or a quota of -1) or the files are missing, unreadable or
+    not numbers. Never raises."""
+    try:
+        root = CGROUP_DIR if root is None else Path(root)
+        v2 = root / "cpu.max"
+        if os.path.exists(v2):
+            parts = (_cgroup_text(v2) or "").split()
+            return _cpus(*parts) if len(parts) == 2 else "none"
+        return _cpus(_cgroup_text(root / "cpu" / "cpu.cfs_quota_us"),
+                     _cgroup_text(root / "cpu" / "cpu.cfs_period_us"))
+    except Exception:  # noqa: BLE001
+        return "none"
+
+
+def _openmp_threads() -> str:
+    """The OpenMP runtime's thread count for the calling thread
+    (omp_get_max_threads, as threadpoolctl reads it: the largest over the
+    OpenMP runtimes loaded), or "none" when none is loaded. Unless
+    OMP_NUM_THREADS is set, scikit-learn's trees use the smaller of it and
+    the physical cores joblib counts (under any cgroup quota), so they can
+    use fewer. Never raises."""
+    try:
+        counts = [int(i["num_threads"]) for i in threadpool_info() if i.get("user_api") == "openmp"]
+    except Exception:  # noqa: BLE001
+        return "none"
+    return str(max(counts)) if counts else "none"
+
+
+def _note_if_slow(step: str, seconds: float) -> None:
+    """The slow-build line, once `seconds` reaches SLOW_BUILD_S and the log
+    takes WARNING lines: the step ("frame" or "board"), its seconds to one
+    decimal, os.cpu_count(), the cgroup CPU limit and the OpenMP thread
+    count, each read here and only then. Its callers call it outside any
+    thread limit, so the OpenMP count is the runtime's count outside the
+    recompute. Never raises: a diagnostic line never costs the page."""
+    try:
+        if not (seconds >= SLOW_BUILD_S) or not C.logger.isEnabledFor(logging.WARNING):
+            return
+        n = os.cpu_count()
+        C.logger.warning("slow build: step=%s seconds=%.1f cpu_count=%s cgroup_cpus=%s "
+                         "openmp_threads=%s", step, seconds, "none" if n is None else int(n),
+                         _cgroup_cpus(), _openmp_threads())
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # -- The loader ---------------------------------------------------------------
 LOADER_TTL_S = 120          # the clock moves hours_to_tip and report_age_h; reports, 10 min
 LOADER_MAX_ENTRIES = 64     # mark-out variants per date stay bounded
@@ -1413,6 +1507,31 @@ def sim_params() -> D.SimParams:
     return D.SimParams.load(MODELS_DIR / SIM_PARAMS_FILE)
 
 
+@contextmanager
+def _one_openmp_thread():
+    """The recompute's limit: the calling thread runs ONE OpenMP thread
+    (threadpoolctl.threadpool_limits(limits=1, user_api="openmp")) until the
+    block ends, also when it raises; no other thread's count moves. The limit
+    only saves time (every number is the same at any thread count), so
+    threadpoolctl failing to set it or to lift it costs one WARNING line of
+    fixed words and the error's type, never the page: when it cannot be set,
+    the recompute runs at this thread's own count."""
+    try:
+        limit = threadpool_limits(limits=1, user_api="openmp")
+    except Exception as e:  # noqa: BLE001 - see the docstring
+        C.logger.warning("thread limit not set (%s): the recompute runs at the default count",
+                         type(e).__name__)
+        limit = None
+    try:
+        yield
+    finally:
+        if limit is not None:
+            try:
+                limit.restore_original_limits()
+            except Exception as e:  # noqa: BLE001 - see the docstring
+                C.logger.warning("thread limit not lifted (%s)", type(e).__name__)
+
+
 @st.cache_data(ttl=LOADER_TTL_S, max_entries=LOADER_MAX_ENTRIES, show_spinner=False)
 def _live_frame(date_iso: str, report_key: tuple, odds_key: tuple, marks: tuple, past: tuple,
                 _now: dt.datetime, _report, _odds, _sched) -> tuple[pd.DataFrame, P.Info]:
@@ -1420,8 +1539,19 @@ def _live_frame(date_iso: str, report_key: tuple, odds_key: tuple, marks: tuple,
         mdl = models()
     except P.LIVE_FAILURES:
         mdl = None      # live_projections loads again, fails the same way, serves the committed rows
-    return P.live_projections(dt.date.fromisoformat(date_iso), _now, marked_out=set(marks),
-                              report=_report, odds=_odds, models=mdl, schedule=_sched)
+    # The recompute's model trees run on ONE OpenMP thread: this thread's
+    # limit only, restored on the way out (_one_openmp_thread). Each of the
+    # ~3,500 trees is its own parallel region over a few hundred rows, so
+    # waking a team of threads costs more than the work it shares, and far
+    # more on a host that shows more cores than the app may use. Every row's
+    # sum is the same at any thread count, so the numbers do not change.
+    t0 = _build_clock()
+    try:
+        with _one_openmp_thread():
+            return P.live_projections(dt.date.fromisoformat(date_iso), _now, marked_out=set(marks),
+                                      report=_report, odds=_odds, models=mdl, schedule=_sched)
+    finally:
+        _note_if_slow("frame", _build_clock() - t0)     # after the limit is lifted
 
 
 # The two keys below are CONTENT only. live.Live's source ("live" on the fetch,
@@ -1890,8 +2020,12 @@ class _NothingCompared(Exception):
 
 
 def _tables_now(feed_value, frame, params, roster) -> props.FeedTables:
-    lines, _report = props.prepare_feed(feed_value, roster, frame)
-    ft = props.compare_books(lines, simprov.provider_for(frame, params), frame, roster)
+    t0 = _build_clock()
+    try:
+        lines, _report = props.prepare_feed(feed_value, roster, frame)
+        ft = props.compare_books(lines, simprov.provider_for(frame, params), frame, roster)
+    finally:
+        _note_if_slow("board", _build_clock() - t0)
     if not ft.tables:
         raise _NothingCompared("no line left to compare")
     return ft

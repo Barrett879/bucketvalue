@@ -6,7 +6,8 @@ The operator's runbook for the bot (`.github/workflows/daily.yml` ->
 claim re-checked against the code at that date. The opening-night version is in
 git under its old name: `git show dad9bb9:docs/runbook_opening_night.md`, first
 committed in fb9bd55. Spec section 4. Section 8, the licensed odds feed, was
-added on 2026-11-11 and checked against the code of that date.
+added on 2026-11-11 and checked against the code of that date. Section 9, the
+slow-build line, was added on 2026-11-15.
 
 ## 0. Where things stand (2026-11-03)
 
@@ -910,3 +911,43 @@ BUCKETVALUE_ODDS_API_KEY_FILE=~/.config/bucketvalue/odds_api_key .venv/bin/pytho
   (Barrett, 2026-11-11); revisit after the test week or a move to a paid plan.
 - **The push window.** Never push a change to the feed memory's shape between
   08:50 and 09:50 ET (the push rule above).
+
+## 9. A slow page: the slow-build line
+
+Since 2026-11-15 the site logs one WARNING line when the page's frame
+recompute or its board build takes 20 seconds or more (`SLOW_BUILD_S` in
+bucketlib/store.py). On a normal view each takes a second or two here, so
+the line means the step itself was slow. It shows at the default log level:
+Manage app, then Logs, and search for `slow build`.
+
+```
+[bucketvalue] WARNING slow build: step=frame seconds=312.4 cpu_count=8 cgroup_cpus=none openmp_threads=8
+```
+
+| Field | Meaning |
+|---|---|
+| `step` | `frame`: the date's projections recomputed for the page (the injury report and the lines through the 17 models). `board`: the odds feed's lines compared against them (every book and game, with the simulator). |
+| `seconds` | How long that step took, to a tenth of a second. |
+| `cpu_count` | The CPUs the machine reports, which can be more than the app may use. |
+| `cgroup_cpus` | The CPU limit the container sets, in CPUs (`2.00` is two), or `none` when it sets none or the limit cannot be read. |
+| `openmp_threads` | The OpenMP runtime's thread count outside the recompute, which runs on one (docs/serving_design.md section 11), as threadpoolctl reads it. It is not always what the models use: unless `OMP_NUM_THREADS` is set, scikit-learn's trees use at most the physical cores joblib counts under the cgroup quota, so a 2-CPU quota on 8 visible cores reads `openmp_threads=8` while they use 2. |
+
+- **A slow view with no line:** the time went somewhere else (a feed wait, a
+  network fetch, Streamlit itself), or into steps that each stayed under 20
+  seconds.
+- **`step=frame`:** the models run on one thread, so a slow frame points at
+  the box: a busy or throttled CPU, or slow file reads. `cgroup_cpus=none`
+  beside a large `cpu_count` means no quota this reader can see: none is set,
+  or the files are missing or cannot be read.
+- **`step=board`:** it grows with the books and games bought, but a ten-book
+  slate takes a second or two here, so tens of seconds again points at the
+  CPU.
+- A step that fails after 20 seconds or more logs the line too. The line
+  holds fixed words and numbers only, never a key, URL, path, setting value,
+  player or game, so it can be shared as it is.
+- **`thread limit not set (...)` or `thread limit not lifted (...)`:** a
+  WARNING with an error type in the brackets, not a slow-build line.
+  threadpoolctl could not put the recompute on one thread, or could not take
+  it off again. The page still serves, with the same numbers; when it was not
+  set, that recompute ran at the default thread count, which is slower on a
+  busy or oversized box.

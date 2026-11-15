@@ -891,3 +891,59 @@ that was spending:
   lines from 14:00). Both leave the 9 AM view untouched. Kept as built
   (Barrett, 2026-11-11), to revisit after the test week or a move to a paid
   plan.
+
+## 11. The page's recompute and board build (2026-11-15, round BKS)
+
+Two live home views took about 6 minutes each on 2026-11-15 (08:54 and 09:01
+ET); later that morning fresh views took 10 to 20 seconds and about 8, the
+second a full recompute. Here, on that day's real slate (ten books, 943
+lines), a full recompute view takes 2.5 to 2.9 s and a view where every cache
+hits 0.28 s. The board (feed_tables) is 1.6 s of it: 81 compares about 1.0 s
+and 108 simulated players 0.6 s. The frame (load_projections) is 0.6 to 0.9 s:
+17 HistGradientBoosting models, about 3,474 small per-tree parallel regions
+per frame build.
+
+- **The recompute runs on one OpenMP thread.** store._live_frame runs
+  pipeline.live_projections, and only it, inside store._one_openmp_thread:
+  `threadpoolctl.threadpool_limits(limits=1, user_api="openmp")`. The limit
+  is the calling thread's own and comes off on the way out, also when the
+  call raises; the model load before it and every other thread keep their
+  count. It only saves time, so it never costs the page: when threadpoolctl
+  cannot set it or lift it, that costs one WARNING line (`thread limit not
+  set` or `thread limit not lifted`, with the error's type), the
+  recompute's own error still raises as before, and a limit that was not
+  set leaves the recompute at the default count. Each tree is a parallel
+  region over a few hundred rows, so waking a team of threads costs more
+  than the work it shares, and far more on a busy box or one that shows more
+  cores than the app gets. models.predict on the 315-row frame took 104 ms
+  at the default 8 threads against 58 ms at 1 with this Mac idle, and 4,401
+  to 5,905 ms against 68 to 89 ms with 8 busy-loop processes competing. At
+  64 threads on 8 cores the frame build fell from 2.7 to 3.5 s to about
+  0.6 s. Each row's trees are summed in one order at any thread count, so
+  every number is the same bit for bit (tests/test_store_threads.py). The
+  limit is not in models.predict: the bot and the research scripts keep
+  their threads, and a test reads each model's count inside it.
+- **compare_books does each game's work once.** It cuts each game's
+  projection rows and indexes them once (props._projection_index), and every
+  book's compare() for that game reads the same index (compare's
+  keyword-only `_index`; every other caller passes none and runs the old
+  path). compare() only reads those rows, so sharing them is safe; a write
+  to one would leak into the next book's numbers, and
+  tests/test_props_compare_books.py hands them out read-only to prove none
+  happens. No index outlives one build. The lines are compared off a shallow
+  copy without attrs: pandas deep-copies a frame's non-empty attrs into
+  every frame and column cut from it, so the ten-book feed report was copied
+  about 40 times per (book, game). compare() reads each stat's reliability
+  once per call. Together that takes 0.6 to 0.7 s off every ten-book board
+  rebuild here, and no number moves.
+- **The slow-build line.** A frame recompute or a board build that takes
+  store.SLOW_BUILD_S (20) seconds or more logs one WARNING line with the
+  step, its seconds, os.cpu_count(), the cgroup CPU limit and the OpenMP
+  runtime's thread count outside the limit, as threadpoolctl reads it
+  (docs/runbook.md section 9). That count is not always the models' own:
+  unless OMP_NUM_THREADS is set, scikit-learn's trees use at most the
+  physical cores joblib counts under the cgroup quota. The frame's seconds
+  are live_projections' alone (the model load is cached once per process);
+  the board's cover prepare_feed, the simulator's provider and
+  compare_books. It reads those facts only when it logs, never raises into
+  the page, and touches no cached value and no cache key.
