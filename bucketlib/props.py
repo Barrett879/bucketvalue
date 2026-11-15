@@ -5002,8 +5002,25 @@ def _centred_pmf(dist_provider, pid: int, gid: str, prow: dict, stat: str) -> Pm
     return pmf
 
 
+def _projection_index(projections: pd.DataFrame) -> tuple[dict, dict]:
+    """compare()'s two lookups of a non-empty projection frame: {(person_id,
+    game_id): row}, the last duplicate winning, and {person_id: [rows]}. The
+    rows are read, never written, so compare_books builds them once per game
+    and every book's compare() shares them."""
+    proj_by_key: dict[tuple[int, str], dict] = {}
+    proj_by_pid: dict[int, list[dict]] = {}
+    for rec in projections.to_dict(orient="records"):
+        try:
+            k = (int(rec["person_id"]), str(rec["game_id"]))
+        except Exception:  # noqa: BLE001
+            continue
+        proj_by_key[k] = rec
+        proj_by_pid.setdefault(k[0], []).append(rec)
+    return proj_by_key, proj_by_pid
+
+
 def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
-            roster: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
+            roster: pd.DataFrame | None = None, *, _index=None) -> tuple[pd.DataFrame, dict]:
     """Every line, pasted or prepared from the odds feed (prepare_feed),
     against its distribution. Returns (table, meta).
 
@@ -5028,6 +5045,10 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
     refuses. tip_utc comes from the schedule via routing, not the projection.
     Lines that went through prepare_paste keep their paste-time match verdict;
     only lines with no verdict at all are resolved here.
+
+    `_index` is compare_books' own: _projection_index(projections), built
+    once per game and shared by every book's call. A stat's reliability is
+    read once per call (it is the same for every line of that stat).
     """
     lines = lines if lines is not None else pd.DataFrame()
     meta = _new_meta(len(lines))
@@ -5038,13 +5059,7 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
     proj_by_key: dict[tuple[int, str], dict] = {}
     proj_by_pid: dict[int, list[dict]] = {}
     if projections is not None and not projections.empty:
-        for rec in projections.to_dict(orient="records"):
-            try:
-                k = (int(rec["person_id"]), str(rec["game_id"]))
-            except Exception:  # noqa: BLE001
-                continue
-            proj_by_key[k] = rec
-            proj_by_pid.setdefault(k[0], []).append(rec)
+        proj_by_key, proj_by_pid = _index if _index is not None else _projection_index(projections)
     else:
         meta["reason"] = "no projections for this date"
     games_col = next((c for c in _GAMES_COLS
@@ -5064,6 +5079,7 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
         df = _resolve_inline(df, roster)
     unresolved_rows = []
     rows = []
+    rels: dict = {}
     for rec in df.to_dict(orient="records"):
         label = str(rec.get("stat_type") or "")
         try:
@@ -5135,7 +5151,9 @@ def compare(lines: pd.DataFrame, dist_provider, projections: pd.DataFrame,
             q_more, q_less = side_probabilities(p_lt, p_eq, p_gt, None)
             lean = lean_from(q_more)
             median = shown if shown is not None else pmf.median()
-            rel = reliability_for(stat)
+            rel = rels.get(stat)
+            if rel is None:
+                rel = rels[stat] = reliability_for(stat)
             src = "model"
             if hasattr(dist_provider, "source"):
                 try:
@@ -5790,13 +5808,20 @@ def compare_books(lines, dist_provider, projections, roster=None) -> FeedTables:
     so that check stays inside one book, and every row's lean is against its
     own book's line (design 7). A (book, game) whose compare() raises gets an
     empty table and a meta counting its lines as unprojected, so its ledger
-    still balances. The report is the one prepare_feed left on the lines."""
+    still balances. The report is the one prepare_feed left on the lines.
+    Each game's projection rows are cut and indexed once (_projection_index)
+    and shared by every book's compare() for that game."""
     report = {}
     if isinstance(lines, pd.DataFrame):
         report = dict(lines.attrs.get("feed_report") or {})
     if not isinstance(lines, pd.DataFrame) or lines.empty \
             or not {"book", "game_id"} <= set(lines.columns):
         return FeedTables({}, {}, report)
+    # compare() reads no attrs, but pandas deep-copies them into every frame
+    # and column cut from these lines, so the report would be copied once per
+    # column compare() reads, for every (book, game). Off a shallow copy, once.
+    lines = lines.copy(deep=False)
+    lines.attrs = {}
     tips = {}
     if "tip_utc" in lines.columns:
         for gid, tip in zip(lines["game_id"], lines["tip_utc"]):
@@ -5808,10 +5833,16 @@ def compare_books(lines, dist_provider, projections, roster=None) -> FeedTables:
                                           tips.get(k[1]) or dt.datetime.max.replace(tzinfo=UTC),
                                           str(k[1])))
     tables, metas = {}, {}
+    per_game = {}
     for book, gid in order:
         rows = lines.iloc[groups[(book, gid)]].reset_index(drop=True)
         try:
-            table, meta = compare(rows, dist_provider, _game_projections(projections, gid), roster)
+            if gid not in per_game:
+                gp = _game_projections(projections, gid)
+                per_game[gid] = (gp, _projection_index(gp) if isinstance(gp, pd.DataFrame)
+                                 and not gp.empty else None)
+            gp, index = per_game[gid]
+            table, meta = compare(rows, dist_provider, gp, roster, _index=index)
         except Exception as e:  # noqa: BLE001 - one (book, game) costs only itself
             logger.warning("compare_books: %s %s failed (%s)", book, gid, type(e).__name__)
             table, meta = pd.DataFrame(columns=TABLE_COLUMNS), _failed_meta(len(rows))
