@@ -43,6 +43,7 @@ from bucketlib import oddsbudget as OB
 from bucketlib import pipeline as P
 from bucketlib import props, props_ui, simprov, store
 from bucketlib import state as S
+from bucketlib.sources import oddsapi as O
 from bucketlib.util import ET, UTC
 
 HERE = Path(__file__).resolve().parent
@@ -817,24 +818,26 @@ def test_feed_info_is_plain_copies_and_carries_the_pages_today(monkeypatch):
                        loading=1, generation=5,
                        report={"pulled": [("draftkings", "Jalen Duren", "Rebounds")], "n_pulled": 1})
     info = store.feed_info(fl, DAY)
-    five = ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog")   # the setting's default
     assert info == {"state": "stale", "asof": stamp, "loading": 1, "generation": 5, "lines": 2,
                     "per_game": {EARLY: {"asof": stamp, "books": {"draftkings": stamp},
                                          "pretip": False, "pp_missing": True, "reason": None}},
                     "report": {"pulled": [("draftkings", "Jalen Duren", "Rebounds")], "n_pulled": 1},
-                    "today": DAY, "books": five}
+                    "today": DAY, "books": O.BOOKS}                  # the setting's default
     info["per_game"][EARLY]["books"]["fanduel"] = stamp
     info["report"]["pulled"].append(("x", "y", "z"))
     assert fl.per_game[EARLY]["books"] == {"draftkings": stamp} and len(fl.report["pulled"]) == 1
     off = store.feed_info(live.FeedLive.off(), DAY)
     assert off["state"] == "off" and off["lines"] == 0 and off["per_game"] == {}
     # Build amendment B25: the books the site buys, BUCKETVALUE_ODDS_BOOKS read on the call (book
-    # keys only, a name outside the five dropped), from the process environment by default.
+    # keys only, a name outside the catalog dropped: B35), from the process environment by default.
     narrow = {"BUCKETVALUE_ODDS_BOOKS": "draftkings, FanDuel,pinnacle,prizepicks,underdog"}
     assert store.feed_info(fl, DAY, environ=narrow)["books"] == (
         "draftkings", "fanduel", "prizepicks", "underdog")
     monkeypatch.setenv("BUCKETVALUE_ODDS_BOOKS", "betmgm")
-    assert store.feed_info(fl, DAY)["books"] == ("betmgm",)
+    assert store.feed_info(fl, DAY)["books"] == ("betmgm",) == store.feed_books()
+    wide = {"BUCKETVALUE_ODDS_BOOKS": "ballybet,bovada,dabble_us_dfs"}          # B35: any catalog book
+    assert store.feed_info(fl, DAY, environ=wide)["books"] == ("ballybet", "dabble_us_dfs")
+    assert store.feed_books(wide) == ("ballybet", "dabble_us_dfs") and store.feed_books({}) == O.BOOKS
 
 
 # -- The pill and chip wording behind a feed flag (design 2.7) --------------------------------

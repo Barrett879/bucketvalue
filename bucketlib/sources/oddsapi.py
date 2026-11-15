@@ -1,6 +1,7 @@
 """The Odds API (the-odds-api.com): the licensed player lines (Barrett,
-2026-11-09). DraftKings, FanDuel, BetMGM, PrizePicks and Underdog, display
-only: feed lines are never a model input.
+2026-11-09; up to ten books since 2026-11-15, build amendment B35). The books
+of BOOK_CATALOG only, state-licensed US sportsbooks and US DFS pick'em sites,
+display only: feed lines are never a model input.
 
 PURE. This module holds the vendor's facts, the settings reader, the request
 builders and the parsers, and does no I/O at all: no network, no file, no
@@ -36,11 +37,11 @@ BucketValueDev/understand/text, UL = the schema in understand/live):
     vendor last READ the market (UL schema 809), not when the line moved, and
     the bookmaker-level stamp is deprecated and absent on event odds (docs
     1053, 1501), so it is never read.
-  - DFS prices (PrizePicks, Underdog, every us_dfs book) are indicative only
-    (UT/bookmakers.txt:115) and are blanked to NaN, so nothing downstream can
-    do price math on them. Demons and Goblins sit only in `_alternate` markets
-    (bookmakers.txt:123-125), which the feed never buys, so every feed line is
-    a standard line.
+  - DFS prices (every pick'em book of DFS_BOOKS, which holds every us_dfs
+    key) are indicative only (UT/bookmakers.txt:115) and are blanked to NaN,
+    so nothing downstream can do price math on them. Demons and Goblins sit
+    only in `_alternate` markets (bookmakers.txt:123-125), which the feed
+    never buys, so every feed line is a standard line.
   - A 401 is a bad key OR an account out of credits; the body's code says
     which (UL schema 869-870; UT/error_codes.txt). Codes are read as whole
     words from the scrubbed snippet, and no vendor text is passed on.
@@ -76,26 +77,62 @@ SEND_REGIONS = False      # True only if the probe sees 422 MISSING_REGION and i
 REGIONS = "us"            # what is sent when SEND_REGIONS is True (the probe's step 6)
 MAX_BOOKS = 10            # up to 10 books named in `bookmakers` bill as 1 region (docs 529)
 
-BOOKS = ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog")   # Barrett, 2026-11-09
-# Our titles, equal to props.BOOK_TITLE (layout B, amendment A2). The vendor's
-# own `title` ("Underdog Fantasy") is never shown.
-BOOK_TITLE = {"prizepicks": "PrizePicks", "underdog": "Underdog", "draftkings": "DraftKings",
-              "fanduel": "FanDuel", "betmgm": "BetMGM"}
+# -- The books (Barrett, 2026-11-09 and 2026-11-15; build amendment B35) ---------
+# The catalog: every book the site may buy and show, and only state-licensed US
+# sportsbooks and US DFS pick'em sites, as (key, code, title) in the board's
+# column order (the keys are the vendor's, UT/bookmakers.txt). The codes and
+# titles are ours: the vendor's own `title` ("Underdog Fantasy") is never
+# shown. props keeps the same catalog (props.BOOK_CATALOG, BOOK_ORDER,
+# BOOK_CODE, BOOK_TITLE and DFS_BOOKS) and never imports this module;
+# tests/test_props_feed.py pins the copies equal.
+BOOK_CATALOG = (
+    ("draftkings", "DK", "DraftKings"),
+    ("fanduel", "FD", "FanDuel"),
+    ("betmgm", "MGM", "BetMGM"),
+    ("prizepicks", "PP", "PrizePicks"),
+    ("underdog", "UD", "Underdog"),
+    ("espnbet", "TSB", "theScore Bet"),      # the vendor's title; formerly ESPN Bet
+    ("hardrockbet", "HRB", "Hard Rock Bet"),
+    ("betrivers", "BR", "BetRivers"),
+    ("pick6", "P6", "DraftKings Pick6"),
+    ("betparx", "PARX", "betPARX"),
+    ("ballybet", "BALLY", "Bally Bet"),
+    ("dabble_us_dfs", "DAB", "Dabble"),
+    ("williamhill_us", "CZR", "Caesars"),    # paid plans only (PAID_BOOKS)
+    ("fanatics", "FAN", "Fanatics"),         # paid plans only (PAID_BOOKS)
+)
+BOOK_ORDER = tuple(key for key, _code, _title in BOOK_CATALOG)
+BOOK_CODE = {key: code for key, code, _title in BOOK_CATALOG}
+BOOK_TITLE = {key: title for key, _code, title in BOOK_CATALOG}
+_CATALOG = frozenset(BOOK_ORDER)      # what the settings reader and the request builder accept
+# The pick'em books: their side words are More and Less, and their prices are
+# indicative only (UT/bookmakers.txt:115), so the parser blanks them to NaN and
+# no page shows one. They are every us_dfs key the vendor lists
+# (bookmakers.txt:113-127), so US_DFS_BOOKS, the probe's name for them, is the
+# same set. Every other book of the catalog is a sportsbook (Over and Under).
+DFS_BOOKS = frozenset({"prizepicks", "underdog", "pick6", "dabble_us_dfs"})
+US_DFS_BOOKS = DFS_BOOKS
+# Served on paid plans only: in the catalog for a later plan, never in BOOKS.
+PAID_BOOKS = frozenset({"williamhill_us", "fanatics"})
+# Vendor keys the site never buys or shows, whoever asks (B35): the offshore
+# books, every exchange and prediction market, the sweepstakes book, Hard
+# Rock's state variants, courtside and rebet. The catalog alone decides what is
+# accepted; this set only gives the settings reader its own phrase for them, so
+# a log says such a key was refused on purpose, not mistyped.
+EXCLUDED_BOOKS = frozenset({
+    "betonlineag", "betus", "bovada", "lowvig", "mybookieag", "betanysports",
+    "betopenly", "kalshi", "limitless", "novig", "polymarket", "polymarket_us", "prophetx",
+    "fliff", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh", "courtside", "rebet"})
+# The default BUCKETVALUE_ODDS_BOOKS (Barrett, 2026-11-15: "as many as we can to
+# not go over the free api credits"): ten books, since up to 10 books named in
+# `bookmakers` bill as ONE region (docs 529), so ten cost what five did, and an
+# 11th would double every pull. The ONLY place the default list is written:
+# the setting's default is built from it, a full pull names it while the
+# setting is unset, and one test pins it
+# (tests/test_oddsapi.py::test_the_default_books_are_pinned).
+BOOKS = ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog", "espnbet", "hardrockbet",
+         "betrivers", "pick6", "betparx")
 REFERENCE_BOOK = "prizepicks"       # the default pick, and the book the free top-up polls wait for
-DFS_BOOKS = frozenset({"prizepicks", "underdog"})
-# The vendor's US book keys (UT/bookmakers.txt): the five and others. A fact
-# list for the request builder's check. The settings reader accepts ONLY the
-# five (build amendment B6): BUCKETVALUE_ODDS_BOOKS may narrow them, never add
-# one, since a sixth book would be bought and never shown (the board's pills
-# show the five, props.BOOK_ORDER).
-KNOWN_BOOKS = frozenset(BOOKS) | {"betrivers", "williamhill_us", "fanatics", "espnbet",
-                                  "hardrockbet", "pick6", "dabble_us_dfs"}
-# Every us_dfs key above. Their prices are indicative only whichever of them a
-# call names (UT/bookmakers.txt:113-127), so the parser blanks them all.
-US_DFS_BOOKS = DFS_BOOKS | {"pick6", "dabble_us_dfs"}
-_OTHER_TITLE = {"betrivers": "BetRivers", "williamhill_us": "Caesars", "fanatics": "Fanatics",
-                "espnbet": "theScore Bet", "hardrockbet": "Hard Rock Bet",
-                "pick6": "DraftKings Pick6", "dabble_us_dfs": "Dabble"}
 
 # Market key -> the board's stat label (RC G8). Every label round-trips through
 # props.classify_stat to a projected stat (tests/test_oddsapi.py).
@@ -156,7 +193,7 @@ SETTING_DEFAULTS = {
     "BUCKETVALUE_ODDS_ENABLED": "1",                # "0" stops every vendor call, free ones too
     "BUCKETVALUE_ODDS_MARKETS": "player_points",
     "BUCKETVALUE_ODDS_CORE_MARKETS": "player_points",
-    "BUCKETVALUE_ODDS_BOOKS": "draftkings,fanduel,betmgm,prizepicks,underdog",
+    "BUCKETVALUE_ODDS_BOOKS": ",".join(BOOKS),      # the ten (B35): built, never written twice
     "BUCKETVALUE_ODDS_RESERVE": "",                 # unset: oddsbudget's max(25, 5% of the allowance)
     "BUCKETVALUE_ODDS_FIRST_PULL_ET": "08:50",
     "BUCKETVALUE_ODDS_LAST_PULL_LEAD_MIN": "30",
@@ -182,7 +219,7 @@ _WHOLE = re.compile(r"[+-]?\d{1,10}(?:\.0*)?")
 _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
 _DROPPED = {"alternate": "alternate market dropped", "period": "period market dropped",
             "yes_no": "yes/no market dropped", "various": "first-basket method market dropped",
-            "unmapped": "unknown key dropped"}
+            "unmapped": "unknown key dropped", "excluded": "excluded book dropped"}
 _UNREADABLE = object()
 
 
@@ -327,10 +364,14 @@ def _markets(env: Mapping, name: str, problems: list) -> tuple[str, ...]:
 
 
 def _books(env: Mapping, problems: list) -> tuple[str, ...]:
-    """The books to buy: the five (BOOKS) or fewer, in the order named. The
-    setting may only NARROW the five (build amendment B6). Any other name is
-    dropped with a fixed phrase in `problems` (never the name itself), and an
-    empty result means all five."""
+    """The books to buy, in the order named: any book of the catalog
+    (BOOK_ORDER), each once, at most MAX_BOOKS (build amendment B35, which
+    ends B6's rule that the setting may only narrow five books). Any other
+    name is dropped with a fixed phrase in `problems`, never the name itself:
+    "excluded book dropped" for a key the site never buys (EXCLUDED_BOOKS),
+    "unknown key dropped" for any other. Names past the tenth book are
+    dropped and said too, since an 11th book doubles the bill (docs 529), and
+    an empty result means the default (BOOKS)."""
     name = "BUCKETVALUE_ODDS_BOOKS"
     raw = _raw(env, name)
     if raw is _UNREADABLE:
@@ -338,14 +379,14 @@ def _books(env: Mapping, problems: list) -> tuple[str, ...]:
         raw = None
     out: list[str] = []
     for key in _key_list(raw if raw is not None else SETTING_DEFAULTS[name]):
-        if key not in KNOWN_BOOKS:
-            problems.append(f"setting {name}: unknown key dropped")
-        elif key not in BOOKS:
-            problems.append(f"setting {name}: book outside the five dropped")
+        if key in EXCLUDED_BOOKS:
+            problems.append(f"setting {name}: {_DROPPED['excluded']}")
+        elif key not in _CATALOG:
+            problems.append(f"setting {name}: {_DROPPED['unmapped']}")
         elif key in out:
             continue
         elif len(out) >= MAX_BOOKS:            # an 11th book doubles the bill (docs 529)
-            problems.append(f"setting {name}: more than 10 books; the rest dropped")
+            problems.append(f"setting {name}: more than {MAX_BOOKS} books; the rest dropped")
         else:
             out.append(key)
     if not out:
@@ -413,11 +454,13 @@ def event_odds_request(event_id, books, markets) -> tuple[str, dict]:
     """(path, params) for one game's lines. The books go in `bookmakers`, and
     `regions` is sent only when SEND_REGIONS is True. Raises ValueError, with
     a fixed text that names nothing, for an event id that is not 32 letters
-    and digits, or books or markets the settings reader would refuse."""
+    and digits, or books or markets the settings reader would refuse: a book
+    outside the catalog, or more than MAX_BOOKS of them, so no request ever
+    bills a second region (B35)."""
     eid = event_id if isinstance(event_id, str) and _EVENT_ID.fullmatch(event_id) else None
     if eid is None:
         raise ValueError("bad event id")
-    bks = _request_keys(books, KNOWN_BOOKS, MAX_BOOKS)
+    bks = _request_keys(books, _CATALOG, MAX_BOOKS)
     if bks is None:
         raise ValueError("bad books")
     mks = _request_keys(markets, MARKET_LABEL, len(MARKET_LABEL))
@@ -956,7 +999,7 @@ def parse_event_odds(payload, *, books, markets, fetched_at: dt.datetime) -> pd.
     rows = []
     for (book, base, _), g in groups.items():
         tally = by_book[book]
-        dfs = book in US_DFS_BOOKS
+        dfs = book in DFS_BOOKS                  # every us_dfs key: indicative prices, blanked
         main = _main_point(g["points"], dfs)
         for p, sides in g["points"].items():
             if p != main:
@@ -970,7 +1013,7 @@ def parse_event_odds(payload, *, books, markets, fetched_at: dt.datetime) -> pd.
             "line": main, "start_time": start_time, "direction": direction,
             "odds_type": "standard", "opp": None, "is_combo": False, "league": "NBA",
             "source": SOURCE, "pick": None, "alt_pick": None, "pair": None, "pair_loose": None,
-            "book": book, "book_title": BOOK_TITLE.get(book) or _OTHER_TITLE.get(book, book),
+            "book": book, "book_title": BOOK_TITLE.get(book, book),
             "market": base,
             "price_over": math.nan if dfs else sides.get("over", math.nan),
             "price_under": math.nan if dfs else sides.get("under", math.nan),
@@ -1040,8 +1083,10 @@ def merge_refresh(prev, new, books_requested, *, markets_requested=None) -> tupl
 
     `prev` is the game's stored frame (None at the first pull), `new` is
     parse_event_odds' frame and `books_requested` the books the call named
-    (the five on a full pull, ("prizepicks",) on a top-up). Books not
-    requested are never touched, whatever `new` holds.
+    (the configured books on a full pull, ("prizepicks",) on a top-up).
+    Books not requested are never touched, whatever `new` holds, so a book
+    added to the setting, or dropped from it, never reads as lines taken
+    down (B35).
 
     Only the markets the call asked for are judged: `markets_requested`
     when given, else the markets_requested parse_event_odds recorded in

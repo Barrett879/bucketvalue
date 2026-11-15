@@ -415,15 +415,24 @@ hours, or Actions is down.
 ## 8. The odds feed (The Odds API)
 
 **What it is.** The app's live layer (`bucketlib/live.py`) buys today's player
-lines for DraftKings, FanDuel, BetMGM, PrizePicks and Underdog from The Odds
-API, one call per game, for today's ET date only and only for games the bot has
-published. The board shows every book at once: one row per player and stat,
-one column per book (DK, FD, MGM, PP, UD), each line with an up arrow where the
-model leans More (Over) at it, a down arrow where it leans Less (Under), the
-number alone where it has no lean or the line does not offer the side it
-leans, and the dash where that book has no line. A book that has not posted a
-game shows the dash on that game's rows, and a note names the game. No price
-is shown for any book. The paste box stays as the backup (outages, typed
+lines from The Odds API for the books `BUCKETVALUE_ODDS_BOOKS` names (unset, the
+default ten: DraftKings, FanDuel, BetMGM, PrizePicks, Underdog, theScore Bet,
+Hard Rock Bet, BetRivers, DraftKings Pick6 and betPARX; build amendment B35),
+one call per game, for today's ET date only and only for games the bot has
+published. Only state-licensed US sportsbooks and US DFS pick'em sites can be
+named: the catalog in `bucketlib/sources/oddsapi.py` (BOOK_CATALOG) holds those
+ten, Bally Bet and Dabble, and Caesars and Fanatics, which the vendor serves on
+paid plans only. The board shows every book at once: one row per player and
+stat, one column per book with a line on the board, in the catalog's order (DK,
+FD, MGM, PP, UD, TSB, HRB, BR, P6, PARX, then BALLY, DAB, CZR, FAN), each line
+with an up arrow where the model leans More (Over) at it, a down arrow where it
+leans Less (Under), the number alone where it has no lean or the line does not
+offer the side it leans, and the dash where that book has no line. A book that
+has not posted a game shows the dash on that game's rows, and a note names the
+game; a book the site buys that has no line on the board at all has no column,
+and one note under the grid names it. A Game page draws the columns of the
+books with a line on that game, the same in every player's grid. No price is
+shown for any book. The paste box stays as the backup (outages, typed
 picks, Demons and Goblins). The bot and Actions never call the vendor, and
 nothing ever fetches PrizePicks itself.
 
@@ -442,14 +451,31 @@ nothing ever fetches PrizePicks itself.
 - **Where the lines live.** In process memory only: a code push and a Clear
   cache keep them, a restart loses them. They never reach disk, git, a
   visitor's token board or a browser copy.
-- **What it costs.** On the free plan (500 credits a month) points for the five
-  books cost 1 credit per game call (the probe, 2026-11-11). Each game gets its
-  08:50 pull and usually one more, 30 minutes before tip. An answer with nothing
-  posted is free (the vendor's docs).
-- **As shipped:** the free plan and points only; no responsible-gambling line;
-  the free PrizePicks-only checks on; the newer of a pasted PrizePicks line and
-  the feed's is shown (a typed pick, a Demon or a Goblin always is); today
-  only; the default reserve.
+- **What it costs.** On the free plan (500 credits a month) points cost 1
+  credit per game call (the probe, 2026-11-11, with five books). The vendor
+  bills a call by the markets it returns times the regions, and up to 10 books
+  named in `bookmakers` count as 1 region (11 to 20 as 2), so the ten default
+  books cost what five did: 1 credit a game. An 11th book would double every
+  call, so the settings reader keeps 10 books at most and the request builder
+  refuses more. Each game gets its 08:50 pull and usually one more, 30 minutes
+  before tip. An answer with nothing posted is free (the vendor's docs).
+- **As shipped:** the free plan and points only; the ten default books
+  (`BUCKETVALUE_ODDS_BOOKS` unset; build amendment B35, 2026-11-15); no
+  responsible-gambling line; the free PrizePicks-only checks on; the newer of a
+  pasted PrizePicks line and the feed's is shown (a typed pick, a Demon or a
+  Goblin always is); today only; the default reserve.
+- **Changing the default books.** The list is `BOOKS` in
+  `bucketlib/sources/oddsapi.py`, and one test pins it,
+  `tests/test_oddsapi.py::test_the_default_books_are_pinned`. Swapping one of
+  the last five for another catalog book, or reordering them, is those two
+  edits and nothing else in the code or the tests (six such changes were
+  rehearsed on 2026-11-15). Then run the full suite, and update the lists of
+  the ten in this section (What it is, the settings row, the 9 AM slate check)
+  and in docs/serving_design.md section 10. Keep the first five (DraftKings,
+  FanDuel, BetMGM, PrizePicks, Underdog): the tests' constructed vendor
+  answers post those five, so dropping one of them needs a reviewed round.
+  Setting `BUCKETVALUE_ODDS_BOOKS` in the secrets changes the site's books
+  without a push.
 
 ### Settings
 
@@ -465,7 +491,7 @@ reloads them by itself is UNVERIFIED.
 | `BUCKETVALUE_ODDS_ENABLED` | `"1"` | on: `"1"`, `"true"`, `"yes"`, `"on"`; off: `"0"`, `"false"`, `"no"`, `"off"` | The kill switch. Off stops every vendor call, the free one too, and the refresher. A value it cannot read also means off. |
 | `BUCKETVALUE_ODDS_MARKETS` | `"player_points"` | market keys, comma separated | What a pull asks for when the budget allows (a re-buy asks the core markets). Alternate, quarter or half, yes/no, first-basket and unknown keys are dropped; an empty list falls back to the default. |
 | `BUCKETVALUE_ODDS_CORE_MARKETS` | `"player_points"` | market keys from the list above | What the budget keeps when the full list does not fit, and what every re-buy asks. Keys outside the market list are ignored; with none left, its first market is used. |
-| `BUCKETVALUE_ODDS_BOOKS` | `"draftkings,fanduel,betmgm,prizepicks,underdog"` | some of those five | May only narrow the five; any other name is dropped, and an empty list means all five. The board keeps all five columns: a book left out shows the dash on every row (PrizePicks' column still shows a visitor's pasted lines), and while it has no line for a game another book has, the note reads `<Book> lines are not loaded on this site.` |
+| `BUCKETVALUE_ODDS_BOOKS` | `"draftkings,fanduel,betmgm,prizepicks,underdog,espnbet,hardrockbet,betrivers,pick6,betparx"` | up to 10 catalog books: those ten, `ballybet`, `dabble_us_dfs`, and on a paid plan `williamhill_us` (Caesars) and `fanatics` | Any catalog book, in the order named, each once. An unknown key, or a book the site never buys (an offshore book, an exchange or prediction market, the sweepstakes book, a Hard Rock state variant, courtside or rebet), is dropped, so is an 11th book and every later one, and an empty list means the default. Up to 10 books bill as 1 region, so ten cost what five do. On the free plan `williamhill_us` and `fanatics` get no lines (the vendor serves them on paid plans only), so, if named, each takes one of the 10 places, and the note under the grid and every Game page name it as a book with no lines. The board draws a column only for a book with a line on it: a book the site buys with no line yet has no column and is named under the grid (`No <Book> lines yet for this date.`); a book left out has no column unless it has lines there (PrizePicks' column shows a visitor's pasted lines), and while it has no line for a game another book has, the note reads `<Book> lines are not loaded on this site.` |
 | `BUCKETVALUE_ODDS_RESERVE` | unset: the larger of 25 and 5% of the plan's credits | a whole number, 0 to 100000000 | Credits the site never plans and never spends: room for the probe, local runs and surprises. |
 | `BUCKETVALUE_ODDS_FIRST_PULL_ET` | `"08:50"` | `"HH:MM"`, ET | The earliest first pull of a game, on its own ET date. The restart brake starts 60 minutes later (09:50 by default). |
 | `BUCKETVALUE_ODDS_LAST_PULL_LEAD_MIN` | `"30"` | 0 to 720 | The last planned refresh, this many minutes before tip. |
@@ -546,11 +572,22 @@ buys today's games that have not tipped (the restart rules below say how).
 - **9:00 to 9:15 AM ET, the slate.**
   - "Model vs the board" shows without a paste, with the note `Lines as of
     8:50 AM ET.`
-  - The grid has five book columns, DK, FD, MGM, PP and UD, each cell a line,
-    with an up or down arrow where the model leans at it, and one legend line
-    under it: `Up arrow: model leans More (Over) at that line. Down arrow: Less
-    (Under). No arrow: no lean there, or the line does not offer that side. A
-    dash: no line from that book.`
+  - The grid has a column for each book with a line on the date, in the order
+    DK, FD, MGM, PP, UD, TSB, HRB, BR, P6, PARX, each cell a line, with an up or
+    down arrow where the model leans at it, and one legend line under it: `Up
+    arrow: model leans More (Over) at that line. Down arrow: Less (Under). No
+    arrow: no lean there, or the line does not offer that side. A dash: no line
+    from that book.` A book the site buys that has posted nothing yet has no
+    column, and the note under the legend names it: `No BetRivers or betPARX
+    lines yet for this date.` Several of the newer books post props later in
+    the morning (at 00:50 ET on 2026-11-15 only theScore Bet and Hard Rock Bet
+    had), so expect that note at 9 AM. A book that posts after its game's
+    first pull shows at that game's next planned refresh, not the moment it
+    posts: halfway from the first pull to the last refresh on a day the plan
+    gives each game three pulls, else the last refresh, 30 minutes before tip.
+    The PrizePicks checks ask PrizePicks alone, so they never bring another
+    book, and one that finds PrizePicks' lines is billed and counts as one of
+    the game's pulls, so it can take the halfway refresh's place.
   - A game PrizePicks has not posted shows the dash in the PP column, and the
     note names it: `No PrizePicks lines yet for <game>.` (books missing the
     same games share one sentence: `No PrizePicks or Underdog lines yet for
@@ -669,7 +706,7 @@ Failures (WARNING):
 | `oddsapi: <book> answered 0 of <n> lines for a game; kept the previous lines (<counters>)` | That book's answer had nothing readable; its earlier lines stay. |
 | `oddsapi: <book> answered <n> of <m> lines for a game; kept the previous lines` | That book came back with under half its lines; its earlier lines stay. |
 | `oddsapi: unknown team name(s): <names>` | The vendor named a team the site does not know; that game is skipped. Tell the developer. |
-| `oddsapi: setting <NAME>: <what>` | A setting was dropped or set back to its default: fix the secret. `<what>` is one of `unreadable value; default used`, `out of range; default used`, `empty list; default used`, `unknown key dropped`, `alternate market dropped`, `period market dropped`, `yes/no market dropped`, `first-basket method market dropped`, `book outside the five dropped`, `more than 10 books; the rest dropped`, `not in the market list; the first market used`. |
+| `oddsapi: setting <NAME>: <what>` | A setting was dropped or set back to its default: fix the secret. `<what>` is one of `unreadable value; default used`, `out of range; default used`, `empty list; default used`, `unknown key dropped`, `excluded book dropped`, `alternate market dropped`, `period market dropped`, `yes/no market dropped`, `first-basket method market dropped`, `more than 10 books; the rest dropped`, `not in the market list; the first market used`. |
 | `oddsapi: today's published file is unreadable (<why>); the refresher waits for a view` | Once a day: the 08:50 buy waits for the first view. |
 | `oddsapi: <n> game(s) of today have no teams in the work order's horizon; the refresher waits for a view` | Once a day: the same. |
 | `oddsapi: the date's published file is unreadable (<why>)` | Nothing is bought for that date. |

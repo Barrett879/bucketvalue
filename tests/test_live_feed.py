@@ -305,7 +305,7 @@ PHI_DET, DEN_SAS = "0022500953", "0022500958"            # 7:00 PM and 9:00 PM E
 PHI_EID, DEN_EID = "c4f1a9e2b7d3058f6a1e9c2b4d7f0953", "e7b2d9f4a1c6083e5b9d2f7a4c1e0958"
 PHI_TIP = dt.datetime(2026, 3, 12, 23, 0, tzinfo=UTC)
 DEN_TIP = dt.datetime(2026, 3, 13, 1, 0, tzinfo=UTC)
-FIVE = O.read_settings({}).books                         # the five, in the settings' order
+PULL_BOOKS = O.read_settings({}).books                   # a full pull's books: the default
 PTS = ("player_points",)
 MARK = "vendor-said-xyzzy"                               # vendor text that must never surface
 
@@ -355,6 +355,13 @@ def work_order(games=(PHI_DET, DEN_SAS), date="2026-03-12") -> dict:
 
 def _load(name: str):
     return json.loads((FIX / name).read_text())
+
+
+# The books the constructed answers were asked for (PROVENANCE.txt), read from
+# the PHI at DET answer, which holds every one of them; a full pull names the
+# default books (PULL_BOOKS, ten since build amendment B35), the fixtures post
+# these five.
+FIXTURE_BOOKS = tuple(b["key"] for b in _load("event_odds_phi_det_constructed.json")["bookmakers"])
 
 
 @dataclass
@@ -670,7 +677,7 @@ def test_the_morning_walk_buys_each_of_todays_games_once_in_tip_order(feed):
     v = feed.vendor
     assert [c.what for c in v.calls] == ["events", "odds", "odds"]
     assert [c.event_id for c in v.odds_calls()] == [PHI_EID, DEN_EID]         # 7 PM, then 9 PM
-    assert all(c.books == FIVE and c.markets == PTS and c.keyed for c in v.odds_calls())
+    assert all(c.books == PULL_BOOKS and c.markets == PTS and c.keyed for c in v.odds_calls())
     got = feed.view()
     assert (got.state, got.loading, got.asof, got.generation) == ("ok", 0, MORNING_UTC, 2)
     assert list(got.value.columns) == O.FEED_COLUMNS
@@ -679,9 +686,9 @@ def test_the_morning_walk_buys_each_of_todays_games_once_in_tip_order(feed):
     tips = got.value.groupby("game_id")["tip_utc"].first()
     assert (tips[PHI_DET], tips[DEN_SAS]) == (pd.Timestamp(PHI_TIP), pd.Timestamp(DEN_TIP))
     phi, den = got.per_game[PHI_DET], got.per_game[DEN_SAS]
-    assert phi == {"asof": MORNING_UTC, "books": {b: MORNING_UTC for b in O.BOOKS}, "pretip": False,
-                   "pp_missing": False, "reason": None}
-    assert set(den["books"]) == set(O.BOOKS) - {"prizepicks"} and den["pp_missing"]
+    assert phi == {"asof": MORNING_UTC, "books": {b: MORNING_UTC for b in FIXTURE_BOOKS},
+                   "pretip": False, "pp_missing": False, "reason": None}
+    assert set(den["books"]) == set(FIXTURE_BOOKS) - {"prizepicks"} and den["pp_missing"]
     b = feed.mem["budget"]
     assert (b["remaining"], b["used"], b["last"], b["pending"], b["mode"]) == (348, 152, 1, 0, "full")
     e = feed.mem["games"][PHI_EID]
@@ -1232,7 +1239,7 @@ def test_an_absent_book_keeps_its_own_older_lines_and_time_m23(feed):
     phi = got.per_game[PHI_DET]
     assert phi["books"]["fanduel"] == MORNING_UTC
     assert {b: t for b, t in phi["books"].items() if b != "fanduel"} == {
-        b: et(18, 30) for b in O.BOOKS if b != "fanduel"}
+        b: et(18, 30) for b in FIXTURE_BOOKS if b != "fanduel"}
     assert phi["asof"] == et(18, 30) and got.asof == MORNING_UTC     # DEN's last pull was the morning's
     fd = _rows(got, PHI_DET)
     assert len(fd[fd["book"] == "fanduel"]) == 5 and set(fd[fd["book"] == "fanduel"]["fetched_at"]) == {
@@ -1438,7 +1445,8 @@ def test_a_restart_past_a_tip_says_lost_in_restart_and_re_buys_the_rest_at_once_
     feed.mem = live.new_feed_memory(born, had_ledger=False)
     feed.kick(at=born)
     assert [c.what for c in feed.vendor.calls] == ["events", "odds"]
-    assert [(c.event_id, c.books, c.markets) for c in feed.vendor.odds_calls()] == [(DEN_EID, FIVE, PTS)]
+    assert [(c.event_id, c.books, c.markets) for c in feed.vendor.odds_calls()] == [
+        (DEN_EID, PULL_BOOKS, PTS)]
     den = feed.mem["games"][DEN_EID]
     assert (den["pulls"], den["first_at"], den["last_at"], den["braked"], feed.mem["braked"]) == (
         2, born, born, True, True)
@@ -1577,7 +1585,7 @@ def test_the_prizepicks_top_up_polls_free_every_ten_minutes_then_counts_once_pos
         return real(prev, new, books_requested, **kw)
     monkeypatch.setattr(O, "merge_refresh", spy)
     feed.kick()
-    assert merges == [(FIVE, PTS), (FIVE, PTS)]
+    assert merges == [(PULL_BOOKS, PTS), (PULL_BOOKS, PTS)]
     den = feed.mem["games"][DEN_EID]
     assert (den["pp_missing"], den["pp_next"]) == (True, MORNING_UTC + OB.PP_RETRY)
     feed.kick(at=MORNING + 9 * MINUTE)
@@ -2092,7 +2100,7 @@ def test_at_0850_the_refresher_buys_from_the_evenings_work_order_with_no_view(fe
     assert _tick(feed, et(8, 50)) == "kicked"
     assert [c.what for c in feed.vendor.calls] == ["events", "events", "odds", "odds"]
     assert [(c.event_id, c.books, c.markets) for c in feed.vendor.odds_calls()] == [
-        (PHI_EID, FIVE, PTS), (DEN_EID, FIVE, PTS)]
+        (PHI_EID, PULL_BOOKS, PTS), (DEN_EID, PULL_BOOKS, PTS)]
     assert feed.pool.names == ["_walk", "_walk", "_pull_game", "_pull_game"]
     got = feed.view()
     assert (got.state, got.asof) == ("ok", et(8, 50).astimezone(UTC))
@@ -2764,7 +2772,7 @@ def test_a_cold_start_after_0950_in_a_spending_period_re_buys_todays_games_at_on
     feed.kick(at=born)
     assert [c.what for c in feed.vendor.calls] == ["events", "odds", "odds"]
     assert [(c.event_id, c.books, c.markets) for c in feed.vendor.odds_calls()] == [
-        (PHI_EID, FIVE, PTS), (DEN_EID, FIVE, PTS)]
+        (PHI_EID, PULL_BOOKS, PTS), (DEN_EID, PULL_BOOKS, PTS)]
     assert kinds == [("rebuy", False), ("rebuy", False)]
     rec = next(r for r in feed.logs.records if "memory-loss brake" in r.getMessage())
     assert rec.levelno == logging.WARNING
@@ -3295,7 +3303,7 @@ def test_top_ups_that_time_out_with_no_clean_answer_between_meet_p_s12_r1(feed, 
     feed.vendor.script["odds"] = [_billed_timeout] * 100
     _kick_every(feed, et(9, 0), et(21, 0))
     assert [(c.event_id, c.books) for c in feed.vendor.odds_calls()[2:]] == [
-        (DEN_EID, ("prizepicks",)), (DEN_EID, ("prizepicks",)), (PHI_EID, FIVE)]
+        (DEN_EID, ("prizepicks",)), (DEN_EID, ("prizepicks",)), (PHI_EID, PULL_BOOKS)]
     assert kinds[2:] == [("pp", False), ("pp", False), ("refresh", False)]
     assert (den["pulls"], den["fails"], den["free_failed"]) == (2, 2, True)
     assert feed.mem["games"][PHI_EID]["pulls"] == 2
@@ -3340,7 +3348,7 @@ def test_lines_that_land_give_back_the_free_timeout_s12_r1(feed):
         feed.kick(at=at, work=work)
         e = feed.mem["games"][DEN_EID]
         assert (e["pulls"], e["free_failed"]) == want, at
-    assert [c.books for c in feed.vendor.odds_calls()] == [FIVE] * 3 + [("prizepicks",)] * 2
+    assert [c.books for c in feed.vendor.odds_calls()] == [PULL_BOOKS] * 3 + [("prizepicks",)] * 2
 
 
 def test_a_failure_that_cannot_have_been_billed_leaves_the_true_first_pull_alone_s12_r1(
@@ -3476,12 +3484,12 @@ def test_a_cold_start_re_buy_on_p_2_is_the_games_last_pull_so_prizepicks_never_c
         v = live.feed_view(DATE, mem=feed.mem, wait_s=0, now=et(20, 50)).value
         return feed.vendor.odds_calls(DEN_EID)[n:], set(v[v["game_id"] == DEN_SAS]["book"])
     calls, books = day(et(10, 0))
-    assert [(c.books, c.markets) for c in calls] == [(FIVE, PTS)]
+    assert [(c.books, c.markets) for c in calls] == [(PULL_BOOKS, PTS)]
     assert books == {"draftkings", "fanduel", "betmgm", "underdog"}
     den = feed.mem["games"][DEN_EID]
     assert (den["pulls"], den["braked"], den["pp_missing"]) == (2, True, True)
     calls, books = day(et(8, 0))
-    assert calls[0].books == FIVE and ("prizepicks",) in [c.books for c in calls[1:]]
+    assert calls[0].books == PULL_BOOKS and ("prizepicks",) in [c.books for c in calls[1:]]
     assert "prizepicks" in books
 
 
@@ -3670,3 +3678,84 @@ def test_after_a_day_with_no_view_of_today_the_refresher_waits_for_a_view_r7_3(f
     feed.kick(at=et(9, 5))                                               # the first view of Mar 12
     assert [c.event_id for c in feed.vendor.odds_calls()] == [PHI_EID, DEN_EID]
     assert feed.mem["work"]["date"] == "2026-03-12" and _tick(feed, et(9, 6)) == "idle"
+
+
+# -- Build amendment B35: ten books, the same credits -------------------------------------------
+BOOK_SETTINGS = {       # BUCKETVALUE_ODDS_BOOKS values: what the live layer may be handed
+    "unset (the default ten)": None,
+    "the fixtures' five": ",".join(FIXTURE_BOOKS),
+    "every catalog book, twice": ",".join(O.BOOK_ORDER * 2),
+    "the catalog backwards": ",".join(reversed(O.BOOK_ORDER)),
+    "excluded and unknown names around the catalog": ",".join(
+        ["bovada", "kalshi", "fliff", *O.BOOK_ORDER, "notabook", "hardrockbet_az"]),
+    "PrizePicks alone": "prizepicks",
+}
+
+
+def test_every_odds_request_the_live_layer_builds_names_at_most_ten_books_and_no_regions(
+        feed, monkeypatch):
+    """T4 and C3/C4 (build amendment B35): whatever BUCKETVALUE_ODDS_BOOKS
+    says, every odds call the REAL walk makes (a game's first pull, and the
+    free PrizePicks-only check of the game whose pull lacked PrizePicks)
+    names 1 to 10 books, all of the catalog and none excluded, and sends no
+    `regions`: so no pull ever bills a second region. The setting reaches
+    the call as the reader reads it."""
+    seen: list = []
+    inner = feed.vendor
+
+    def recording(host, path, params, **kw):
+        if path != O.EVENTS_PATH:
+            seen.append({k: v for k, v in params.items() if k != "apiKey"})
+        return inner(host, path, params, **kw)
+    monkeypatch.setattr(H, "vendor_get", recording)
+    for label, value in BOOK_SETTINGS.items():
+        env = {**feed.env, **({} if value is None else {"BUCKETVALUE_ODDS_BOOKS": value})}
+        mem = live.new_feed_memory(MORNING_UTC, had_ledger=False)
+        start = len(seen)
+        feed.kick(MORNING, env=env, mem=mem)
+        feed.kick(MORNING + 11 * MINUTE, env=env, mem=mem)        # the PrizePicks check
+        calls = seen[start:]
+        assert calls, label
+        want = O.read_settings(env).books
+        assert len(want) <= O.MAX_BOOKS, label
+        named = [tuple(c["bookmakers"].split(",")) for c in calls]
+        assert want in named and set(named) <= {want, (O.REFERENCE_BOOK,)}, (label, named)
+        if O.REFERENCE_BOOK in want and want != (O.REFERENCE_BOOK,):
+            assert (O.REFERENCE_BOOK,) in named, label           # DEN at SAS's free check
+        for c, books in zip(calls, named):
+            assert 1 <= len(books) <= O.MAX_BOOKS and set(books) <= set(O.BOOK_ORDER), label
+            assert not set(books) & O.EXCLUDED_BOOKS and "regions" not in c, (label, c)
+    assert any(len(b.split(",")) == O.MAX_BOOKS for b in (c["bookmakers"] for c in seen))
+
+
+def test_the_planner_and_the_walk_cost_the_same_with_five_books_as_with_ten(feed):
+    """T4 and C4: the governor prices a pull at len(markets) x 1 region,
+    whichever books the setting names (up to 10 books are one region, docs
+    529): the same plan for the fixtures' five, the default ten and the
+    catalog's first ten. And the REAL morning walk with five books and with
+    ten makes the same calls, spends the same credits and leaves the same
+    balance."""
+    work = work_order()
+    horizon, t = live._horizon_of(work), MORNING_UTC
+    envs = {"five": {"BUCKETVALUE_ODDS_BOOKS": ",".join(FIXTURE_BOOKS)}, "ten": {},
+            "catalog": {"BUCKETVALUE_ODDS_BOOKS": ",".join(O.BOOK_ORDER[:10])}}
+    sizes = {"five": len(FIXTURE_BOOKS), "ten": len(O.BOOKS), "catalog": O.MAX_BOOKS}   # BKR-3
+    plans = {}
+    for name, env in envs.items():
+        s = O.read_settings({**feed.env, **env})
+        assert len(s.books) == sizes[name] and len(s.books) <= O.MAX_BOOKS, name
+        period = OB.period_of(t, 150, 500, s.reserve, len(s.markets), horizon, busiest=236)
+        p = OB.plan(350, 150, 0, s, horizon, {}, period, "ok", 236, now=t, period_games=horizon)
+        plans[name] = (p.mode, p.markets, p.per_pull, p.pulls_per_game, p.p_max, p.reserve,
+                       p.ceiling, p.reason)
+        assert p.per_pull == len(s.markets) == 1, name
+    assert plans["five"] == plans["ten"] == plans["catalog"], plans
+    spent = {}
+    for name, env in envs.items():
+        mem = live.new_feed_memory(MORNING_UTC, had_ledger=False)
+        before = len(feed.vendor.odds_calls())
+        feed.kick(MORNING, env={**feed.env, **env}, mem=mem)
+        b = mem["budget"]
+        spent[name] = (len(feed.vendor.odds_calls()) - before, b["last"], b["pending"],
+                       sum(e["pulls"] for e in mem["games"].values()))
+    assert spent["five"] == spent["ten"] == spent["catalog"] == (2, 1, 0, 2), spent

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import re
 import sys
 from html import unescape
@@ -34,6 +35,7 @@ from streamlit.testing.v1 import AppTest
 
 from bucketlib import dist as D
 from bucketlib import props, props_ui, simprov, theme
+from bucketlib.sources import oddsapi as O
 from bucketlib.util import ET, SENTINEL, esc
 
 HERE = Path(__file__).resolve().parent
@@ -94,11 +96,18 @@ def grid(shown, hidden=None) -> pd.DataFrame:
     return props.grid_rows(shown, hidden)
 
 
+# The books with a line on the hand-built boards: the constructed fixtures'
+# five (build amendment B35: a grid draws a column for a book with a line on
+# the board only, read from the facts' books_by_game).
+BOARD_BOOKS = PF.FIXTURE_BOOKS
+
+
 def facts(**kw) -> dict:
     out = {"state": "ok", "asof": NINE, "loading": 0, "generation": 2, "lines": 40,
            "per_game": {EARLY: {"asof": NOON, "books": {}, "pretip": False},
                         LATE: {"asof": NINE, "books": {}, "pretip": False}},
-           "report": {}, "today": DAY}
+           "report": {}, "today": DAY,
+           "books_by_game": {EARLY: BOARD_BOOKS, LATE: BOARD_BOOKS}}
     out.update(kw)
     return out
 
@@ -222,7 +231,8 @@ def test_the_grid_has_one_column_per_book_in_the_mockups_order():
     assert html.endswith("</tbody></table></div>")
     assert GP.heads(html) == [("DK", "DraftKings"), ("FD", "FanDuel"), ("MGM", "BetMGM"),
                               ("PP", "PrizePicks"), ("UD", "Underdog")]
-    assert GP.heads(html) == [(props.BOOK_CODE[b], props.BOOK_TITLE[b]) for b in props.BOOK_ORDER]
+    assert GP.heads(html) == [(props.BOOK_CODE[b], props.BOOK_TITLE[b]) for b in props.BOOK_ORDER
+                              if b in BOARD_BOOKS]          # the board's books, the catalog's order
     assert ('<thead><tr><th class="pl" scope="col">Player</th><th class="st" scope="col">Stat</th>'
             '<th class="num" scope="col">Model</th><th class="bk" scope="col">'
             '<abbr title="DraftKings">DK</abbr></th>') in html
@@ -317,7 +327,7 @@ def test_a_book_with_no_line_gives_the_whole_node_sentinel():
     """The cell holds the sentinel as a whole text node and its visually
     hidden "no <Book> line", its own column's title, and nothing else: no
     number, arrow, badge or title (C1R-11)."""
-    for book in props.BOOK_ORDER:
+    for book in BOARD_BOOKS:                    # every book with a column on the board
         other = "fanduel" if book == "draftkings" else "draftkings"
         html = props_ui.ledger_html(grid(lines((other, 24.5))), feed=facts())
         (row,) = GP.rows(html)
@@ -597,6 +607,72 @@ def test_the_grid_css_scrolls_sideways_pins_the_player_column_and_follows_the_th
     assert props_ui.DISCREPANCY_CSS.strip() in GOLDEN["page"]["markdown"]
 
 
+def _rem(value: str) -> float:
+    """A CSS length of BOOKS_CSS in rem ("3rem", "0.3rem"; "0" is 0)."""
+    value = value.strip()
+    return 0.0 if value == "0" else float(value[:-3]) if value.endswith("rem") else math.nan
+
+
+def test_ten_book_columns_keep_the_phone_contract_b35():
+    """T8 (build amendment B35; amendment C13). With the ten default books
+    each holding a line, the slate's grid and a player's grid draw ten book
+    columns inside the scrolling wrapper, every row's first cell the pinned
+    one (Player on the slate, Stat on the Game page). At 375 px the ten
+    columns' own minimum widths, read from BOOKS_CSS's phone rules, are far
+    wider than the screen, so the wrapper is what scrolls; and the rules
+    that keep the page from widening hold as C13 pins them: the wrapper
+    scrolls sideways inside max-width 100%, the pinned column is sticky at
+    left 0 on its own background, and the Streamlit element holding a grid
+    has min-width 0 and max-width 100% (the guard, by what it contains).
+    The books are read from the constants, never listed (round BK's review,
+    BKR-3): the default books, filled up from the catalog to the most one
+    pull may name (MAX_BOOKS), handed over backwards, so the columns' order
+    is the catalog's whatever order the lines and the facts come in."""
+    ten = tuple(dict.fromkeys(O.BOOKS + O.BOOK_ORDER))[:O.MAX_BOOKS]
+    assert len(ten) == O.MAX_BOOKS == 10 and set(O.BOOKS) <= set(ten)
+    codes = [props.BOOK_CODE[b] for b in props.BOOK_ORDER if b in ten]
+    shown = lines(*[(b, 20.5 + i) for i, b in enumerate(reversed(ten))])
+    feed = facts(books_by_game={EARLY: ten[::-1], LATE: ten[::-1]})
+    slate = props_ui.ledger_html(grid(shown), feed=feed)
+    assert slate.startswith('<div class="bv-grid-wrap" tabindex="0" role="region" '
+                            'aria-label="Lines by book"><table class="bv-grid"><thead>')
+    assert GP.grid_heads(slate) == codes
+    (row,) = GP.rows(slate)
+    assert len(row["cells"]) == len(ten) and all(c["cls"] != "none" for c in row["cells"].values())
+    body = slate.split("<tbody>", 1)[1]
+    assert body.startswith('<tr><th class="pl" scope="row">') and body.count("<tr>") == 1
+    player = props_ui.render_player_lines(shown, None, feed)
+    assert player.startswith('<div class="bv-grid-wrap" tabindex="0" role="region" '
+                             'aria-label="Ann Able: lines by book"><table class="bv-grid bv-grid-pl">')
+    assert GP.grid_heads(player) == codes
+    assert '<tr><th class="st" scope="row">' in player
+    rules = css_rules(props_ui.BOOKS_CSS)
+
+    def decls(selector, media=""):
+        found = [dict(d) for m, s, d in rules if s == selector and m == media]
+        assert len(found) == 1, (selector, media, len(found))
+        return found[0]
+    wrap = decls(".bv-grid-wrap")
+    assert (wrap["overflow-x"], wrap["max-width"], wrap["position"]) == ("auto", "100%", "relative")
+    for selector in ("table.bv-grid .pl", "table.bv-grid.bv-grid-pl .st"):
+        d = decls(selector)
+        assert (d["position"], d["left"], d["background"]) == ("sticky", "0", "var(--panel-solid)")
+    (guard,) = [dict(d) for _m, s, d in rules if ":has(.bv-grid-wrap)" in s]
+    assert guard == {"min-width": "0", "max-width": "100%"}
+    phone = "@media (max-width: 760px)"
+    cell, td = decls(".bv-cell", phone), decls("table.bv-grid th, table.bv-grid td", phone)
+    pad = [_rem(x) for x in cell["padding"].split()] + [_rem(x) for x in td["padding"].split()]
+    assert len(pad) == 4 and not any(math.isnan(x) for x in pad)
+    per_book = _rem(cell["min-width"]) + 2 * pad[1] + 2 * pad[3]      # the cell, then the td
+    pinned = _rem(decls("table.bv-grid .pl", phone)["min-width"])
+    assert len(ten) * per_book + pinned > 2 * 375 / 16                 # rem: twice a phone's width
+    assert "width" not in wrap and "min-width" not in wrap          # the wrapper never sets a floor
+    for _m, selector, d in rules:                       # no length the page itself must hold
+        for prop, value in d:                           # (.bv-sr: 1px, absolute, clipped, C1R-03)
+            if "width" in prop and selector != ".bv-sr":
+                assert not re.search(r"\d(?:px|vw)\b", value), (selector, prop, value)
+
+
 def test_the_legend_line_under_the_grid():
     assert props_ui.GRID_LEGEND == (
         "Up arrow: model leans More (Over) at that line. Down arrow: Less (Under). No arrow: no "
@@ -701,6 +777,41 @@ def test_per_book_rules_the_tie_the_void_risk_and_a_player_who_did_not_play():
             props_ui.render_player_lines([{**feed_row(book, 6.0), **gone}], None, facts())
     assert f'<div class="bv-pl-note">{props_ui.VOID_TEXT}</div>' in props_ui.render_player_lines(
         [{**feed_row("prizepicks", 6.0), **gone}], None, facts())
+
+
+def test_only_prizepicks_and_underdog_say_an_exact_landing_lowers_the_payout_tier_bkr5():
+    """Round BK's review, BKR-5 (build amendment B35's fix pass). "That
+    lowers the payout tier; it is not a push." is PrizePicks' rule, which
+    Underdog's rows keep (design 2.6), and a pasted line is PrizePicks'.
+    Every other pick'em book of the catalog (DraftKings Pick6 and Dabble,
+    whose rules are UNVERIFIED) says its own rule decides an exact landing,
+    in the Stat cell's title and in its grid cell's; every sportsbook keeps
+    design 2.6's sentence."""
+    tie = dict(tie_possible=True, p_push=0.12)
+    head = "Chance of landing exactly on 6: 12 in 100. "
+    tier = head + "That lowers the payout tier; it is not a push."
+    newer = [b for b in props.BOOK_ORDER if b in props.DFS_BOOKS
+             and b not in ("prizepicks", "underdog")]
+    assert newer == ["pick6", "dabble_us_dfs"]
+    sportsbook = head + "On a sportsbook line the book's own rule decides an exact landing."
+    for book in props.BOOK_ORDER:
+        said = props_ui._tie_text(feed_row(book, 6.0, **tie))
+        if book in ("prizepicks", "underdog"):
+            assert said == tier, book
+        elif book in props.DFS_BOOKS:
+            own = f"{props.BOOK_TITLE[book]}'s own rule decides an exact landing."
+            assert said == head + own, book
+        else:
+            assert said == sportsbook, book
+    assert props_ui._tie_text({"line": 6.0, **tie}) == tier            # a pasted line: no book
+    for book in newer:
+        title = props.BOOK_TITLE[book]
+        cell = props_ui._stat_cell(feed_row(book, 6.0, **tie))
+        assert f"{title}&#x27;s own rule decides an exact landing." in cell
+        assert "payout tier" not in cell
+        (row,) = drawn(lines((book, 6.0, tie)))
+        assert row["cells"][props.BOOK_CODE[book]]["title"] == (
+            f"{title} 6: the model leans More. {head}{title}'s own rule decides an exact landing.")
 
 
 # -- Biggest discrepancies (amendments A8 and C11) ---------------------------------------------
@@ -999,15 +1110,15 @@ def test_the_board_is_every_books_lines_balanced_and_counted(world, params, feed
     view = props_ui.date_board(None, DAY, world.proj, params, world.roster, feed=feed_tables,
                                feed_info=facts())
     rows = pd.concat([view.shown, view.hidden, view.thin, view.void])
-    assert set(rows["book"]) == set(props.BOOK_ORDER)
-    assert {b: int((rows["book"] == b).sum()) for b in props.BOOK_ORDER} == PF.BOOK_ROWS
+    assert set(rows["book"]) == set(PF.FIXTURE_BOOKS)
+    assert {b: int((rows["book"] == b).sum()) for b in PF.FIXTURE_BOOKS} == PF.BOOK_ROWS
     assert view.meta["posted"] == sum(PF.BOOK_ROWS.values()) == 53 and not view.meta.get("error")
     assert props.ledger(view.meta, view.shown, view.hidden, view.thin, view.void)["balanced"]
     assert view.feed["counts"] == {"feed": 53, "pasted": 0}
     want = {"draftkings": [], "fanduel": [], "betmgm": [], "prizepicks": [LATE], "underdog": []}
     assert view.missing == view.feed["missing"] == want
-    assert view.books_by_game == {EARLY: props.BOOK_ORDER,
-                                  LATE: ("draftkings", "fanduel", "betmgm", "underdog")}
+    assert view.books_by_game == view.feed["books_by_game"] == {
+        EARLY: PF.FIXTURE_BOOKS, LATE: ("draftkings", "fanduel", "betmgm", "underdog")}
     assert view.feed["state"] == "ok" and view.feed["today"] == DAY       # the page's facts kept
     assert view.feed["lines"] == 40 and "book" not in view.feed
     assert props_ui.line_counts_by_game(view.shown) == \
@@ -1063,9 +1174,9 @@ def test_a_feed_board_that_fails_is_explained_with_the_feeds_words(
                                     feed_info=facts())
     assert no_params.meta == {"posted": 53, "error": True}
     bare = props_ui.date_board(None, DAY, world.proj, params, world.roster, feed=feed_tables)
-    assert bare.feed == {"missing": {}, "paste_won": 0, "feed_won": 0, "paste_times": {},
-                         "pasted": 0, "counts": {"feed": 53, "pasted": 0}, "paste_unmatched": [],
-                         "paste_ambiguous": []}
+    assert bare.feed == {"missing": {}, "books_by_game": {}, "paste_won": 0, "feed_won": 0,
+                         "paste_times": {}, "pasted": 0, "counts": {"feed": 53, "pasted": 0},
+                         "paste_unmatched": [], "paste_ambiguous": []}
 
 
 def test_tables_that_could_not_be_built_are_the_explained_empty_board_f1(
@@ -1351,6 +1462,46 @@ def test_the_void_note_names_each_books_own_rule_b26():
     assert "PrizePicks removes a pick" in visible(props_ui._void_note(pasted)[0])
 
 
+def test_every_pick_em_book_gets_its_own_void_rule_and_no_break_even_b35():
+    """Build amendment B35 (C5, C7): every catalog book's void line reaches the
+    void note. A pick'em book other than PrizePicks gets B26's sentence with
+    its own title, one note per kind of book on screen, PrizePicks first,
+    then the others in the catalog's order, then the sportsbooks; a
+    sportsbook of the catalog gets design 2.6's. The break-even sentence
+    names every such pick'em book on screen as unmodelled, one sentence for
+    all of them, and never leaves an empty sentence."""
+    def notes(*books):
+        void = U.frame([feed_row(b, 8.5, player=f"Vee {b}", person_id=3000 + i)
+                        for i, b in enumerate(books)])
+        return [visible(n) for n in props_ui._void_note(void)]
+    others = [b for b in props.BOOK_ORDER if b in props.DFS_BOOKS and b != props.PASTE_BOOK]
+    assert {"underdog", "pick6", "dabble_us_dfs"} == set(others)
+    for book in props.BOOK_ORDER:
+        (said,) = notes(book)
+        if book == props.PASTE_BOOK:
+            assert "PrizePicks removes a pick" in said, book
+        elif book in props.DFS_BOOKS:
+            assert said == (f"1 line void: Vee {book} listed out or marked out; "
+                            f"{props.BOOK_TITLE[book]}'s own rule decides what happens to a pick "
+                            "on a player who does not play."), book
+        else:
+            assert "a sportsbook's own rule decides what happens to a bet" in said, book
+    every = notes(*reversed(props.BOOK_ORDER))
+    heads = [n.split(" listed out")[0].split(": ", 1)[1] for n in every]
+    assert heads[:4] == [f"Vee {b}" for b in (props.PASTE_BOOK, *others)]
+    assert len(every) == 5 and every[4].startswith(f"{len(props.BOOK_ORDER) - 4} lines void:")
+    assert props_ui.breakeven_text(ref("pick6", 24.5)) == (
+        ". DraftKings Pick6's payouts are not modelled here, so no break-even is shown for its "
+        "lines.")
+    trio = pd.concat([ref(b, 24.5) for b in ("dabble_us_dfs", "pick6", "underdog")],
+                     ignore_index=True)
+    assert props_ui.breakeven_text(trio) == (
+        ". Underdog's, DraftKings Pick6's and Dabble's payouts are not modelled here, so no "
+        "break-even is shown for their lines.")
+    assert props_ui.payouts_text(["prizepicks", "draftkings", "nope"]) == ""
+    assert props_ui.payouts_text("underdog") == props_ui.payouts_text(["underdog"])
+
+
 def test_the_books_missing_lines_after_tip_and_for_a_book_the_site_does_not_buy_b24_b25():
     """Build amendments B24 and B25 in layout C (amendment C9). The slate's
     note names only games that have not tipped (the page passes the tipped
@@ -1427,8 +1578,12 @@ def test_after_tip_a_book_with_no_lines_reads_the_feed_did_not_load_them_b29():
         assert game([book], tipped=True, loaded=props.BOOK_ORDER) == game([book], tipped=True), book
     assert game(["underdog", "prizepicks"], tipped=True) == (
         "<b>The odds feed did not load PrizePicks or Underdog lines for this game before tip.</b>")
-    assert game(list(reversed(props.BOOK_ORDER)), tipped=True) == (
+    assert game(list(reversed(PF.FIXTURE_BOOKS)), tipped=True) == (
         "<b>The odds feed did not load DraftKings, FanDuel, BetMGM, PrizePicks or Underdog lines "
+        "for this game before tip.</b>")
+    titles = [props.BOOK_TITLE[b] for b in props.BOOK_ORDER]          # every book, in order
+    assert game(list(reversed(props.BOOK_ORDER)), tipped=True) == (
+        f"<b>The odds feed did not load {', '.join(titles[:-1])} or {titles[-1]} lines "
         "for this game before tip.</b>")
     assert game(["x<b>", "prizepicks"], tipped=True) == game(["prizepicks"], tipped=True)
     assert game(["x<b>"], tipped=True) == game("x<b>", tipped=True) == ""

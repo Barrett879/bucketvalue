@@ -1,6 +1,6 @@
 """Player lines on the page: the nav-bar paste popover, the slate board (pasted
-PrizePicks lines and the licensed odds feed's five books), the per-player rows
-on the game page, and the card pill counts.
+PrizePicks lines and the licensed odds feed's books), the per-player rows on
+the game page, and the card pill counts.
 
 Deliberately NOT a page (sibling precedent: DiamondValue started with a props
 tab and folded it inline). Ported from GridironValue's props_ui and
@@ -29,12 +29,13 @@ key configured the page hands date_board the feed's compared tables
 (props.FeedTables) and the feed's plain facts (store.feed_info); nothing here
 reaches the feed, which lives in the live layer. The board then shows every
 book at once: one row per player and stat (props.grid_rows), one column per
-book in the order DK, FD, MGM, PP, UD, each cell that book's line with the
-model's lean at it (an arrow and its text equivalent on a shown line, the
-number alone on a hidden one, the whole-node sentinel where the book has no
-line), and the visitor's pasted PrizePicks lines in the PP column under the
-newest-line rule. Every feed text is built from the stamps and the `today`
-the page passes, never from this module's clock. With the feed off
+book with a line on the board (grid_books, build amendment B35) in
+props.BOOK_ORDER (DK, FD, MGM, PP, UD first), each cell that book's line
+with the model's lean at it (an arrow and its text equivalent on a shown
+line, the number alone on a hidden one, the whole-node sentinel where the
+book has no line), and the visitor's pasted PrizePicks lines in the PP
+column under the newest-line rule. Every feed text is built from the stamps
+and the `today` the page passes, never from this module's clock. With the feed off
 (feed=None everywhere) every function here returns exactly the HTML it
 returned before the feed.
 """
@@ -178,15 +179,16 @@ PROPS_CSS = """
 </style>
 """
 
-# The grid of five books (layout C, amendment C13), injected beside PROPS_CSS
-# only on a board that carries the odds feed's rows: a page with the feed off
-# keeps exactly the markup it had before the feed.
+# The grid of books (layout C, amendment C13; up to ten book columns since build
+# amendment B35), injected beside PROPS_CSS only on a board that carries the
+# odds feed's rows: a page with the feed off keeps exactly the markup it had
+# before the feed.
 BOOKS_CSS = """
 <style>
-/* The grid of five books (layout C, amendment C13), drawn only on a board that
-   carries the odds feed's rows, so a page with the feed off keeps exactly the
-   markup it had before the feed. Theme tokens only, so the Dark toggle
-   recolours it. The wrapper scrolls sideways on a phone; the Player column
+/* The grid of books (layout C, amendment C13; up to ten book columns), drawn
+   only on a board that carries the odds feed's rows, so a page with the feed
+   off keeps exactly the markup it had before the feed. Theme tokens only, so
+   the Dark toggle recolours it. The wrapper scrolls sideways on a phone; the Player column
    (the Game page's Stat column) stays pinned. The wrapper is positioned, so
    the visually hidden text inside it is clipped and scrolled by it and can
    never widen the page. */
@@ -353,13 +355,18 @@ class BoardView:
     With the feed on (date_board's `feed`), props.feed_board's facts too:
     books_by_game {game_id: the books with lines for it, in BOOK_ORDER}.
     missing       {book: the game ids, in tip order, it has not posted while
-                  another book (or the paste) has}; empty with the feed off.
+                  another book (or the paste) has}, for the books the site
+                  buys and the books with a line on the board only (build
+                  amendment B35: a catalog book that is neither, Caesars on
+                  the free plan, is not on this site at all); empty with the
+                  feed off.
     feed          the feed's plain facts (store.feed_info) plus this board's:
-                  "missing", "paste_won", "feed_won", "paste_times", "pasted"
-                  (pasted lines for the date), "counts" ({"feed": F,
-                  "pasted": P} lines on file) and the paste's own unmatched
-                  and ambiguous names. None with the feed off: then every
-                  renderer gives today's HTML.
+                  "missing" (as above), "books_by_game" (as above, which
+                  grid_books reads for every grid's columns), "paste_won",
+                  "feed_won", "paste_times", "pasted" (pasted lines for the
+                  date), "counts" ({"feed": F, "pasted": P} lines on file)
+                  and the paste's own unmatched and ambiguous names. None
+                  with the feed off: then every renderer gives today's HTML.
     paste_won, feed_won, paste_times   the PrizePicks merge (props.FeedBoard).
     paste_only    build amendment B17: the feed's lines could not be compared
                   (props.FeedTables.failed) and the visitor has a paste for the
@@ -485,8 +492,8 @@ def _failed_feed_view(token, date, feed, facts: dict) -> BoardView:
         pasted = 0
     feed_part = (int(facts.get("lines", 0) or 0) if getattr(feed, "failed", False)
                  else _feed_lines(feed))
-    facts.update(missing={}, paste_won=0, feed_won=0, paste_times={}, pasted=pasted,
-                 counts={"feed": feed_part, "pasted": pasted}, paste_unmatched=[],
+    facts.update(missing={}, books_by_game={}, paste_won=0, feed_won=0, paste_times={},
+                 pasted=pasted, counts={"feed": feed_part, "pasted": pasted}, paste_unmatched=[],
                  paste_ambiguous=[])
     return BoardView(_empty(), _empty(), _empty(), _empty(),
                      {"posted": feed_part + pasted, "error": True}, feed=facts)
@@ -554,7 +561,9 @@ def _feed_board_view(token, date, projections, params, roster, feed, feed_info) 
     # The pasted lines still on file: the paste's own, less the keys the
     # feed's newer line won (props.feed_board's merge, M5).
     from_paste = min(on_file, max(0, int(pmeta.get("posted", 0) or 0) - int(fb.feed_won)))
-    facts.update(missing={b: list(g) for b, g in fb.missing.items()},
+    by_game = {str(g): tuple(b) for g, b in fb.books_by_game.items()}
+    missing = _site_missing(fb.missing, by_game, facts.get("books"))
+    facts.update(missing={b: list(g) for b, g in missing.items()}, books_by_game=dict(by_game),
                  paste_won=int(fb.paste_won), feed_won=int(fb.feed_won),
                  paste_times=dict(fb.paste_times), pasted=int(len(lines)),
                  counts={"feed": on_file - from_paste, "pasted": from_paste},
@@ -562,9 +571,25 @@ def _feed_board_view(token, date, projections, params, roster, feed, feed_info) 
                  paste_ambiguous=list(pmeta.get("ambiguous_names") or []))
     return BoardView(shown, hidden, thin, void, meta, lines,
                      books_by_game=dict(fb.books_by_game),
-                     missing={b: list(g) for b, g in fb.missing.items()}, feed=facts,
+                     missing={b: list(g) for b, g in missing.items()}, feed=facts,
                      paste_won=int(fb.paste_won), feed_won=int(fb.feed_won),
                      paste_times=dict(fb.paste_times))
+
+
+def _site_missing(missing, books_by_game: dict, loaded) -> dict:
+    """props.FeedBoard.missing for the books on this site only (build
+    amendment B35): every book the site buys (`loaded`, feed_info's "books":
+    BUCKETVALUE_ODDS_BOOKS) and every book with a line on the board. A
+    catalog book that is neither (Caesars or Fanatics on the free plan, a book
+    the setting leaves out and that has no line) is dropped, so no note names
+    it on any page. With `loaded` None (the facts do not say what the site
+    buys) the books with a line on the board only."""
+    on_board = set(_board_books(books_by_game))
+    keep = {}
+    for book, games in (missing.items() if isinstance(missing, dict) else ()):
+        if book in on_board or (loaded is not None and _is_loaded(book, loaded)):
+            keep[book] = list(games)
+    return keep
 
 
 def line_counts_by_game(shown: pd.DataFrame) -> dict:
@@ -1194,14 +1219,10 @@ def _row_book(r) -> str:
     return b.strip().lower() if isinstance(b, str) and b.strip() else props.PASTE_BOOK
 
 
-def _is_dfs(r) -> bool:
-    return _row_book(r) in props.DFS_BOOKS
-
-
 def _side_word(r, side: str) -> str:
     """The row's own word for a side (design 2.6 m8, amendment A4): More or
-    Less on a pick'em row (PrizePicks, Underdog), Over or Under on a
-    sportsbook row. The stored lean stays More, Less or Even."""
+    Less on a pick'em row (props.DFS_BOOKS), Over or Under on a sportsbook
+    row. The stored lean stays More, Less or Even."""
     more, less = props.side_words(_row_book(r))
     return more if side == "More" else less if side == "Less" else side
 
@@ -1261,15 +1282,29 @@ def _void_tag(r) -> str:
     return f'<span class="bv-pp-tag void" title="{esc(tip)}">void risk</span>'
 
 
+# The pick'em books whose exact-landing words are "That lowers the payout
+# tier; it is not a push.": PrizePicks' rule, which Underdog's rows have kept
+# since design 2.6 (Underdog's own rule UNVERIFIED). No other pick'em book is
+# taken to follow it (round BK's review, BKR-5): DraftKings Pick6's and
+# Dabble's rules are UNVERIFIED, so their own rule decides.
+_TIER_TIE_BOOKS = frozenset({"prizepicks", "underdog"})
+
+
 def _tie_text(r) -> str:
     """The chance a line lands exactly on its number, or '' when it cannot
-    (the Stat cell's title, and a grid cell's: amendment C6). A pick'em book
-    lowers the payout tier on an exact landing; on a sportsbook line the
-    book's own rule decides (RC G11, UNVERIFIED). Plain text, unescaped."""
+    (the Stat cell's title, and a grid cell's: amendment C6). On PrizePicks
+    and Underdog an exact landing lowers the payout tier (_TIER_TIE_BOOKS);
+    any other pick'em book's own rule decides, and so does a sportsbook's
+    (RC G11, UNVERIFIED). Plain text, unescaped."""
     if not (r.get("tie_possible") and _finite(r.get("p_push")) and _finite(r.get("line"))):
         return ""
-    rule = ("That lowers the payout tier; it is not a push." if _is_dfs(r)
-            else "On a sportsbook line the book's own rule decides an exact landing.")
+    book = _row_book(r)
+    if book in _TIER_TIE_BOOKS:
+        rule = "That lowers the payout tier; it is not a push."
+    elif book in props.DFS_BOOKS:
+        rule = f"{props.BOOK_TITLE.get(book, book)}'s own rule decides an exact landing."
+    else:
+        rule = "On a sportsbook line the book's own rule decides an exact landing."
     return ("Chance of landing exactly on %g: %d in 100. %s"
             % (float(r["line"]), round(100 * float(r["p_push"])), rule))
 
@@ -1530,7 +1565,8 @@ def render_player_lines(rows, context=None, feed: dict | None = None) -> str:
 
 
 # -- Layout C: the grid (amendments C6, C7 and C13) -----------------------------
-# One column per book, in props.BOOK_ORDER (DK, FD, MGM, PP, UD). Each cell is
+# One column per book with a line on the board (grid_books, build amendment
+# B35), in props.BOOK_ORDER. Each cell is
 # that book's line with the model's lean at it, decided as the feed-off Lean
 # column decides it (props.side_probabilities and lean_from against that
 # book's own line, in compare()): on a SHOWN line an arrow and its text
@@ -1555,6 +1591,43 @@ HIDDEN_DRAWN = ("A hidden line in a row with a shown line is drawn as its number
 def grid_legend_html() -> str:
     """The one legend line under the slate's grid (amendment C6)."""
     return f'<div class="bv-grid-legend">{esc(GRID_LEGEND)}</div>'
+
+
+def _board_books(books_by_game, game_id=None) -> tuple:
+    """The books of props.BOOK_ORDER, in that order, that books_by_game
+    ({game_id: books with lines for it}, props.FeedBoard's) gives a line on
+    one game (`game_id`) or on any game of the date (None). Anything else in
+    it (a key outside the catalog, junk) is ignored."""
+    have: set = set()
+    for gid, books in (books_by_game.items() if isinstance(books_by_game, dict) else ()):
+        if game_id is not None and str(gid) != str(game_id):
+            continue
+        try:
+            have.update(b for b in books if isinstance(b, str))
+        except TypeError:
+            continue
+    return tuple(b for b in props.BOOK_ORDER if b in have)
+
+
+def grid_books(feed, rows=None, game_id=None) -> tuple:
+    """The books a grid draws a column for (build amendment B35, C6): every
+    book of props.BOOK_ORDER, in that order, with at least one line on the
+    board, and no other. The board is the date's lines on the slate
+    (`game_id` None) and one game's on the Game page (its `game_id`), read
+    from the facts' "books_by_game" (BoardView.feed: props.FeedBoard's), so
+    every player panel of one game has the same columns and a filter of the
+    slate's grid never moves one. A book with a cell in `rows` (grid rows,
+    props.GRID_CELLS) is a column too, so no line drawn can lose its column;
+    with facts that hold no books_by_game the cells alone decide. A book the
+    site buys with no line on the board gets no column:
+    books_without_lines_html names it under the slate's grid, and the Game
+    page's books-missing note under its board's notes."""
+    by_game = feed.get("books_by_game") if isinstance(feed, dict) else None
+    have = set(_board_books(by_game, game_id))
+    if isinstance(rows, pd.DataFrame) and props.GRID_CELLS in rows.columns:
+        for cells in rows[props.GRID_CELLS]:
+            have.update(cells if isinstance(cells, dict) else ())
+    return tuple(b for b in props.BOOK_ORDER if b in have)
 
 
 def _grid_head(book: str) -> str:
@@ -1655,12 +1728,13 @@ def _grid_rows_of(rows) -> pd.DataFrame:
 
 def _grid_html(rows, more: dict | None, feed: dict) -> str:
     """The slate's grid (amendment C6): Player (the name, the matchup and
-    "+N more" under it), Stat, Model, then one column per book. The header's
-    book columns and every row's cells come from the same loop over the same
+    "+N more" under it), Stat, Model, then one column per book with a line on
+    the date's board (grid_books, build amendment B35). The header's book
+    columns and every row's cells come from the same loop over the same
     books, so a column's header and its cells never disagree."""
     rows = _grid_rows_of(rows)
     more = more or {}
-    books = props.BOOK_ORDER
+    books = grid_books(feed, rows)
     latest, today = _grid_latest(rows, feed), feed.get("today")
     head = ('<div class="bv-grid-wrap" tabindex="0" role="region" aria-label="Lines by book">'
             '<table class="bv-grid"><thead><tr><th class="pl" scope="col">Player</th>'
@@ -1709,7 +1783,9 @@ def _player_grid_html(rows, context, feed: dict) -> str:
     """One player's grid on the Game page (amendment C7): one row per stat
     with a shown line (props.grid_rows of his shown `rows` and his hidden
     `context`), Stat (the pinned column here: the expander names him), Model
-    and one column per book, each cell the slate's cell for the same line
+    and one column per book with a line on his game (grid_books of its game
+    id, build amendment B35: the same columns in every player's grid of the
+    game, so the panels align), each cell the slate's cell for the same line
     (_grid_cell); after tip the Final or So far column and the settled
     notes (_grid_settle_note). '' when he has no shown line."""
     grid = props.grid_rows(rows, context)
@@ -1718,7 +1794,8 @@ def _player_grid_html(rows, context, feed: dict) -> str:
     recs = grid.to_dict(orient="records")
     after_tip = any("actual" in r for r in recs)
     final = any(r.get("final") for r in recs)
-    books = props.BOOK_ORDER
+    gid = next((str(r["game_id"]) for r in recs if isinstance(r.get("game_id"), str)), None)
+    books = grid_books(feed, grid, game_id=gid)
     latest, today = _grid_latest(grid, feed), feed.get("today")
     act_head = (f'<th class="num" scope="col">{"Final" if final else "So far"}</th>'
                 if after_tip else "")
@@ -1851,14 +1928,17 @@ def _ledger_line(led: dict, meta: dict, parts: list, feed: dict | None) -> str:
             f'file for this date{src}: {", ".join(parts)}.{stamp}</div>')
 
 
-# The void note's rule, per kind of book (design 2.6; build amendment B26):
-# PrizePicks removes the pick (today's sentence), Underdog's own rule decides
-# (it is not taken to follow PrizePicks), and so does a sportsbook's.
+# The void note's rule, per kind of book (design 2.6; build amendments B26 and
+# B35): PrizePicks removes the pick (today's sentence), every other pick'em
+# book's own rule decides (none is taken to follow PrizePicks: Underdog's
+# sentence, B26, with each book's own title), and so does a sportsbook's.
+_OWN_RULE = ("listed out or marked out; {title}'s own rule decides what happens to a pick on a "
+             "player who does not play.")
 _VOID_RULES = (
     ("prizepicks", "listed out or marked out. PrizePicks removes a pick on a player who does not "
                    "play a second."),
-    ("underdog", "listed out or marked out; Underdog's own rule decides what happens to a pick "
-                 "on a player who does not play."),
+    *((b, _OWN_RULE.format(title=props.BOOK_TITLE[b])) for b in props.BOOK_ORDER
+      if b in props.DFS_BOOKS and b != props.PASTE_BOOK),
     ("sportsbook", "listed out or marked out; a sportsbook's own rule decides what happens to a "
                    "bet on a player who does not play."),
 )
@@ -1871,9 +1951,10 @@ def _void_kind(r) -> str:
 
 def _void_note(void) -> list[str]:
     """The void note, one per kind of book on screen: PrizePicks removes a
-    pick on a player who does not play; Underdog's own rule decides what
-    happens to a pick on him (build amendment B26), and a sportsbook's own
-    rule what happens to a bet on him (design 2.6)."""
+    pick on a player who does not play; every other pick'em book's own rule
+    decides what happens to a pick on him (Underdog's, build amendment B26;
+    each pick'em book's, B35), and a sportsbook's own rule what happens to a
+    bet on him (design 2.6)."""
     if void is None or not len(void):
         return []
     recs = void.to_dict(orient="records")
@@ -1888,16 +1969,49 @@ def _void_note(void) -> list[str]:
     return out
 
 
+def payouts_text(books) -> str:
+    """The sentence on the pick'em books whose payouts are not modelled: every
+    pick'em book but PrizePicks (design 7; build amendment B35), those of
+    `books` (keys, any order; others ignored), in BOOK_ORDER, escaped.
+    "Underdog's payouts are not modelled here, so no break-even is shown for
+    its lines." for one book; "Underdog's and DraftKings Pick6's payouts ...
+    for their lines." for more; '' for none."""
+    try:
+        given = {str(b) for b in ((books,) if isinstance(books, str) else (books or ()))}
+    except TypeError:
+        given = set()
+    mine = [b for b in props.BOOK_ORDER
+            if b in given and b in props.DFS_BOOKS and b != props.PASTE_BOOK]
+    if not mine:
+        return ""
+    names = [f"{esc(props.BOOK_TITLE[b])}'s" for b in mine]
+    said = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    return (f"{said} payouts are not modelled here, so no break-even is shown for "
+            f"{'its' if len(mine) == 1 else 'their'} lines.")
+
+
+def book_names(books, word: str = "and") -> str:
+    """Our titles of `books` (catalog keys), escaped, in BOOK_ORDER, the last
+    two joined by `word`: "DraftKings, FanDuel and BetMGM" (the About page's
+    sources note, build amendment B35)."""
+    try:
+        given = {str(b) for b in ((books,) if isinstance(books, str) else (books or ()))}
+    except TypeError:
+        given = set()
+    return _book_list(given, word)
+
+
 def breakeven_text(shown, book=None) -> str:
     """The break-even sentence for the books on screen (design 7). PrizePicks'
-    Power Play range alone is today's wording; Underdog's payouts are not
-    modelled; a sportsbook side gets the -110 example. No price is shown
-    for any book (amendment A1). With no row shown, the board's own books
-    say which (`book`: a book key, or a collection of them, such as the
-    books of a feed board's hidden, thin and void lines: amendment C8), so
-    a sportsbook board whose lines are all withheld never gets PrizePicks'
-    range (build 4's review, L3-8); keys outside BOOK_ORDER are ignored,
-    and with no book left (the feed off), today's wording."""
+    Power Play range alone is today's wording; the other pick'em books'
+    payouts are not modelled (payouts_text); a sportsbook side gets the -110
+    example. No price is shown for any book (amendment A1). With no row
+    shown, the board's own books say which (`book`: a book key, or a
+    collection of them, such as the books of a feed board's hidden, thin and
+    void lines: amendment C8), so a sportsbook board whose lines are all
+    withheld never gets PrizePicks' range (build 4's review, L3-8); keys
+    outside BOOK_ORDER are ignored, and with no book left (the feed off),
+    today's wording."""
     books = {_row_book(r) for r in shown.to_dict(orient="records")} \
         if shown is not None and len(shown) else set()
     if not books:
@@ -1913,9 +2027,9 @@ def breakeven_text(shown, book=None) -> str:
     said = []
     if props.PASTE_BOOK in books:
         said.append(f"A PrizePicks {pp[2:]}")
-    if "underdog" in books:
-        said.append("Underdog's payouts are not modelled here, so no break-even is shown for "
-                    "its lines.")
+    unmodelled = payouts_text(books)
+    if unmodelled:
+        said.append(unmodelled)
     if books - props.DFS_BOOKS:
         even = 100 * props.american_breakeven(-110)
         said.append(f"A sportsbook side at -110 needs about {even:.1f}% to break even.")
@@ -2142,10 +2256,12 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
     lines but shows none EXPLAINS why rather than going silent. With the odds
     feed (`feed` = BoardView.feed) the rows are layout C's grid
     (props.grid_rows of the shown and hidden lines: one row per player and
-    stat, one column per book), drawn inside st.container(key=f"{key}_grid")
-    (BOOKS_CSS's guard finds it), with GRID_LEGEND's line under it; the page
-    renders feed_notice_html above this, so its notice shows even when this
-    renders nothing (m7).
+    stat, one column per book with a line on the board), drawn inside
+    st.container(key=f"{key}_grid") (BOOKS_CSS's guard finds it), with
+    GRID_LEGEND's line under it, then the note on the books the site buys
+    that have no line on the board (books_without_lines_html, build
+    amendment B35); the page renders feed_notice_html above this, so its
+    notice shows even when this renders nothing (m7).
     """
     meta = meta or {}
     shown = shown if shown is not None else _empty()
@@ -2186,6 +2302,11 @@ def render_board(shown, hidden, thin, void, scope_label: str, meta: dict | None 
             with st.container(key=f"{key}_grid"):            # "bv_board_grid": BOOKS_CSS's guard
                 _board_fragment(props.grid_rows(shown, hidden), key, game_labels, feed)
             st.markdown(grid_legend_html(), unsafe_allow_html=True)
+    # B35: the books the site buys with no line on this board, so no column:
+    # under the grid, or where it would be when every line is withheld.
+    no_lines = books_without_lines_html(feed) if feed is not None else ""
+    if no_lines:
+        st.markdown(no_lines, unsafe_allow_html=True)
     for block in notes_html(meta, shown, hidden, thin, void, feed):
         st.markdown(block, unsafe_allow_html=True)
     return n[0]
@@ -2328,7 +2449,7 @@ def _games_text(gids, labels: dict | None) -> str:
 def _is_loaded(book: str, loaded) -> bool:
     """Whether the site buys `book`: `loaded` is the books
     BUCKETVALUE_ODDS_BOOKS names (feed_info's "books"); None, when the facts
-    do not say, is all five (the default setting)."""
+    do not say, counts every book as bought."""
     if loaded is None:
         return True
     try:
@@ -2360,25 +2481,36 @@ def _not_loaded_html(books) -> str:
     return f"<b>{_and_list(books)} lines are not loaded on this site.</b>"
 
 
-def books_missing_html(missing, labels: dict | None = None, *, tipped=(), loaded=None) -> str:
+def books_missing_html(missing, labels: dict | None = None, *, tipped=(), loaded=None,
+                       columns=None) -> str:
     """The slate's note on the books that have not posted some games (layout
     C, amendment C9), inside feed_notice_html; the grid shows the sentinel
     in those books' columns on those games' rows. `missing` is
     BoardView.feed's {book: game ids in tip order}; keys outside BOOK_ORDER
-    are dropped, never echoed. A book the site does not buy (not in
-    `loaded`, feed_info's books: BUCKETVALUE_ODDS_BOOKS, build amendment B25)
-    goes to the not-loaded sentence, tipped or not. Every other book names
-    only its games that have not tipped (B25: `tipped` holds the ids the
-    page's schedule calls live or final), says nothing with none left, and
-    shares one sentence with every book whose remaining games are the same,
-    the groups in BOOK_ORDER of their first book, at most two games named,
-    then "and N more" (_games_text). Each sentence in its own <b>, joined by
-    one space, all inside one bv-note; '' when there is none."""
+    are dropped, never echoed. `columns`, when given, are the books with a
+    column on the date's grid (grid_books): a book outside it has no line on
+    any game, so it has no column to explain and is left to the note under
+    the grid (books_without_lines_html, build amendment B35). A book the
+    site does not buy (not in `loaded`, feed_info's books:
+    BUCKETVALUE_ODDS_BOOKS, build amendment B25) goes to the not-loaded
+    sentence, tipped or not. Every other book names only its games that have
+    not tipped (B25: `tipped` holds the ids the page's schedule calls live
+    or final), says nothing with none left, and shares one sentence with
+    every book whose remaining games are the same, the groups in BOOK_ORDER
+    of their first book, at most two games named, then "and N more"
+    (_games_text). Each sentence in its own <b>, joined by one space, all
+    inside one bv-note; '' when there is none."""
     missing = missing if isinstance(missing, dict) else {}
     done = {str(g) for g in (tipped or ())}
+    try:
+        drawn = None if columns is None else {str(b) for b in columns}
+    except TypeError:
+        drawn = None
     groups: dict = {}
     gone = []
     for book in props.BOOK_ORDER:
+        if drawn is not None and book not in drawn:
+            continue
         try:
             games = [str(g) for g in (missing.get(book) or ())]
         except TypeError:
@@ -2396,6 +2528,44 @@ def books_missing_html(missing, labels: dict | None = None, *, tipped=(), loaded
     if gone:
         said.append(_not_loaded_html(gone))
     return _note(" ".join(said)) if said else ""
+
+
+def books_without_lines_html(feed) -> str:
+    """The one short note under the slate's grid (build amendment B35, C6):
+    the books the site buys (the facts' "books", feed_info's:
+    BUCKETVALUE_ODDS_BOOKS) with no line on the date's board, so no column
+    (grid_books), in BOOK_ORDER in one sentence: "No BetRivers, DraftKings
+    Pick6 or betPARX lines yet for this date." '' when every such book has a
+    line, when the facts do not say which books the site buys, and once every
+    game on the board has tipped (each game's per_game "pretip"), as the
+    books-missing note names no game that has tipped (B25)."""
+    if not isinstance(feed, dict) or feed.get("books") is None:
+        return ""
+    loaded, drawn = feed.get("books"), set(grid_books(feed))
+    none = [b for b in props.BOOK_ORDER if b not in drawn and _named(b, loaded)]
+    if not none or _board_tipped(feed):
+        return ""
+    return _note(f"<b>No {_or_list(none)} lines yet for this date.</b>")
+
+
+def _named(book: str, loaded) -> bool:
+    """Whether `loaded` (feed_info's books) names `book`; False for junk."""
+    try:
+        return book in {str(b) for b in ((loaded,) if isinstance(loaded, str) else loaded)}
+    except TypeError:
+        return False
+
+
+def _board_tipped(feed: dict) -> bool:
+    """Every game with a line on the board has tipped: its per_game facts say
+    "pretip" (the live layer's: lines held and the tip passed). False with no
+    game on the board."""
+    games = feed.get("books_by_game")
+    per_game = feed.get("per_game")
+    if not isinstance(games, dict) or not games or not isinstance(per_game, dict):
+        return False
+    return all(isinstance(per_game.get(str(g)), dict) and per_game[str(g)].get("pretip") is True
+               for g in games)
 
 
 def books_missing_game_html(books, *, tipped: bool = False, loaded=None) -> str:
@@ -2474,14 +2644,16 @@ def feed_notice_html(info, today=None, labels: dict | None = None, *, game_id=No
                      pass False when the page draws store.feed_loading_watch,
                      which shows the line itself);
       the merge      which line shows where the paste and the feed meet;
-      books missing  the games each book has not posted (books_missing_html,
-                     amendment C9), named from `labels` ({game_id: 'DEN at
-                     SAS'}, the schedule's orientation, N2), at most two, then
-                     'and N more': only those not in `tipped` (the game ids
-                     the page's schedule calls live or final, build amendment
-                     B25), and for a book the info's "books" (feed_info's:
-                     the books the site buys) leave out, that its lines are
-                     not loaded here;
+      books missing  the games each book with a column has not posted
+                     (books_missing_html, amendment C9; a book with no line on
+                     the date has no column, and render_board's note under the
+                     grid names it, build amendment B35), named from `labels`
+                     ({game_id: 'DEN at SAS'}, the schedule's orientation,
+                     N2), at most two, then 'and N more': only those not in
+                     `tipped` (the game ids the page's schedule calls live or
+                     final, build amendment B25), and for a book the info's
+                     "books" (feed_info's: the books the site buys) leave
+                     out, that its lines are not loaded here;
       taken down     lines a book pulled since its last update.
 
     `today` is the page's date (', Mar 11' marks an older stamp); `game_id`
@@ -2497,8 +2669,9 @@ def feed_notice_html(info, today=None, labels: dict | None = None, *, game_id=No
         parts.append(loading_line_html(info.get("loading", 0)))
     if game_id is None:
         parts.append(_merge_html(info, today))
+        columns = grid_books(info) if isinstance(info.get("books_by_game"), dict) else None
         parts.append(books_missing_html(info.get("missing"), labels, tipped=tipped,
-                                        loaded=info.get("books")))
+                                        loaded=info.get("books"), columns=columns))
         parts.append(_pulled_html(info))
     return "".join(p for p in parts if p)
 

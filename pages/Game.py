@@ -20,11 +20,12 @@ The licensed odds feed (design 2.8; layout C, amendments C7 to C14): with a
 key configured the board is the date's, built from every book's lines and
 filtered to this game as the paste board is, so this page's counts equal the
 slate card's. Each player's expander holds his grid: one row per stat, one
-column per book (DK, FD, MGM, PP, UD), each cell that book's line with the
-model's lean at it, the hidden lines beside a shown one drawn as the number
-alone. After the board's notes a note names the books that have not posted
-this game. No ?book= is read or carried (an old link still loads). With no
-key none of it runs and the page is what it was.
+column per book with a line on this game (the same columns in every player's
+grid, props_ui.grid_books; build amendment B35), each cell that book's line
+with the model's lean at it, the hidden lines beside a shown one drawn as the
+number alone. After the board's notes a note names the books the site buys
+that have not posted this game. No ?book= is read or carried (an old link
+still loads). With no key none of it runs and the page is what it was.
 """
 from __future__ import annotations
 

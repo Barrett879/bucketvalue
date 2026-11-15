@@ -436,7 +436,7 @@ def test_odds_request_is_the_sites_request_plus_one_change():
     eid = "c" * 32
     path, params = PR.odds_request(eid, O.BOOKS)
     assert (path, params) == O.event_odds_request(eid, O.BOOKS, ("player_points",))
-    assert params["bookmakers"] == "draftkings,fanduel,betmgm,prizepicks,underdog"
+    assert params["bookmakers"] == ",".join(O.BOOKS)
     assert "regions" not in params and O.SEND_REGIONS is False
     assert PR.odds_request(eid, PR.DFS, markets=PR.ALTERNATE)[1]["markets"] == "player_points_alternate"
     assert PR.odds_request(eid, O.BOOKS, markets="player_pointz")[1]["markets"] == "player_pointz"
@@ -532,6 +532,30 @@ def test_a_whole_run_on_the_tables_bills_runs_every_step_inside_the_cap():
     assert "PASS step 10: a bad key gets 401 INVALID_KEY" in "\n".join(lines)
     assert sum(1 for path, _ in vendor.calls if path.endswith("/odds")) == 7 + 9   # step 3, then 4 to 9, 11 to 13
     assert 500 - vendor.left == p.budget.spent
+
+
+@pytest.mark.parametrize("setting, want", [
+    (None, O.BOOKS),                                        # unset: the default
+    ("fanduel, BallyBet ,bovada,notabook", ("fanduel", "ballybet")),
+    (",".join(O.BOOK_ORDER), O.BOOK_ORDER[:10])])           # never more than 10
+def test_step_3_asks_the_sites_configured_books_b35(monkeypatch, setting, want):
+    """C8 (build amendment B35): step 3 names the books the site itself
+    would buy, BUCKETVALUE_ODDS_BOOKS as oddsapi's reader reads it (catalog
+    books only, at most 10, the default when unset), never a fixed list, and
+    no regions. Nothing else in the probe changes: step 6 still names
+    oddsapi.BOOKS with regions=us."""
+    if setting is None:
+        monkeypatch.delenv("BUCKETVALUE_ODDS_BOOKS", raising=False)
+    else:
+        monkeypatch.setenv("BUCKETVALUE_ODDS_BOOKS", setting)
+    _p, vendor, _lines = _whole_run(bill=1)
+    odds = [params for path, params in vendor.calls if path.endswith("/odds")]
+    step3 = odds[:PR.MAX_GAMES]
+    assert len(step3) == PR.MAX_GAMES
+    for params in step3:
+        assert params["bookmakers"] == ",".join(want) and "regions" not in params
+    (step6,) = [params for params in odds if "regions" in params]
+    assert step6["bookmakers"] == ",".join(O.BOOKS) and step6["regions"] == "us"
 
 
 def test_a_vendor_that_bills_more_than_the_table_cannot_push_a_run_past_the_cap():
@@ -650,7 +674,8 @@ def test_the_participants_map_to_all_30_teams():
 
 def test_lines_per_book_sides_and_raw_dfs_prices():
     payload, frame = _phi_det()
-    assert PR.book_rows(frame) == {"draftkings": 7, "fanduel": 5, "betmgm": 4, "prizepicks": 6,
+    assert PR.book_rows(frame) == {**{b: 0 for b in O.BOOKS},     # every default book a key
+                                   "draftkings": 7, "fanduel": 5, "betmgm": 4, "prizepicks": 6,
                                    "underdog": 3}
     assert PR.book_rows(frame.iloc[:0]) == {b: 0 for b in O.BOOKS}
     sides = PR.side_counts(frame)

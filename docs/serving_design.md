@@ -177,8 +177,9 @@ The licensed odds feed's modules (2026-11-11; section 10 has the contract):
   on every call, B3), `usage_from_headers`, `error_code`, `failure_kind`,
   `empty_feed`. FEED_COLUMNS = props.PARSED_COLUMNS + book, book_title, market,
   price_over, price_under, last_update, fetched_at, event_id, event_home,
-  event_away, game_id, game_date, tip_utc. BOOKS are the five; BOOK_TITLE equals
-  props.BOOK_TITLE; SEND_REGIONS = False.
+  event_away, game_id, game_date, tip_utc. BOOK_CATALOG is the books the site
+  may buy and show (B35); BOOK_ORDER, BOOK_CODE, BOOK_TITLE and DFS_BOOKS equal
+  props' copies; BOOKS is the default setting's ten; SEND_REGIONS = False.
 ### bucketlib/http.py: vendor_get
 - One attempt, honest User-Agent, no impersonation, no redirects, its own pacing, a size cap
   during the download, a timeout of at least 0.5 s; returns status, the x-requests-*
@@ -196,10 +197,11 @@ The licensed odds feed's modules (2026-11-11; section 10 has the contract):
   with a shown line, ranked by its strongest shown line, each carrying its
   `cells`; frames or lists of row dicts) and `split_hidden(shown, hidden)`
   (the hidden lines the grid draws as the number alone, and those it never
-  draws); `american_breakeven`, `side_words`. BOOK_ORDER = (draftkings,
-  fanduel, betmgm, prizepicks, underdog) is the grid's column order;
-  BOOK_TITLE and BOOK_CODE (DK, FD, MGM, PP, UD) are the only book names a
-  page shows. FeedTables.failed marks a date whose feed holds lines that could
+  draws); `american_breakeven`, `side_words`. BOOK_ORDER, the catalog's keys
+  (B35: draftkings, fanduel, betmgm, prizepicks, underdog first), is the
+  grid's column order; BOOK_TITLE and BOOK_CODE (DK, FD, MGM, PP, UD, TSB,
+  HRB, BR, P6, PARX, BALLY, DAB, CZR, FAN) are the only book names a page
+  shows. FeedTables.failed marks a date whose feed holds lines that could
   not be compared: no table and no meta, so the board has no feed line to draw
   and the page explains the failure (B17: with a paste for the date, the board
   is the paste's own).
@@ -474,14 +476,43 @@ contract:
 
 ## 10. The licensed odds feed (2026-11-11)
 
-Player lines for DraftKings, FanDuel, BetMGM, PrizePicks and Underdog, licensed
-from The Odds API, display only (no model reads them). Built to the feed's
-design (architecture_v2.md, whose section numbers "design 3.6" and the like
-cite, and its budget replay RP; both are kept outside the repo) as amended:
-layout C (Barrett, 2026-11-11: every book at once, one column per book in the
-order DK, FD, MGM, PP, UD, each line with the model's lean arrow; no price is
-shown for any book) and the build amendments B1 to B34, named below where they
-decide a rule. The operator's side is docs/runbook.md section 8. With no key
+Player lines for the books BUCKETVALUE_ODDS_BOOKS names, licensed from The
+Odds API, display only (no model reads them). Built to the feed's design
+(architecture_v2.md, whose section numbers "design 3.6" and the like cite, and
+its budget replay RP; both are kept outside the repo) as amended: layout C
+(Barrett, 2026-11-11: every book at once, one column per book, each line with
+the model's lean arrow; no price is shown for any book) and the build
+amendments B1 to B35, named below where they decide a rule.
+
+The books (B35, 2026-11-15: Barrett asked for as many books as the free plan's
+credits allow). oddsapi.BOOK_CATALOG holds every book the site may buy and
+show, state-licensed US sportsbooks and US DFS pick'em sites only, as (key,
+code, title) in the column order: draftkings DK, fanduel FD, betmgm MGM,
+prizepicks PP, underdog UD, espnbet TSB (theScore Bet), hardrockbet HRB,
+betrivers BR, pick6 P6 (DraftKings Pick6), betparx PARX, ballybet BALLY,
+dabble_us_dfs DAB, williamhill_us CZR (Caesars) and fanatics FAN; the last two
+are served on paid plans only. props keeps a copy (it never imports oddsapi; a
+test pins the copies equal). Never in the catalog, each named by a test: the
+offshore books (betonlineag, betus, bovada, lowvig, mybookieag,
+betanysports), every exchange or prediction market (betopenly, kalshi,
+limitless, novig, polymarket, polymarket_us, prophetx), the sweepstakes book
+fliff, hardrockbet_az, hardrockbet_fl, hardrockbet_oh, courtside and rebet.
+The pick'em books (prizepicks, underdog, pick6, dabble_us_dfs, every us_dfs
+key) say More and Less and never show a price; every other book says Over and
+Under. oddsapi.BOOKS, the one place the default list is written, is ten books:
+draftkings, fanduel, betmgm, prizepicks, underdog, espnbet, hardrockbet,
+betrivers, pick6, betparx. The settings reader takes any catalog book in the
+order named, each once, at most MAX_BOOKS = 10, and drops anything else with a
+fixed phrase (`excluded book dropped`, `unknown key dropped`, `more than 10
+books; the rest dropped`); an empty result is the default. The request builder
+refuses a book outside the catalog or an 11th book, and no request sends
+`regions`. The vendor bills a call by the markets it returns times the
+regions, and up to 10 books named in `bookmakers` are one region (11 to 20 are
+two), so ten books cost what five did and the budget is unchanged: the
+planner's per-pull cost stays len(markets) x 1 region, the PrizePicks-only
+checks stay free, the paste fills PrizePicks only, and merge_refresh never
+touches a book the call did not name, so a book added to the setting never
+reads as lines taken down. live.py and oddsbudget.py are unchanged by B35. The operator's side is docs/runbook.md section 8. With no key
 configured none of it runs and every page is what it was.
 
 ### The anchor (live.feed_anchor)
@@ -620,8 +651,9 @@ submits a walk unless one is running. The walk:
 - Markets: a re-buy asks the core markets only (B20); a first pull asks the
   plan's markets only when the floor holds at their cost, else the core
   markets (B1, first_pull_markets); a refresh or a top-up asks the plan's.
-  Books: the five, or PrizePicks alone for a "pp" top-up. With the shipped
-  default (points only) every pull asks the same one market.
+  Books: the configured books (at most 10, so one region: B35), or
+  PrizePicks alone for a "pp" top-up. With the shipped default (points only)
+  every pull asks the same one market.
 - A refusal by the reserve, the floor or the ceiling sets the entry's `held`
   and logs `oddsapi: budget held a pull today (<code>)` once per guard per ET
   day (B19).
@@ -789,7 +821,17 @@ WARNING gives the count. The usage test never passes on a period's first day
   while the feed holds lines are `FeedTables(failed=True)`; with a paste for
   the date the board is then the paste's own, under one note (B17).
 - props_ui draws every book at once: grid_rows makes one row per player and
-  stat with a shown line, ranked by its strongest shown line; each cell is its
+  stat with a shown line, ranked by its strongest shown line; a grid draws a
+  column only for a catalog book, in BOOK_ORDER, with at least one line on
+  that board (B35: grid_books reads the facts' books_by_game, the date's
+  books on the slate and one game's on the Game page, so every player's grid
+  of a game has the same columns); a book the site buys with no line on the
+  slate's board has no column and one note under the grid names it (`No
+  <Book> lines yet for this date.`, until every game on the board has
+  tipped), the books-missing note above the board names only books with a
+  column, and the Game page's note names the books the site buys with no
+  line for that game; a catalog book that is neither bought nor on the board
+  (Caesars on the free plan) is named nowhere; each cell is its
   book's line with the model's lean at it (an arrow and a text equivalent on a
   shown line, the number alone on a hidden one, the whole-node sentinel for
   none); a feed line's title adds its own time when it is over a minute older

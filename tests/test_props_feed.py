@@ -120,6 +120,11 @@ def den_sas() -> dict:
     return fixture("event_odds_den_sas_constructed.json")
 
 
+# The books the constructed answers were asked for (PROVENANCE.txt), read from
+# the PHI at DET answer, which holds every one of them, in the catalog's order.
+FIXTURE_BOOKS = tuple(b["key"] for b in phi_det()["bookmakers"])
+
+
 def without(payload: dict, book: str) -> dict:
     p = copy.deepcopy(payload)
     p["bookmakers"] = [b for b in p["bookmakers"] if b["key"] != book]
@@ -253,14 +258,18 @@ def test_the_feed_frame_carries_every_column_prepare_feed_needs():
 
 
 def test_the_books_titles_and_codes_are_one_list_in_the_grids_order():
-    assert props.BOOK_ORDER == ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog")
-    assert set(O.BOOKS) == set(props.BOOK_ORDER)
-    assert O.BOOK_TITLE == props.BOOK_TITLE == {
-        "prizepicks": "PrizePicks", "underdog": "Underdog", "draftkings": "DraftKings",
-        "fanduel": "FanDuel", "betmgm": "BetMGM"}
-    assert props.BOOK_CODE == {"prizepicks": "PP", "underdog": "UD", "draftkings": "DK",
-                               "fanduel": "FD", "betmgm": "MGM"}
-    assert O.DFS_BOOKS == props.DFS_BOOKS == {"prizepicks", "underdog"}
+    """The catalog (build amendment B35) is one list, the same in props and in
+    sources.oddsapi, which props never imports: keys in the grid's order,
+    codes, titles and the pick'em books (tests/test_oddsapi.py pins the
+    words). The default books are catalog books, and the fixtures' five are
+    the catalog's first five, the mockup's order (layout C, amendment C2)."""
+    assert props.BOOK_CATALOG == O.BOOK_CATALOG
+    assert props.BOOK_ORDER == O.BOOK_ORDER == tuple(k for k, _c, _t in props.BOOK_CATALOG)
+    assert O.BOOK_TITLE == props.BOOK_TITLE == {k: t for k, _c, t in props.BOOK_CATALOG}
+    assert O.BOOK_CODE == props.BOOK_CODE == {k: c for k, c, _t in props.BOOK_CATALOG}
+    assert O.DFS_BOOKS == props.DFS_BOOKS and props.DFS_BOOKS <= set(props.BOOK_ORDER)
+    assert set(O.BOOKS) <= set(props.BOOK_ORDER)
+    assert props.BOOK_ORDER[:len(FIXTURE_BOOKS)] == FIXTURE_BOOKS
     assert O.REFERENCE_BOOK == props.PASTE_BOOK == "prizepicks"
 
 
@@ -470,7 +479,7 @@ def test_one_row_per_game_player_stat_and_book_and_the_newest_fetch_wins(world):
     key = lines[["game_date", "person_id", "stat", "book"]].astype(str)
     assert not key.duplicated().any()
     cade = lines[(lines["person_id"] == CUNNINGHAM) & (lines["stat"] == "pts")]
-    assert sorted(cade["book"]) == sorted(O.BOOKS)          # one per book, every book kept
+    assert sorted(cade["book"]) == sorted(FIXTURE_BOOKS)    # one per book, every book kept
     dk = cade[cade["book"] == "draftkings"].iloc[0]
     assert dk["line"] == 26.5 and dk["fetched_at"] == pd.Timestamp(NOON).tz_convert("UTC")
     fd = cade[cade["book"] == "fanduel"].iloc[0]
@@ -533,7 +542,7 @@ def test_each_rows_lean_and_gap_are_against_its_own_books_line(world, provider):
     ft = tables(world, provider)
     pmf = provider.pmf(MAXEY, EARLY, "pts")
     seen = {}
-    for book in O.BOOKS:
+    for book in FIXTURE_BOOKS:
         row = keyed(ft.tables[(book, EARLY)])[(MAXEY, "pts")]
         p_lt, p_eq, p_gt = pmf.split(row["line"])
         assert row["p_over"] == pytest.approx(p_gt) and row["p_under"] == pytest.approx(p_lt)
@@ -703,8 +712,8 @@ def test_the_lines_are_every_books_rows_once_per_key_and_book(world, provider, p
     all of them."""
     ft = tables(world, provider)
     fb = props.feed_board(ft, *pasted_board)
-    assert set(fb.lines["book"]) == set(props.BOOK_ORDER)
-    for book in props.BOOK_ORDER:
+    assert set(fb.lines["book"]) == set(FIXTURE_BOOKS)
+    for book in FIXTURE_BOOKS:
         want = set()
         for gid in (EARLY, LATE):
             if (book, gid) in ft.tables:
@@ -732,9 +741,10 @@ def test_missing_lists_per_book_the_games_it_has_not_posted(world, provider, out
     order, and the board still balances over the other four books."""
     ft = tables(world, provider)
     fb = props.feed_board(ft, None, None, None)
-    assert fb.missing == {"draftkings": [], "fanduel": [], "betmgm": [], "prizepicks": [LATE],
+    assert fb.missing == {**{b: [EARLY, LATE] for b in props.BOOK_ORDER},   # no line anywhere
+                          "draftkings": [], "fanduel": [], "betmgm": [], "prizepicks": [LATE],
                           "underdog": []}
-    assert fb.books_by_game == {EARLY: props.BOOK_ORDER,
+    assert fb.books_by_game == {EARLY: FIXTURE_BOOKS,
                                 LATE: ("draftkings", "fanduel", "betmgm", "underdog")}
     pp = book_rows(fb, "prizepicks")
     assert set(pp["game_id"]) == {EARLY} and len(pp) == BOOK_ROWS["prizepicks"]
@@ -784,7 +794,7 @@ def test_the_merged_prizepicks_row_sits_beside_the_other_books_for_its_key(world
     one per book. fb.lines is in rank order, where the PP 24.5 row comes
     last (its confidence the lowest), so the books are compared by book
     rank or as a dict, never as fb.lines' own order (C1R-16(c)). The grid's
-    row for the key holds all five as shown cells, PrizePicks' with its
+    row for the key holds all five fixture books as shown cells, PrizePicks' with its
     typed pick beside the model's own lean; a key only the paste holds is a
     row with a PrizePicks cell only."""
     from bucketlib import props_ui
@@ -803,20 +813,22 @@ def test_the_merged_prizepicks_row_sits_beside_the_other_books_for_its_key(world
     assert got == {"draftkings": (25.5, "feed"), "fanduel": (25.5, "feed"),
                    "betmgm": (25.5, "feed"), "prizepicks": (24.5, "pasted"),
                    "underdog": (25.5, "feed")}
-    assert sorted(got, key=props._book_rank) == list(props.BOOK_ORDER)
+    assert sorted(got, key=props._book_rank) == list(FIXTURE_BOOKS)
     shown, hidden, thin, void = props.board_rows(fb.lines, outs)
     assert [len(fb.lines), len(shown), len(hidden), len(thin), len(void)] == [58, 39, 14, 0, 5]
     grid = props.grid_rows(shown, hidden)
     (row,) = [r for r in grid.to_dict(orient="records")
               if (r["person_id"], r["stat"]) == (CUNNINGHAM, "pts")]
     cells = row[props.GRID_CELLS]
-    assert sorted(cells, key=props._book_rank) == list(props.BOOK_ORDER)
+    assert sorted(cells, key=props._book_rank) == list(FIXTURE_BOOKS)
     assert all(c["shown"] is True for c in cells.values())
     pp = cells["prizepicks"]
     assert (pp["origin"], pp["pick"], pp["lean"], pp["line"]) == ("pasted", "more", "Less", 24.5)
     html = props_ui.ledger_html(grid[(grid["person_id"] == CUNNINGHAM) & (grid["stat"] == "pts")],
                                 feed={"today": DAY})
-    pp_cell = re.findall(r'<td class="bk">(.*?)</td>', html)[props.BOOK_ORDER.index("prizepicks")]
+    drawn = props_ui.grid_books({"today": DAY}, grid)       # the columns: the cells' books
+    assert drawn == FIXTURE_BOOKS
+    pp_cell = re.findall(r'<td class="bk">(.*?)</td>', html)[drawn.index("prizepicks")]
     assert pp_cell.startswith('<span class="bv-cell under" title="PrizePicks 24.5 (typed): ')
     assert '<span class="ar" aria-hidden="true">&#8595;</span>' in pp_cell
     assert pp_cell.index("&#8595;") < pp_cell.index(">Pick: More</span>")
@@ -834,13 +846,14 @@ def test_the_meta_balances_over_every_book(world, provider, pasted_board, outs):
     assert led["posted"] == sum(BOOK_ROWS.values()) + 1 + PASTED - len(SHARED) == 59
     assert led["matched"] == len(fb.lines) == sum(fb.meta["by_tier"].values()) == 58
     assert {b: len(book_rows(fb, b)) for b in props.BOOK_ORDER} == {
+        **{b: 0 for b in props.BOOK_ORDER},
         "prizepicks": 14, "underdog": 7, "draftkings": 21, "fanduel": 10, "betmgm": 6}
     assert (fb.meta["unmatched"], fb.meta["unmatched_names"]) == (1, ["Nobody Atall"])
     assert len(fb.meta["unresolved"]) == 1
     assert fb.meta["pasted_utc"] is not None and fb.meta["pasted_utc"] == pasted_board[2]
 
 
-def test_a_book_outside_the_five_never_reaches_the_board(world, provider):
+def test_a_book_outside_the_catalog_never_reaches_the_board(world, provider):
     """A (book, game) outside BOOK_ORDER in the tables is ignored: no row,
     no count in the meta, never a key of missing nor a book of
     books_by_game. Layout B's `selected=` keyword is gone."""

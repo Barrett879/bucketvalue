@@ -1969,13 +1969,22 @@ def feed_info(feed, today: dt.date, environ=None) -> dict:
             per_game[str(gid)] = {**facts, "books": dict(facts.get("books") or {})}
     report = {k: (list(v) if isinstance(v, (list, tuple)) else v)
               for k, v in (getattr(feed, "report", None) or {}).items()}
-    env = os.environ if environ is None else environ
     return {"state": getattr(feed, "state", "off"), "asof": getattr(feed, "asof", None),
             "loading": int(getattr(feed, "loading", 0) or 0),
             "generation": int(getattr(feed, "generation", 0) or 0),
             "lines": int(len(value)) if isinstance(value, pd.DataFrame) else 0,
             "per_game": per_game, "report": report, "today": today,
-            "books": tuple(O.read_settings(env).books)}
+            "books": feed_books(environ)}
+
+
+def feed_books(environ=None) -> tuple:
+    """The books the site buys: BUCKETVALUE_ODDS_BOOKS as oddsapi's reader
+    reads it (catalog books only, at most ten, the default when unset), as
+    book keys, read on this call from `environ` (the process environment
+    when None). feed_info's "books", and the About page's sources note
+    (build amendment B35). Book keys only: never a setting's raw text."""
+    env = os.environ if environ is None else environ
+    return tuple(O.read_settings(env).books)
 
 
 # -- The loading watch (design 2.7, M6 item 3) ------------------------------------

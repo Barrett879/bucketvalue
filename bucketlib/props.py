@@ -3,8 +3,8 @@
 HOW LINES GET IN, AND WHY THERE IS NO SCRAPER
 ---------------------------------------------
 Two ways, and neither is a scraper. A licensed odds feed (The Odds API, Barrett
-2026-11-09) brings DraftKings, FanDuel, BetMGM, PrizePicks and Underdog lines:
-bucketlib.live fetches it and the page hands this module a DataFrame
+2026-11-09) brings the lines of up to ten books of BOOK_CATALOG (build
+amendment B35): bucketlib.live fetches it and the page hands this module a DataFrame
 (prepare_feed, compare_books, feed_board). And a visitor pastes a PrizePicks
 board or a typed list, the backup. Nothing ever fetches PrizePicks itself:
 
@@ -4840,24 +4840,42 @@ def lean_from(q_more: float, band: float = EVEN_BAND) -> str:
 # The page hands this module the feed's lines as a DataFrame, exactly as it
 # hands it the schedule mark: nothing here fetches, and this module imports
 # nothing of the feed (tests/test_props.py's guards). The rows come from The
-# Odds API under licence (Barrett, 2026-11-09), for five books. The board shows
-# every book at once (layout C, amendment C1): one row per player and stat
+# Odds API under licence (Barrett, 2026-11-09), for up to ten books at a time
+# since 2026-11-15 (build amendment B35). The board shows every book with a
+# line at once (layout C, amendment C1): one row per player and stat
 # (grid_rows), one column per book, each cell that book's line with the
 # model's lean at it.
 FEED_SOURCE = "oddsapi"      # the line-level `source` of a feed row; TYPED_SOURCE is untouched
 PASTE_BOOK = "prizepicks"    # every pasted line is a PrizePicks line, as before the feed
-# The grid's column order, the mockup's (layout C, amendment C2): DraftKings,
-# FanDuel, BetMGM, PrizePicks, Underdog. Every list of the five books follows it.
-# sources.oddsapi keeps the same five as BOOKS and the same titles
-# (tests/test_props_feed.py pins both), and this module never imports it.
-BOOK_ORDER = ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog")
-BOOK_TITLE = {"prizepicks": "PrizePicks", "underdog": "Underdog", "draftkings": "DraftKings",
-              "fanduel": "FanDuel", "betmgm": "BetMGM"}
-BOOK_CODE = {"prizepicks": "PP", "underdog": "UD", "draftkings": "DK", "fanduel": "FD",
-             "betmgm": "MGM"}
+# The catalog (B35): every book the board may show, state-licensed US
+# sportsbooks and US DFS pick'em sites only, as (key, code, title) in the
+# grid's column order, the mockup's five first (layout C, amendment C2). Every
+# list of books follows it. sources.oddsapi keeps the same catalog as
+# BOOK_CATALOG and the same pick'em set (tests/test_props_feed.py pins every
+# copy equal), and this module never imports it.
+BOOK_CATALOG = (
+    ("draftkings", "DK", "DraftKings"),
+    ("fanduel", "FD", "FanDuel"),
+    ("betmgm", "MGM", "BetMGM"),
+    ("prizepicks", "PP", "PrizePicks"),
+    ("underdog", "UD", "Underdog"),
+    ("espnbet", "TSB", "theScore Bet"),
+    ("hardrockbet", "HRB", "Hard Rock Bet"),
+    ("betrivers", "BR", "BetRivers"),
+    ("pick6", "P6", "DraftKings Pick6"),
+    ("betparx", "PARX", "betPARX"),
+    ("ballybet", "BALLY", "Bally Bet"),
+    ("dabble_us_dfs", "DAB", "Dabble"),
+    ("williamhill_us", "CZR", "Caesars"),
+    ("fanatics", "FAN", "Fanatics"),
+)
+BOOK_ORDER = tuple(key for key, _code, _title in BOOK_CATALOG)
+BOOK_TITLE = {key: title for key, _code, title in BOOK_CATALOG}
+BOOK_CODE = {key: code for key, code, _title in BOOK_CATALOG}
 # Pick'em books. Their prices are indicative only, so a DFS row never carries a
-# price, and their side words are More and Less (side_words).
-DFS_BOOKS = frozenset({"prizepicks", "underdog"})
+# price, and their side words are More and Less (side_words). Every other book
+# of the catalog is a sportsbook.
+DFS_BOOKS = frozenset({"prizepicks", "underdog", "pick6", "dabble_us_dfs"})
 # The columns prepare_feed needs from the feed frame (sources.oddsapi's
 # FEED_COLUMNS hold them all; a contract test pins it).
 FEED_REQUIRED = ("name", "stat_type", "line", "start_time", "direction", "odds_type", "league",
@@ -4951,8 +4969,8 @@ def _utc_stamp(v) -> pd.Timestamp | None:
 
 def _line_extra(rec) -> dict:
     """compare()'s TABLE_EXTRA cells for one line (design 2.5). The title is
-    this module's own for the five books, so a vendor's spelling never
-    reaches the page. A DFS row carries no price: its prices are indicative
+    this module's own for every book of the catalog, so a vendor's spelling
+    never reaches the page. A DFS row carries no price: its prices are indicative
     only, so nothing may do price math on them."""
     book = _line_book(rec)
     title = BOOK_TITLE.get(book)
@@ -5809,7 +5827,7 @@ class FeedBoard:
 
     lines         every book's rows for the date, one per (game_date,
                   person_id, stat, book), ranked (rank_rows): the feed's rows
-                  of DraftKings, FanDuel, BetMGM and Underdog, and PrizePicks'
+                  of every book of BOOK_ORDER but PrizePicks, and PrizePicks'
                   rows, which are the feed's merged with the visitor's paste
                   (M5). board_rows(lines) is what the board shows, counts and
                   colours, line by line; grid_rows makes the grid's rows.

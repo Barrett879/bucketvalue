@@ -59,10 +59,12 @@ season on games they never saw, and shown as the median outcome for a player who
 """, unsafe_allow_html=True)
 
 FREEZE_MIN = int(pipeline.FREEZE_LEAD.total_seconds() // 60)
-# With the odds feed on, where the board's player lines come from (design 9.5).
-FEED_SOURCES = (" Player lines on the board come from DraftKings, FanDuel, BetMGM, PrizePicks "
-                "and Underdog through The Odds API, a licensed odds feed, refreshed through the "
-                "day until shortly before tip; you can also paste your own PrizePicks board."
+# With the odds feed on, where the board's player lines come from (design 9.5):
+# the books the site buys, read from the setting (build amendment B35).
+FEED_BOOKS = store.feed_books() if FEED_ON else ()
+FEED_SOURCES = (f" Player lines on the board come from {props_ui.book_names(FEED_BOOKS)} "
+                "through The Odds API, a licensed odds feed, refreshed through the day until "
+                "shortly before tip; you can also paste your own PrizePicks board."
                 if FEED_ON else "")
 st.markdown(f"""
 <div class="bv-note"><b>Where the numbers come from.</b> Box scores, schedules, rosters and
@@ -119,12 +121,14 @@ st.markdown("".join(f'<div class="bv-note">{esc(n)}</div>' for n in notes), unsa
 be2 = store.breakeven(2)
 # With the odds feed on, the other books' break-even (design 9.5): a
 # sportsbook side's from its price (-110 as the example, the figure the board's
-# own note gives), none for Underdog, and no price shown for any book (the
-# board shows none: amendment A1; build amendment B27).
+# own note gives), none for the other pick'em books the site buys (the board's
+# own sentence, props_ui.payouts_text: build amendment B35), and no price shown
+# for any book (the board shows none: amendment A1; build amendment B27).
+_UNMODELLED = props_ui.payouts_text(FEED_BOOKS)
 FEED_BREAKEVEN = (f" A sportsbook line is different: a side priced at -110 needs about "
                   f"{100 * props.american_breakeven(-110):.1f}% to break even, and the price sets "
-                  "the figure. Underdog's payouts are not modelled here, so no break-even is "
-                  "shown for its lines. No price is shown for any book." if FEED_ON else "")
+                  f"the figure.{' ' + _UNMODELLED if _UNMODELLED else ''} No price is shown for "
+                  "any book." if FEED_ON else "")
 st.markdown(f"""
 <div class="bv-note"><b>What it takes to break even.</b> A two-pick Power Play pays
 {store.POWER_PLAY_2_PAYOUT:g} times the entry, so the pair has to hit at least one time in

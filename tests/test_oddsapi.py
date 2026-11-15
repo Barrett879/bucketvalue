@@ -10,9 +10,17 @@ for the neutral-site games of this season, a literal date handed to a pure
 function. The fake key is built at run time. The expected numbers were
 counted by hand from the fixtures, never read back from the parser.
 
-The contracts against props (FEED_COLUMNS covering props.FEED_REQUIRED,
-BOOK_TITLE equal to props.BOOK_TITLE, BOOKS the five of props.BOOK_ORDER)
-live with props' feed code in tests/test_props_feed.py.
+The contracts against props (FEED_COLUMNS covering props.FEED_REQUIRED, the
+catalog equal to props' copy: BOOK_CATALOG, BOOK_ORDER, BOOK_CODE, BOOK_TITLE
+and DFS_BOOKS) live with props' feed code in tests/test_props_feed.py.
+
+The books (build amendment B35): the catalog, its exclusions, the default
+list (BOOKS, pinned by test_the_default_books_are_pinned ALONE: every other
+test reads it from the constant) and the settings reader. The constructed
+fixtures were answered for the five books they hold (FIXTURE_BOOKS, read from
+the PHI at DET file), so the parse and merge tests name those, as the calls
+that made them did; test_a_constructed_ten_book_answer_parses_every_book and
+test_a_pull_of_ten_books_after_a_pull_of_five_takes_nothing_down cover ten.
 """
 from __future__ import annotations
 
@@ -44,8 +52,14 @@ KEY = "K" * 40                                              # a fake key, built 
 PHI_DET = "c4f1a9e2b7d3058f6a1e9c2b4d7f0953"                # the fixtures' invented event ids
 DEN_SAS = "e7b2d9f4a1c6083e5b9d2f7a4c1e0958"
 FOUR = ("player_points", "player_rebounds", "player_assists", "player_fantasy_points")
-DEFAULT_BOOKS = ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog")
 SIDES = {"both": 2, "more": 1, "less": 1}
+# Vendor keys the catalog must never hold (build amendment B35), each named:
+# the offshore books, every exchange and prediction market, the sweepstakes
+# book, Hard Rock's state variants, courtside and rebet.
+NEVER_BOOKS = ("betonlineag", "betus", "bovada", "lowvig", "mybookieag", "betanysports",
+               "betopenly", "kalshi", "limitless", "novig", "polymarket", "polymarket_us",
+               "prophetx", "fliff", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh",
+               "courtside", "rebet")
 
 
 # -- Helpers -----------------------------------------------------------------------
@@ -61,7 +75,12 @@ def den_sas() -> dict:
     return fixture("event_odds_den_sas_constructed.json")
 
 
-def parse(payload, books=O.BOOKS, markets=FOUR, at=NINE) -> pd.DataFrame:
+# The books the constructed answers were asked for (PROVENANCE.txt), read from
+# the PHI at DET answer, which holds every one of them, in its own order.
+FIXTURE_BOOKS = tuple(b["key"] for b in phi_det()["bookmakers"])
+
+
+def parse(payload, books=FIXTURE_BOOKS, markets=FOUR, at=NINE) -> pd.DataFrame:
     return O.parse_event_odds(payload, books=books, markets=markets, fetched_at=at)
 
 
@@ -141,22 +160,128 @@ def side(name: str, player: str, point=24.5, price=-110) -> list:
 
 
 # -- The vendor's facts ----------------------------------------------------------------
-def test_the_book_constants_are_layout_bs_and_the_vendors():
-    """Amendment A2's titles; the five books named in `bookmakers` (design 4.1's
-    default string); the vendor's other US book keys, which the request
-    builder knows and the settings reader refuses (B6)."""
-    assert O.BOOK_TITLE == {"prizepicks": "PrizePicks", "underdog": "Underdog",
-                            "draftkings": "DraftKings", "fanduel": "FanDuel", "betmgm": "BetMGM"}
-    assert O.BOOKS == DEFAULT_BOOKS and set(O.BOOKS) == set(O.BOOK_TITLE)
-    assert O.KNOWN_BOOKS == set(DEFAULT_BOOKS) | {"betrivers", "williamhill_us", "fanatics",
-                                                  "espnbet", "hardrockbet", "pick6",
-                                                  "dabble_us_dfs"}
-    assert O.DFS_BOOKS == {"prizepicks", "underdog"}
-    assert O.US_DFS_BOOKS == {"prizepicks", "underdog", "pick6", "dabble_us_dfs"}
+def test_the_vendors_facts():
     assert O.REFERENCE_BOOK == "prizepicks"
     assert O.HOST == "api.the-odds-api.com" and O.SPORT == "basketball_nba"
-    assert O.SEND_REGIONS is False
+    assert O.SEND_REGIONS is False                  # never regions, so never "us" (B35)
     assert O.MAX_BOOKS == 10
+
+
+# -- The books (build amendment B35) ---------------------------------------------------
+# C1, word for word: (key, code, title) in the board's column order.
+CATALOG = (
+    ("draftkings", "DK", "DraftKings"), ("fanduel", "FD", "FanDuel"), ("betmgm", "MGM", "BetMGM"),
+    ("prizepicks", "PP", "PrizePicks"), ("underdog", "UD", "Underdog"),
+    ("espnbet", "TSB", "theScore Bet"), ("hardrockbet", "HRB", "Hard Rock Bet"),
+    ("betrivers", "BR", "BetRivers"), ("pick6", "P6", "DraftKings Pick6"),
+    ("betparx", "PARX", "betPARX"), ("ballybet", "BALLY", "Bally Bet"),
+    ("dabble_us_dfs", "DAB", "Dabble"), ("williamhill_us", "CZR", "Caesars"),
+    ("fanatics", "FAN", "Fanatics"))
+PICKEM = {"prizepicks", "underdog", "pick6", "dabble_us_dfs"}       # C5
+
+
+def test_the_catalog_is_the_licensed_books_with_our_own_codes_and_titles():
+    """C1: the state-licensed US sportsbooks and US DFS pick'em sites, in the
+    board's column order, each with our own code (unique) and title; C5:
+    the four pick'em books, which are every us_dfs key, use More and Less,
+    every other book Over and Under; Caesars and Fanatics are served on paid
+    plans only. props' copies are the same (tests/test_props_feed.py pins
+    them too)."""
+    assert O.BOOK_CATALOG == CATALOG
+    assert O.BOOK_ORDER == tuple(k for k, _c, _t in CATALOG)
+    assert O.BOOK_CODE == {k: c for k, c, _t in CATALOG}
+    assert O.BOOK_TITLE == {k: t for k, _c, t in CATALOG}
+    codes = [c for _k, c, _t in CATALOG]
+    assert len(set(codes)) == len(codes) == len(set(O.BOOK_ORDER)) == 14
+    assert all(re.fullmatch(r"[A-Z0-9]{2,5}", c) for c in codes)
+    assert O.DFS_BOOKS == O.US_DFS_BOOKS == PICKEM and PICKEM <= set(O.BOOK_ORDER)
+    assert O.PAID_BOOKS == {"williamhill_us", "fanatics"} <= set(O.BOOK_ORDER)
+    for book in O.BOOK_ORDER:
+        want = ("More", "Less") if book in PICKEM else ("Over", "Under")
+        assert props.side_words(book) == want, book
+    assert (props.BOOK_CATALOG, props.BOOK_ORDER, props.BOOK_CODE, props.BOOK_TITLE,
+            props.DFS_BOOKS) == (O.BOOK_CATALOG, O.BOOK_ORDER, O.BOOK_CODE, O.BOOK_TITLE,
+                                 O.DFS_BOOKS)
+
+
+def test_the_never_list_is_the_excluded_set_and_shares_no_key_with_the_catalog():
+    assert O.EXCLUDED_BOOKS == set(NEVER_BOOKS) and len(NEVER_BOOKS) == len(set(NEVER_BOOKS))
+    assert not O.EXCLUDED_BOOKS & set(O.BOOK_ORDER)
+
+
+@pytest.mark.parametrize("key", NEVER_BOOKS)
+def test_a_book_the_site_never_buys_is_refused_by_the_catalog_the_reader_and_the_builder(key):
+    """C1 (build amendment B35): an offshore book, an exchange or prediction
+    market, the sweepstakes book, a Hard Rock state variant, courtside and
+    rebet are never in the catalog (nor props' copy, nor the default); the
+    settings reader drops one, whatever its case, with a fixed phrase that
+    never holds its name; the request builder refuses it alone and beside a
+    catalog book."""
+    for catalog in (O.BOOK_ORDER, props.BOOK_ORDER, O.BOOKS):
+        assert key not in catalog
+    assert key not in O.BOOK_CODE and key not in O.BOOK_TITLE and key not in O.DFS_BOOKS
+    assert key not in props.BOOK_TITLE and key not in props.DFS_BOOKS
+    name = "BUCKETVALUE_ODDS_BOOKS"
+    s = O.read_settings({name: f"betmgm, {key.upper()} ,underdog"})
+    assert s.books == ("betmgm", "underdog")
+    assert s.problems == (f"setting {name}: excluded book dropped",)
+    alone = O.read_settings({name: key})
+    assert alone.books == O.BOOKS
+    assert alone.problems == (f"setting {name}: excluded book dropped",
+                              f"setting {name}: empty list; default used")
+    for p in s.problems + alone.problems:
+        assert key not in p.lower(), p
+    for books in ((key,), ("draftkings", key), (key.upper(),)):
+        with pytest.raises(ValueError) as e:
+            O.event_odds_request(PHI_DET, books, ("player_points",))
+        assert str(e.value) == "bad books"
+
+
+def test_the_default_books_are_pinned():
+    """C2: THE one test to edit when the default list changes (build
+    amendment B35). Ten books, as many as bill as one region (docs 529),
+    each once, every one in the catalog, neither paid-only book among them;
+    the setting's default is built from it. Every other test reads O.BOOKS."""
+    assert O.BOOKS == ("draftkings", "fanduel", "betmgm", "prizepicks", "underdog", "espnbet",
+                       "hardrockbet", "betrivers", "pick6", "betparx")
+    assert len(set(O.BOOKS)) == len(O.BOOKS) <= O.MAX_BOOKS
+    assert set(O.BOOKS) <= set(O.BOOK_ORDER) and not set(O.BOOKS) & O.PAID_BOOKS
+    # A swap of any of the last five (or a new order of them) is this test's
+    # edit alone (round BK's fix pass rehearsed six). The constructed vendor
+    # answers every feed test buys post the first five, so dropping one of
+    # those is a reviewed change, not a swap (docs/runbook.md section 8).
+    assert set(FIXTURE_BOOKS) <= set(O.BOOKS), "the default must keep the fixtures' five books"
+    assert "williamhill_us" not in O.BOOKS and "fanatics" not in O.BOOKS
+    assert O.REFERENCE_BOOK in O.BOOKS
+    assert O.SETTING_DEFAULTS["BUCKETVALUE_ODDS_BOOKS"] == ",".join(O.BOOKS)
+    assert O.read_settings({}).books == O.BOOKS
+
+
+def _default_list_literals(path: Path) -> int:
+    """Tuple and list literals of `path` whose items are O.BOOKS' keys in
+    order, and string constants that are the setting's default text."""
+    import ast
+    n = 0
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, (ast.Tuple, ast.List)) and len(node.elts) == len(O.BOOKS):
+            items = [e.value for e in node.elts if isinstance(e, ast.Constant)]
+            n += items == list(O.BOOKS)
+        elif isinstance(node, ast.Constant) and node.value == ",".join(O.BOOKS):
+            n += 1
+    return n
+
+
+def test_the_default_list_is_written_once_in_the_code_and_once_in_the_tests():
+    """C2: so a later swap is a one-line change plus one test. The list is
+    spelled out in oddsapi alone (props keeps no copy) and pinned by
+    test_the_default_books_are_pinned alone; every other module and test
+    reads O.BOOKS."""
+    repo = HERE.parent
+    files = sorted({*repo.glob("bucketlib/**/*.py"), *repo.glob("pages/*.py"),
+                    *repo.glob("scripts/*.py"), repo / "app.py", *repo.glob("tests/**/*.py")})
+    assert len(files) > 40 and repo / "bucketlib" / "sources" / "oddsapi.py" in files
+    found = {str(f.relative_to(repo)): k for f in files if (k := _default_list_literals(f))}
+    assert found == {"bucketlib/sources/oddsapi.py": 1, "tests/test_oddsapi.py": 1}, found
 
 
 def test_every_market_label_round_trips_through_props():
@@ -194,7 +319,7 @@ def test_feed_columns_are_props_parsed_columns_then_the_feeds_own():
 
 # -- Settings ---------------------------------------------------------------------------
 DEFAULT_SETTINGS = O.Settings(
-    enabled=True, books=DEFAULT_BOOKS, markets=("player_points",), core=("player_points",),
+    enabled=True, books=O.BOOKS, markets=("player_points",), core=("player_points",),
     reserve=None, first_pull_et=dt.time(8, 50), last_pull_lead=dt.timedelta(minutes=30),
     min_refresh=dt.timedelta(minutes=15), tip_guard=dt.timedelta(minutes=5),
     max_calls_10min=40, pp_topup=True, refresher=True, problems=())
@@ -205,7 +330,7 @@ def test_the_defaults_are_the_design_table():
     assert O.SETTING_DEFAULTS == {
         "BUCKETVALUE_ODDS_ENABLED": "1", "BUCKETVALUE_ODDS_MARKETS": "player_points",
         "BUCKETVALUE_ODDS_CORE_MARKETS": "player_points",
-        "BUCKETVALUE_ODDS_BOOKS": "draftkings,fanduel,betmgm,prizepicks,underdog",
+        "BUCKETVALUE_ODDS_BOOKS": ",".join(O.BOOKS),       # pinned once, in the test below
         "BUCKETVALUE_ODDS_RESERVE": "", "BUCKETVALUE_ODDS_FIRST_PULL_ET": "08:50",
         "BUCKETVALUE_ODDS_LAST_PULL_LEAD_MIN": "30", "BUCKETVALUE_ODDS_MIN_REFRESH_MIN": "15",
         "BUCKETVALUE_ODDS_TIP_GUARD_MIN": "5", "BUCKETVALUE_ODDS_MAX_CALLS_10MIN": "40",
@@ -305,57 +430,76 @@ def test_the_core_markets_are_what_the_full_list_keeps():
         "setting BUCKETVALUE_ODDS_CORE_MARKETS: empty list; default used")
 
 
-def test_books_may_only_narrow_the_five():
-    """Build amendment B6: the setting picks some of the five books, in the
-    order named, and never a sixth, which would be bought and never shown
-    (the board's pills show the five). Any other name is dropped with a fixed
-    phrase that never carries the name, and an empty result means all five."""
+def test_the_reader_takes_any_catalog_book_in_the_order_named_each_once():
+    """C3 (build amendment B35, which ends B6's rule that the setting may only
+    narrow five books): any book of the catalog, in the order named, each
+    once, whatever its case and spacing. Any other name is dropped with a
+    fixed phrase that never carries the name, and an empty result, or an
+    unreadable value, means the default (O.BOOKS)."""
     name = "BUCKETVALUE_ODDS_BOOKS"
     s = O.read_settings({name: " PrizePicks , underdog,prizepicks"})
     assert s.books == ("prizepicks", "underdog") and s.problems == ()
-    s = O.read_settings({name: "draftking,fanduel,betrivers"})
-    assert s.books == ("fanduel",)
+    s = O.read_settings({name: " BallyBet , dabble_us_dfs,pick6,ballybet"})
+    assert s.books == ("ballybet", "dabble_us_dfs", "pick6") and s.problems == ()
+    # Derived, never listed (round BK's review, BKR-3: a swap of the default
+    # list edits the pin test alone): the catalog books outside B6's five
+    # (the fixtures' books) and those outside the default, each named
+    # backwards, upper case, spaced out and once more at the end.
+    late = [b for b in O.BOOK_ORDER if b not in FIXTURE_BOOKS]
+    off = [b for b in O.BOOK_ORDER if b not in O.BOOKS]           # catalog books off the default
+    assert late and off
+    for books in (late, off):
+        named = tuple(reversed(books))[:O.MAX_BOOKS]
+        s = O.read_settings({name: " , ".join(b.upper() for b in named + named[:1])})
+        assert s.books == named and s.problems == (), books
+    for book in O.BOOK_ORDER:                     # every catalog book, alone
+        one = O.read_settings({name: book.upper()})
+        assert one.books == (book,) and one.problems == (), book
+    s = O.read_settings({name: "williamhill_us,fanatics"})        # paid plans: accepted
+    assert s.books == ("williamhill_us", "fanatics") and s.problems == ()
+    s = O.read_settings({name: "draftking,fanduel,bet365,BOVADA,betrivers"})
+    assert s.books == ("fanduel", "betrivers")
     assert s.problems == (f"setting {name}: unknown key dropped",
-                          f"setting {name}: book outside the five dropped")
-    s = O.read_settings({name: "bet365,pinnacle"})
-    assert s.books == DEFAULT_BOOKS
-    assert s.problems == (f"setting {name}: unknown key dropped",
-                          f"setting {name}: empty list; default used")
-    others = sorted(O.KNOWN_BOOKS - set(O.BOOKS))
-    assert len(others) == 7                        # the vendor's other US books
-    for other in others:
-        s = O.read_settings({name: f"{other},betmgm"})
-        assert s.books == ("betmgm",), other
-        assert s.problems == (f"setting {name}: book outside the five dropped",), other
-        alone = O.read_settings({name: other.upper()})
-        assert alone.books == DEFAULT_BOOKS, other
-        assert alone.problems == (f"setting {name}: book outside the five dropped",
-                                  f"setting {name}: empty list; default used"), other
-    every = O.read_settings({name: ",".join(sorted(O.KNOWN_BOOKS, reverse=True))})
-    assert every.books == ("underdog", "prizepicks", "fanduel", "draftkings", "betmgm")
-    assert every.problems == (f"setting {name}: book outside the five dropped",)
+                          f"setting {name}: excluded book dropped")
+    for p in s.problems:
+        assert not re.search(r"draftking\b|bet365|bovada", p, re.I), p
+    for nothing in ("bet365,pinnacle", " , ,", "kalshi,novig"):
+        s = O.read_settings({name: nothing})
+        assert s.books == O.BOOKS, nothing
+        assert s.problems[-1] == f"setting {name}: empty list; default used", nothing
+    assert O.read_settings({name: ""}) == O.read_settings({})       # blank is unset
+    for junk in (["draftkings"], True, {"a": 1}):
+        s = O.read_settings({name: junk})
+        assert s.books == O.BOOKS, junk
+        assert s.problems == (f"setting {name}: unreadable value; default used",), junk
 
 
-def test_an_eleventh_book_is_refused_because_it_doubles_the_bill(monkeypatch):
-    """Every 10 books named in `bookmakers` bill as one region (docs 529). The
-    settings name five books at most (B6), so all twelve known keys, twice,
-    give the five; the request builder refuses an 11th whoever asks
-    (test_the_builder_refuses_what_the_settings_reader_would). The reader's
-    own cap of ten still holds should the five ever grow past ten."""
+def test_an_eleventh_book_is_refused_because_it_doubles_the_bill():
+    """Every 10 books named in `bookmakers` bill as one region (docs 529), so
+    the reader keeps the first ten catalog books named and says it dropped
+    the rest; a repeated name is not a second book; the request builder
+    refuses an 11th whoever asks
+    (test_the_builder_refuses_what_the_settings_reader_would)."""
     name = "BUCKETVALUE_ODDS_BOOKS"
-    known = sorted(O.KNOWN_BOOKS)
-    assert len(known) == 12
-    s = O.read_settings({name: ",".join(known + known)})
-    assert s.books == tuple(k for k in known if k in O.BOOKS) and len(s.books) == 5
-    assert s.problems == (f"setting {name}: book outside the five dropped",)
-    monkeypatch.setattr(O, "BOOKS", tuple(known))          # a board of twelve books
-    ten = O.read_settings({name: ",".join(known[:10])})
-    assert ten.books == tuple(known[:10]) and ten.problems == ()
-    eleven = O.read_settings({name: ",".join(known[:11])})
-    assert eleven.books == tuple(known[:10])
+    every = O.BOOK_ORDER
+    assert len(every) > O.MAX_BOOKS == 10
+    ten = O.read_settings({name: ",".join(every[:10])})
+    assert ten.books == every[:10] and ten.problems == ()
+    eleven = O.read_settings({name: ",".join(every[:11])})
+    assert eleven.books == every[:10]
     assert eleven.problems == (f"setting {name}: more than 10 books; the rest dropped",)
-    twelve = O.read_settings({name: ",".join(known + known)})
-    assert twelve.books == tuple(known[:10]) and len(twelve.problems) == 1
+    backwards = O.read_settings({name: ",".join(reversed(every))})
+    assert backwards.books == tuple(reversed(every))[:10] and len(backwards.problems) == 1
+    twice = O.read_settings({name: ",".join(every + every)})
+    assert twice.books == every[:10]
+    assert twice.problems == (f"setting {name}: more than 10 books; the rest dropped",)
+    repeats = O.read_settings({name: ",".join([every[0]] * 12 + list(every[1:10]))})
+    assert repeats.books == every[:10] and repeats.problems == ()
+    for books in (every[:11], every, O.BOOKS + (every[-1],)):
+        with pytest.raises(ValueError, match="^bad books$"):
+            O.event_odds_request(PHI_DET, books, ("player_points",))
+    path, params = O.event_odds_request(PHI_DET, every[:10], ("player_points",))
+    assert len(params["bookmakers"].split(",")) == 10 and "regions" not in params
 
 
 @pytest.mark.parametrize("name, value, field, want", [
@@ -441,13 +585,13 @@ def test_the_events_request_is_free_and_carries_no_key():
 
 
 def test_the_event_odds_request_names_the_books_and_sends_no_regions():
-    """Five books in `bookmakers` bill as one region and `bookmakers` wins over
-    `regions` (docs 529), so no `regions` is sent unless the probe says the
-    vendor needs it (m5). No include flag and no key: live adds `apiKey`."""
+    """Up to ten books in `bookmakers` bill as one region and `bookmakers` wins
+    over `regions` (docs 529), so no `regions` is sent unless the probe says
+    the vendor needs it (m5). No include flag and no key: live adds `apiKey`."""
     s = O.read_settings({})
     path, params = O.event_odds_request(PHI_DET, s.books, s.markets)
     assert path == f"/v4/sports/basketball_nba/events/{PHI_DET}/odds"
-    assert params == {"bookmakers": "draftkings,fanduel,betmgm,prizepicks,underdog",
+    assert params == {"bookmakers": ",".join(O.BOOKS),
                       "markets": "player_points", "oddsFormat": "american", "dateFormat": "iso"}
     _, topup = O.event_odds_request(DEN_SAS, ("prizepicks",), O.MAIN_MARKETS)
     assert topup["bookmakers"] == "prizepicks"
@@ -460,7 +604,7 @@ def test_regions_are_sent_only_when_the_probe_flips_send_regions(monkeypatch):
     monkeypatch.setattr(O, "SEND_REGIONS", True)
     _, params = O.event_odds_request(PHI_DET, O.BOOKS, ("player_points",))
     assert params["regions"] == "us"
-    assert params["bookmakers"] == "draftkings,fanduel,betmgm,prizepicks,underdog"
+    assert params["bookmakers"] == ",".join(O.BOOKS)
 
 
 @pytest.mark.parametrize("bad", [
@@ -478,7 +622,8 @@ def test_a_bad_event_id_is_refused_without_echoing_it(bad):
     ((), ("player_points",), "bad books"),
     ("draftkings", ("player_points",), "bad books"),
     (None, ("player_points",), "bad books"),
-    (tuple(sorted(O.KNOWN_BOOKS))[:11], ("player_points",), "bad books"),
+    (O.BOOK_ORDER[:11], ("player_points",), "bad books"),
+    (("draftkings", "bovada"), ("player_points",), "bad books"),
     (("DraftKings",), ("player_points",), "bad books"),
     (O.BOOKS, (), "bad markets"),
     (O.BOOKS, "player_points", "bad markets"),
@@ -697,7 +842,7 @@ def test_the_parsers_never_change_what_they_are_given():
     pd.testing.assert_frame_equal(games, games_before)
     prev = first_pull()
     prev_before, new_before = prev.copy(), new.copy()
-    O.merge_refresh(prev, new, O.BOOKS)
+    O.merge_refresh(prev, new, FIXTURE_BOOKS)
     pd.testing.assert_frame_equal(prev, prev_before)
     pd.testing.assert_frame_equal(new, new_before)
 
@@ -877,7 +1022,7 @@ def test_phi_det_parses_to_one_line_per_book_player_and_market():
         "unknown_book": 0, "unmapped_market": 0, "refused_market": 0, "alt_dropped": 0,
         "unrequested_market": 0, "fantasy_dropped": 2, "bad_outcome": 1,
         "duplicate_outcome": 0, "extra_points": 2}
-    assert a["books_answered"] == DEFAULT_BOOKS and a["bookmaker_entries"] == 5
+    assert a["books_answered"] == FIXTURE_BOOKS and a["bookmaker_entries"] == 5
     assert (a["event_id"], a["event_home"], a["event_away"]) == (PHI_DET, "DET", "PHI")
 
 
@@ -986,13 +1131,14 @@ def test_every_feed_row_is_a_standard_line_in_props_shape():
     assert set(df["start_time"]) == {"2026-03-12T23:00:00Z"}
     assert set(df["event_id"]) == {PHI_DET}
     assert set(zip(df["event_home"], df["event_away"])) == {("DET", "PHI")}
-    assert dict(zip(df["book"], df["book_title"])) == O.BOOK_TITLE
+    assert dict(zip(df["book"], df["book_title"])) == {b: O.BOOK_TITLE[b] for b in FIXTURE_BOOKS}
     assert "Underdog Fantasy" not in set(df["book_title"])
     assert set(df["market"]) == set(FOUR)
     assert set(df["stat_type"]) == {"Points", "Rebounds", "Assists", "Fantasy Score"}
     titles = parse(ev([bk(b, mk("player_points", pair("Cade Cunningham", 25.5)))
-                       for b in sorted(O.KNOWN_BOOKS)]), books=tuple(sorted(O.KNOWN_BOOKS)))
-    assert len(titles) == 12 and not (titles["book_title"] == titles["book"]).any()
+                       for b in O.BOOK_ORDER]), books=O.BOOK_ORDER)
+    assert len(titles) == len(O.BOOK_ORDER) and not (titles["book_title"] == titles["book"]).any()
+    assert dict(zip(titles["book"], titles["book_title"])) == O.BOOK_TITLE       # every book ours
 
 
 def test_alternates_and_refused_markets_are_counted_and_never_kept():
@@ -1166,7 +1312,7 @@ def test_good_lines_survive_their_junk_neighbours():
 # -- Merging a refresh --------------------------------------------------------------------
 def first_pull(payload=None, at=NINE, markets=FOUR) -> pd.DataFrame:
     out, report = O.merge_refresh(None, parse(phi_det() if payload is None else payload, at=at,
-                                              markets=markets), O.BOOKS)
+                                              markets=markets), FIXTURE_BOOKS)
     assert report["changed"] and not report["empty"]
     return out
 
@@ -1176,11 +1322,11 @@ def by_book(df: pd.DataFrame, book: str) -> pd.DataFrame:
 
 
 def test_the_first_pull_stores_every_book():
-    out, report = O.merge_refresh(None, parse(phi_det()), O.BOOKS)
+    out, report = O.merge_refresh(None, parse(phi_det()), FIXTURE_BOOKS)
     assert len(out) == 31 and list(out.columns) == O.FEED_COLUMNS and out.attrs == {}
-    assert report["books"] == {b: "replaced" for b in DEFAULT_BOOKS}
+    assert report["books"] == {b: "replaced" for b in FIXTURE_BOOKS}
     assert (report["kept_rows"], report["n_pulled"], report["changed"]) == (31, 0, True)
-    sas, rep = O.merge_refresh(None, parse(den_sas()), O.BOOKS)
+    sas, rep = O.merge_refresh(None, parse(den_sas()), FIXTURE_BOOKS)
     assert rep["books"]["prizepicks"] == "absent" and "prizepicks" not in set(sas["book"])
 
 
@@ -1189,7 +1335,7 @@ def test_a_missing_book_keeps_its_previous_lines_and_their_own_time():
     prev = first_pull()
     payload = phi_det()
     payload["bookmakers"] = [b for b in payload["bookmakers"] if b["key"] != "fanduel"]
-    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), FIXTURE_BOOKS)
     assert report["books"]["fanduel"] == "absent" and report["unreadable"] == {}
     pd.testing.assert_frame_equal(by_book(out, "fanduel"), by_book(prev, "fanduel"))
     assert set(by_book(out, "fanduel")["fetched_at"]) == {pd.Timestamp(NINE)}
@@ -1203,7 +1349,7 @@ def test_a_line_taken_down_is_dropped_and_named():
     payload = phi_det()
     pts = market(payload, "draftkings", "player_points")
     pts["outcomes"] = [o for o in pts["outcomes"] if o["description"] != "Tyrese Maxey"]
-    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), FIXTURE_BOOKS)
     assert "Tyrese Maxey" not in set(by_book(out, "draftkings")["name"])
     assert "Tyrese Maxey" in set(by_book(out, "fanduel")["name"])
     assert report["pulled"] == [("draftkings", "Tyrese Maxey", "Points")]
@@ -1213,9 +1359,9 @@ def test_a_line_taken_down_is_dropped_and_named():
 def test_the_pulled_list_holds_eight_and_counts_them_all():
     many = [o for i in range(20) for o in pair(f"Player Number{i:02d}", 10.5)]
     prev, _ = O.merge_refresh(None, parse(ev([bk("draftkings", mk("player_points", many))])),
-                              O.BOOKS)
+                              FIXTURE_BOOKS)
     fewer = ev([bk("draftkings", mk("player_points", many[:22]))])     # 11 of the 20 left
-    out, report = O.merge_refresh(prev, parse(fewer, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(fewer, at=ELEVEN), FIXTURE_BOOKS)
     assert len(out) == 11 and report["books"]["draftkings"] == "replaced"
     assert report["n_pulled"] == 9 and len(report["pulled"]) == 8
 
@@ -1226,11 +1372,11 @@ def test_an_empty_answer_keeps_everything():
     prev = first_pull()
     payload = phi_det()
     payload["bookmakers"] = []
-    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), FIXTURE_BOOKS)
     pd.testing.assert_frame_equal(out, prev)
     assert report["empty"] and not report["bad_payload"]
     assert (report["kept_rows"], report["changed"]) == (0, False)
-    assert report["books"] == {b: "absent" for b in DEFAULT_BOOKS}
+    assert report["books"] == {b: "absent" for b in FIXTURE_BOOKS}
 
 
 @pytest.mark.parametrize("spoil, counter, n", [
@@ -1245,7 +1391,7 @@ def test_a_present_book_with_nothing_readable_keeps_its_previous_lines(spoil, co
     prev = first_pull()
     payload = phi_det()
     spoil(market(payload, "fanduel", "player_points"))
-    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(payload, at=ELEVEN), FIXTURE_BOOKS)
     pd.testing.assert_frame_equal(by_book(out, "fanduel"), by_book(prev, "fanduel"))
     assert report["books"]["fanduel"] == "unreadable"
     assert report["unreadable"]["fanduel"][counter] == n
@@ -1263,7 +1409,7 @@ def test_under_half_keeps_the_previous_lines_and_reports_suspect():
         dk = entry(payload, "draftkings")
         dk["markets"] = [market(payload, "draftkings", "player_points")]
         dk["markets"][0]["outcomes"] = dk["markets"][0]["outcomes"][:2 * n]
-        return O.merge_refresh(prev, parse(payload, at=ELEVEN), O.BOOKS)
+        return O.merge_refresh(prev, parse(payload, at=ELEVEN), FIXTURE_BOOKS)
 
     out, report = keep(4)
     pd.testing.assert_frame_equal(by_book(out, "draftkings"), by_book(prev, "draftkings"))
@@ -1296,7 +1442,7 @@ def test_a_prizepicks_only_answer_touches_prizepicks_only():
         pp = by_book(out, "prizepicks")
         assert one(pp, "prizepicks", "Cade Cunningham")["line"] == 26.5
         assert set(pp["fetched_at"]) == {pd.Timestamp(ELEVEN)}
-    sas, _ = O.merge_refresh(None, parse(den_sas()), O.BOOKS)
+    sas, _ = O.merge_refresh(None, parse(den_sas()), FIXTURE_BOOKS)
     nothing = den_sas()
     nothing["bookmakers"] = []
     still, report = O.merge_refresh(sas, parse(nothing, books=("prizepicks",), at=ELEVEN),
@@ -1347,8 +1493,8 @@ def test_a_core_refresh_after_a_three_market_pull_keeps_the_markets_it_did_not_a
     for o in market(payload, "draftkings", "player_points")["outcomes"]:
         if o["description"] == "Cade Cunningham":
             o["point"] += 1.0
-    out, report = O.merge_refresh(prev, parse(payload, markets=O.CORE_MARKETS, at=ELEVEN), O.BOOKS)
-    assert report["books"] == {b: "replaced" for b in DEFAULT_BOOKS}
+    out, report = O.merge_refresh(prev, parse(payload, markets=O.CORE_MARKETS, at=ELEVEN), FIXTURE_BOOKS)
+    assert report["books"] == {b: "replaced" for b in FIXTURE_BOOKS}
     assert (report["pulled"], report["n_pulled"], report["suspect"]) == ([], 0, {})
     assert (report["kept_rows"], report["changed"], len(out)) == (25, True, 30)
     others = out[out["market"] != "player_points"].reset_index(drop=True)
@@ -1366,11 +1512,11 @@ def test_a_core_refresh_after_a_twelve_market_pull_replaces_the_points_lines():
     lines at 9 AM. The core refresh answers its 5 points lines, one moved
     from 24.5 to 26.5. Judged against all 60, 5 is "under half": the moved
     line would stay 24.5 with its 9 AM time and nothing would change."""
-    prev, _ = O.merge_refresh(None, parse(five_players(), markets=O.MAIN_MARKETS), O.BOOKS)
+    prev, _ = O.merge_refresh(None, parse(five_players(), markets=O.MAIN_MARKETS), FIXTURE_BOOKS)
     assert len(prev) == 60 and set(prev["market"]) == set(O.MAIN_MARKETS)
     core = five_players(O.CORE_MARKETS, moved={"Player Number0": 26.5},
                         last_update="2026-03-12T14:52:14Z")
-    out, report = O.merge_refresh(prev, parse(core, markets=O.CORE_MARKETS, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(core, markets=O.CORE_MARKETS, at=ELEVEN), FIXTURE_BOOKS)
     assert report["books"]["draftkings"] == "replaced" and report["suspect"] == {}
     assert (report["kept_rows"], report["n_pulled"], report["changed"], len(out)) == (5, 0, True, 60)
     moved = one(out, "draftkings", "Player Number0")
@@ -1386,20 +1532,20 @@ def test_the_half_rule_and_the_pulled_list_judge_only_the_markets_asked_for():
     with 2 of the 5 points lines is "suspect" (2 x 2 < 5) and keeps all 60;
     one with 4 of 5 replaces them and names the fifth as taken down; a full
     refresh missing one assists line names that line."""
-    prev, _ = O.merge_refresh(None, parse(five_players(), markets=O.MAIN_MARKETS), O.BOOKS)
+    prev, _ = O.merge_refresh(None, parse(five_players(), markets=O.MAIN_MARKETS), FIXTURE_BOOKS)
     gone = [(p, "player_points") for p in FIVE_PLAYERS[2:]]
     out, report = O.merge_refresh(prev, parse(five_players(O.CORE_MARKETS, drop=gone),
-                                              markets=O.CORE_MARKETS, at=ELEVEN), O.BOOKS)
+                                              markets=O.CORE_MARKETS, at=ELEVEN), FIXTURE_BOOKS)
     pd.testing.assert_frame_equal(out, prev)
     assert report["suspect"] == {"draftkings": (2, 5)} and not report["changed"]
     one_gone = [("Player Number4", "player_points")]
     out, report = O.merge_refresh(prev, parse(five_players(O.CORE_MARKETS, drop=one_gone),
-                                              markets=O.CORE_MARKETS, at=ELEVEN), O.BOOKS)
+                                              markets=O.CORE_MARKETS, at=ELEVEN), FIXTURE_BOOKS)
     assert report["books"]["draftkings"] == "replaced" and len(out) == 59
     assert report["pulled"] == [("draftkings", "Player Number4", "Points")] and report["n_pulled"] == 1
     assert (out["market"] != "player_points").sum() == 55
     full = five_players(drop=[("Player Number1", "player_assists")])
-    out, report = O.merge_refresh(prev, parse(full, markets=O.MAIN_MARKETS, at=ELEVEN), O.BOOKS)
+    out, report = O.merge_refresh(prev, parse(full, markets=O.MAIN_MARKETS, at=ELEVEN), FIXTURE_BOOKS)
     assert report["pulled"] == [("draftkings", "Player Number1", "Assists")] and len(out) == 59
 
 
@@ -1424,34 +1570,34 @@ def test_the_caller_may_state_the_markets_and_without_them_every_market_is_judge
     """markets_requested= wins over the parse's record. A frame that carries
     no record (its attrs lost) falls back to judging every market, the rule
     before markets were tracked: there, the core refresh is "suspect"."""
-    prev, _ = O.merge_refresh(None, parse(five_players(), markets=O.MAIN_MARKETS), O.BOOKS)
+    prev, _ = O.merge_refresh(None, parse(five_players(), markets=O.MAIN_MARKETS), FIXTURE_BOOKS)
     core = parse(five_players(O.CORE_MARKETS, moved={"Player Number0": 26.5}),
                  markets=O.CORE_MARKETS, at=ELEVEN)
     bare = core.copy()
     bare.attrs = {k: v for k, v in core.attrs.items() if k != "markets_requested"}
-    out, report = O.merge_refresh(prev, bare, O.BOOKS)
+    out, report = O.merge_refresh(prev, bare, FIXTURE_BOOKS)
     assert report["suspect"] == {"draftkings": (5, 60)}
     pd.testing.assert_frame_equal(out, prev)
     for asked in (("player_points",), "player_points", ["player_points", None]):
-        out, report = O.merge_refresh(prev, bare, O.BOOKS, markets_requested=asked)
+        out, report = O.merge_refresh(prev, bare, FIXTURE_BOOKS, markets_requested=asked)
         assert report["books"]["draftkings"] == "replaced" and len(out) == 60, asked
         assert one(out, "draftkings", "Player Number0")["line"] == 26.5
-    out, report = O.merge_refresh(prev, core, O.BOOKS, markets_requested=O.MAIN_MARKETS)
+    out, report = O.merge_refresh(prev, core, FIXTURE_BOOKS, markets_requested=O.MAIN_MARKETS)
     assert report["suspect"] == {"draftkings": (5, 60)}            # the caller's word wins
-    out, report = O.merge_refresh(prev, core, O.BOOKS, markets_requested=5)   # junk: every market
+    out, report = O.merge_refresh(prev, core, FIXTURE_BOOKS, markets_requested=5)   # junk: every market
     assert report["suspect"] == {"draftkings": (5, 60)}
 
 
 def test_changed_only_when_the_stored_lines_change():
     prev = first_pull()
-    same, report = O.merge_refresh(prev, parse(phi_det(), at=NINE), O.BOOKS)
+    same, report = O.merge_refresh(prev, parse(phi_det(), at=NINE), FIXTURE_BOOKS)
     assert not report["changed"] and len(same) == len(prev)
-    later, report = O.merge_refresh(prev, parse(phi_det(), at=ELEVEN), O.BOOKS)
+    later, report = O.merge_refresh(prev, parse(phi_det(), at=ELEVEN), FIXTURE_BOOKS)
     assert report["changed"]                                    # new stamps: a newer "as of"
     payload = phi_det()
     market(payload, "underdog", "player_points")["outcomes"][0]["point"] = 26.5
     market(payload, "underdog", "player_points")["outcomes"][1]["point"] = 26.5
-    moved, report = O.merge_refresh(prev, parse(payload, at=NINE), O.BOOKS)
+    moved, report = O.merge_refresh(prev, parse(payload, at=NINE), FIXTURE_BOOKS)
     assert report["changed"]
     assert one(moved, "underdog", "Cade Cunningham")["line"] == 26.5
 
@@ -1465,7 +1611,7 @@ def test_junk_never_wipes_the_stored_lines(new):
                        home="Team World"), at=ELEVEN)
     elif isinstance(new, str) and new == "bad payload":
         new = parse("<html>Bad gateway</html>", at=ELEVEN)
-    out, report = O.merge_refresh(prev, new, O.BOOKS)
+    out, report = O.merge_refresh(prev, new, FIXTURE_BOOKS)
     pd.testing.assert_frame_equal(out, prev)
     assert report["bad_payload"] and not report["empty"]
     assert (report["kept_rows"], report["changed"]) == (0, False)
@@ -1473,9 +1619,9 @@ def test_junk_never_wipes_the_stored_lines(new):
 
 def test_a_junk_previous_frame_is_treated_as_none():
     for prev in ("x", pd.DataFrame({"name": ["A B"]}), 5):
-        out, report = O.merge_refresh(prev, parse(phi_det()), O.BOOKS)
+        out, report = O.merge_refresh(prev, parse(phi_det()), FIXTURE_BOOKS)
         assert len(out) == 31 and report["bad_prev"]
-    out, report = O.merge_refresh(None, parse(phi_det()), O.BOOKS)
+    out, report = O.merge_refresh(None, parse(phi_det()), FIXTURE_BOOKS)
     assert not report["bad_prev"]
     out, report = O.merge_refresh(first_pull(), parse(phi_det()), ())
     assert report["books"] == {} and report["kept_rows"] == 0 and not report["changed"]
@@ -1502,10 +1648,127 @@ def test_a_market_a_book_answered_without_being_asked_is_judged_too_oa05():
                         and o["description"] == "Cade Cunningham":
                     o["point"] = point + 1
     fresh = parse(payload, at=ELEVEN, markets=("player_points", "player_rebounds"))
-    out, report = O.merge_refresh(prev, fresh, O.BOOKS, markets_requested=("player_points",))
+    out, report = O.merge_refresh(prev, fresh, FIXTURE_BOOKS, markets_requested=("player_points",))
     reb = out[(out["market"] == "player_rebounds") & (out["book"] == "draftkings")]
     cade = reb[reb["name"] == "Cade Cunningham"]
     assert cade["line"].tolist() == [point + 1]
     assert reb.groupby("name").size().max() == 1
     assert len(out[out["market"] == "player_assists"]) == len(prev[prev["market"] == "player_assists"])
     assert set(out[out["market"] == "player_assists"]["fetched_at"]) == {pd.Timestamp(NINE).tz_convert("UTC")}
+
+
+# -- Ten books (build amendment B35) ---------------------------------------------------------
+PRICES = {"sportsbook": (-118, -102), "pickem": (-137, -137)}
+
+
+def books_answer(books=None, player="Cade Cunningham") -> dict:
+    """A CONSTRUCTED event-odds answer for PHI at DET (the vendor's documented
+    shape, UT/docs_v4.txt:1504-1586, as every file in tests/fixtures/oddsapi:
+    never a captured answer). Each of `books`, by default every catalog
+    book with the default books (O.BOOKS) first, posts `player`'s points,
+    each at its own line, an Over and Under pair: a sportsbook at -118/-102,
+    a pick'em book (C5's, PICKEM: the vendor's us_dfs keys) at the
+    indicative -137/-137."""
+    keys = books if books is not None else tuple(dict.fromkeys([*O.BOOKS, *O.BOOK_ORDER]))
+    return ev([bk(b, mk("player_points", pair(player, 20.5 + i, *PRICES[
+        "pickem" if b in PICKEM else "sportsbook"]))) for i, b in enumerate(keys)])
+
+
+def test_a_constructed_ten_book_answer_parses_every_book():
+    """T5 and C5: every catalog book posts, the ten default books first.
+    Named with the catalog, every line is kept under our own title; the
+    pick'em books (pick6 and dabble_us_dfs among them) have their prices
+    blanked to NaN, the sportsbooks (espnbet and hardrockbet among them)
+    keep theirs; each row's side words are its book's (props.side_words:
+    More and Less on a pick'em book, Over and Under on a sportsbook). Named
+    with the default books only, every other catalog book's entry is an
+    unknown book, counted and never kept. Every count is read from the
+    constants (round BK's review, BKR-3), so a swap of the default list
+    leaves this test as it is."""
+    payload = books_answer()
+    keys = [b["key"] for b in payload["bookmakers"]]
+    assert sorted(keys) == sorted(O.BOOK_ORDER) and keys[:len(O.BOOKS)] == list(O.BOOKS)
+    df = parse(payload, books=O.BOOK_ORDER, markets=("player_points",))
+    a = accounted(df, payload)
+    assert list(df["book"]) == keys and a["books_answered"] == O.BOOK_ORDER
+    n = len(keys)
+    assert (a["outcomes_seen"], a["kept_outcomes"], a["rows"], a["unknown_book"]) == (2 * n, 2 * n,
+                                                                                      n, 0)
+    for i, book in enumerate(keys):
+        r = one(df, book, "Cade Cunningham")
+        assert (r["book_title"], r["line"], r["direction"]) == (O.BOOK_TITLE[book], 20.5 + i, "both")
+        if book in PICKEM:                       # C5's list, named: never read from the code
+            assert math.isnan(r["price_over"]) and math.isnan(r["price_under"]), book
+            assert props.side_words(book) == ("More", "Less"), book
+        else:
+            assert (r["price_over"], r["price_under"]) == PRICES["sportsbook"], book
+            assert props.side_words(book) == ("Over", "Under"), book
+    for book in ("pick6", "dabble_us_dfs"):
+        assert one(df, book, "Cade Cunningham")[["price_over", "price_under"]].isna().all(), book
+    for book in ("espnbet", "hardrockbet"):
+        assert one(df, book, "Cade Cunningham")["price_over"] == -118.0, book
+    ten = parse(payload, books=O.BOOKS, markets=("player_points",))
+    t = accounted(ten, payload)
+    assert list(ten["book"]) == list(O.BOOKS) and t["books_answered"] == O.BOOKS
+    unasked = [b for b in keys if b not in O.BOOKS]
+    assert unasked and t["unknown_book"] == 2 * len(unasked)
+    assert t["unknown_books"] == unasked[:O._SAMPLE]
+
+
+@pytest.mark.parametrize("key", NEVER_BOOKS)
+def test_a_book_the_site_never_buys_is_never_a_line_when_it_answers_anyway(key):
+    """Round BK's review, BKR-4: a book the site never buys (C1's
+    exclusions, each named) that sits in an answer anyway, beside every
+    catalog book, is never a line, whichever books the call named (the
+    default, or the whole catalog): its outcomes are counted as an unknown
+    book's, it has no tally of its own and it is never among the books
+    answered. The page never sees it (props.feed_board also drops a book
+    outside the catalog), and neither does the stored frame. It answers
+    first, so the log's sample of unknown books always holds it."""
+    payload = books_answer()
+    payload["bookmakers"].insert(0, bk(key, mk("player_points", pair("Cade Cunningham", 30.5),
+                                                   pair("Jalen Duren", 9.5))))
+    for books in (O.BOOKS, O.BOOK_ORDER):
+        df = parse(payload, books=books, markets=("player_points",))
+        a = accounted(df, payload)
+        assert set(df["book"]) == set(books) and key not in a["by_book"], books
+        assert a["books_answered"] == tuple(books), books
+        assert a["unknown_book"] == 2 * (len(O.BOOK_ORDER) - len(books)) + 4, books
+        assert a["unknown_books"][0] == key, books
+    assert a["unknown_books"] == [key]                  # the catalog named: it alone is unknown
+    out, _report = O.merge_refresh(None, df, O.BOOK_ORDER, markets_requested=("player_points",))
+    assert key not in set(out["book"]) and set(out["book"]) == set(O.BOOK_ORDER)
+
+
+def test_a_pull_of_ten_books_after_a_pull_of_five_takes_nothing_down():
+    """T7 and C4: the first pull named the five books the fixtures hold; the
+    refresh names the ten default books. The five new books' lines are
+    stored and never counted as taken down, and the five are judged exactly
+    as a five-book refresh judges them: the same rows, the same verdicts, the
+    same taken-down list (Tyrese Maxey's DraftKings points line). A new book
+    that posts nothing is absent, never a taken-down line. The other way
+    round, a pull naming the five after one of ten never touches the books
+    it did not name (books not requested are never touched)."""
+    prev = first_pull()
+    payload = phi_det()
+    pts = market(payload, "draftkings", "player_points")
+    pts["outcomes"] = [o for o in pts["outcomes"] if o["description"] != "Tyrese Maxey"]
+    new_books = tuple(b for b in O.BOOKS if b not in FIXTURE_BOOKS)
+    assert len(new_books) == len(O.BOOKS) - len(FIXTURE_BOOKS) > 0
+    five_out, five = O.merge_refresh(prev, parse(payload, at=ELEVEN), FIXTURE_BOOKS)
+    wider = copy.deepcopy(payload)
+    wider["bookmakers"] += books_answer(new_books)["bookmakers"]
+    out, ten = O.merge_refresh(prev, parse(wider, books=O.BOOKS, at=ELEVEN), O.BOOKS)
+    assert ten["pulled"] == five["pulled"] == [("draftkings", "Tyrese Maxey", "Points")]
+    assert ten["n_pulled"] == five["n_pulled"] == 1 and ten["suspect"] == five["suspect"] == {}
+    assert ten["books"] == {**five["books"], **{b: "replaced" for b in new_books}}
+    old = out[out["book"].isin(FIXTURE_BOOKS)].reset_index(drop=True)
+    pd.testing.assert_frame_equal(old, five_out)
+    assert sorted(out.loc[~out["book"].isin(FIXTURE_BOOKS), "book"]) == sorted(new_books)
+    quiet, rep = O.merge_refresh(prev, parse(phi_det(), books=O.BOOKS, at=ELEVEN), O.BOOKS)
+    assert {b: rep["books"][b] for b in new_books} == {b: "absent" for b in new_books}
+    assert rep["pulled"] == [] and rep["n_pulled"] == 0 and len(quiet) == len(prev)
+    back, rep = O.merge_refresh(out, parse(phi_det(), at=ELEVEN), FIXTURE_BOOKS)
+    assert set(rep["books"]) == set(FIXTURE_BOOKS) and rep["n_pulled"] == 0
+    for book in new_books:
+        pd.testing.assert_frame_equal(by_book(back, book), by_book(out, book))

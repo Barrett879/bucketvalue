@@ -24,7 +24,8 @@ are the two earliest games step 3 read lines for (the earliest games when
 none had any), since a game no book has posted shows the later steps nothing.
      1  /events, free: tip order [12a], quota headers [5a], the balance    0
      2  /participants: the 30 teams through teams.canonical [9a]           1
-     3  event odds, player_points, the five books, no regions, up to 7
+     3  event odds, player_points, the site's books (BUCKETVALUE_ODDS_BOOKS
+        as the site reads it, at most 10), no regions, up to 7
         untipped games, earliest first [1, 2, 3a, 6a, 10a, 13, 9b];
         a 422 MISSING_REGION is a FAIL (m5)                                1 a game
      4  game 1, player_points_alternate, prizepicks and underdog [6b, 10b] 1
@@ -138,7 +139,7 @@ class Step:
 STEPS = (
     Step(1, "events", 0, False),
     Step(2, "participants", 1, True),
-    Step(3, "points, the five books, no regions", 1, True),     # once a game, up to MAX_GAMES
+    Step(3, "points, the site's books, no regions", 1, True),   # once a game, up to MAX_GAMES
     Step(4, "PrizePicks and Underdog alternates", 1, True),
     Step(5, "includeMultipliers", 1, True),
     Step(6, "the five books plus regions=us", 2, True),
@@ -834,20 +835,24 @@ def step2(p: Probe) -> None:
 
 
 def step3(p: Probe, games: list, idx, team_of: dict) -> dict:
-    """Every game's points from the five books. What the later steps need is
-    kept: each game's lines, cost and call time, the games step 3 read lines
-    for (in tip order: steps 4 to 12 use the first two), and the games
-    without PrizePicks (step 13), those where other books posted first."""
+    """Every game's points from the site's books: BUCKETVALUE_ODDS_BOOKS read
+    as the site reads it (oddsapi.read_settings: catalog books only, at most
+    10, the default when unset; build amendment B35). What the later steps
+    need is kept: each game's lines, cost and call time, the games step 3
+    read lines for (in tip order: steps 4 to 12 use the first two), and the
+    games without PrizePicks (step 13), those where other books posted
+    first."""
     where = "step 3"
+    books = O.read_settings(os.environ).books
     res = {"frames": {}, "costs": {}, "called_at": {}, "with_lines": [], "lacking_pp": []}
     posted, read, lacking = Counter(), 0, []
     for g in games:
         t0 = p.mono()
-        ans = p.call(3, *odds_request(g.event_id, O.BOOKS), game=g)
+        ans = p.call(3, *odds_request(g.event_id, books), game=g)
         if ans is None:
             continue
         res["called_at"][g.event_id] = t0
-        frame = _parse(ans, O.BOOKS)
+        frame = _parse(ans, books)
         level, text = odds_verdict(ans, frame)
         p.out(level, f"{label(g)}, {fmt_et(g.commence_utc)}: {text}", where)
         if level == "FAIL" and text == REGIONS_FAIL:

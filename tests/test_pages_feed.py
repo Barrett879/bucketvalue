@@ -38,6 +38,7 @@ import pandas as pd
 import pytest
 
 from bucketlib import http, live, props, props_ui, store, theme
+from bucketlib.sources import oddsapi as O
 from bucketlib.util import SENTINEL, UTC
 
 HERE = Path(__file__).resolve().parent
@@ -45,6 +46,7 @@ sys.path.insert(0, str(HERE / "fixtures" / "serve"))
 import serve_harness as H  # noqa: E402
 import grid_parse as GP  # noqa: E402  (layout C's grid read back, column by column)
 import test_live_feed as LF  # noqa: E402  (the fake key, the fake vendor, the event ids)
+import test_oddsapi as OA  # noqa: E402  (C5's pick'em books, named: OA.PICKEM)
 import test_pages_smoke as PS  # noqa: E402  (the page runner and the house-style checks)
 import test_props_feed as PF  # noqa: E402  (the constructed payloads, and edited copies)
 
@@ -53,8 +55,30 @@ KEY = LF.KEY                                  # "K" * 40, built at run time
 EARLY, LATE = H.EARLY, H.LATE                 # PHI at DET 7:00 PM ET, DEN at SAS 9:00 PM ET
 GAMES = ((("PHI", "DET"), EARLY), (("DEN", "SAS"), LATE))
 et = LF.et                                    # an ET instant on 2026-03-12
-CODES = ["DK", "FD", "MGM", "PP", "UD"]       # the grid's columns, the mockup's order
 LABEL_STAT = {label: stat for stat, label in props.STAT_LABEL.items()}
+# Build amendment B35. The page world's site buys the setting's default books
+# (O.BOOKS, ten); the constructed fixtures hold the catalog's first five
+# (PF.FIXTURE_BOOKS), so the other default books never post here (UNPOSTED),
+# as on a morning when only five books have posted. A grid draws a column for
+# a book with a line on its board only.
+CODES = [props.BOOK_CODE[b] for b in PF.FIXTURE_BOOKS]   # every fixture book: the mockup's order
+UNPOSTED = tuple(b for b in O.BOOKS if b not in PF.FIXTURE_BOOKS)
+CODE_BOOK = {code: book for book, code in props.BOOK_CODE.items()}
+
+
+def titles_or(books, word: str = "or") -> str:
+    """Our titles of `books` in the catalog's order, the last two joined by
+    `word`, as the pages list books: rebuilt here from the constants, never
+    from props_ui, so a wrong list on a page cannot agree with itself."""
+    want = set(books)
+    t = [props.BOOK_TITLE[b] for b in props.BOOK_ORDER if b in want]
+    return t[0] if len(t) == 1 else f"{', '.join(t[:-1])} {word} {t[-1]}"
+
+
+def codes_of(books) -> list[str]:
+    """The grid columns of `books`: their codes, in the catalog's order."""
+    want = set(books)
+    return [props.BOOK_CODE[b] for b in props.BOOK_ORDER if b in want]
 
 
 # -- The world -------------------------------------------------------------------------------
@@ -232,11 +256,14 @@ def by_key(view) -> dict:
 
 
 def check_cells(row: dict, books: dict) -> None:
-    """A parsed grid row's five cells against production's lines for its key:
-    a shown line over or under by its own lean, a hidden one plain, a book
-    with no line the sentinel; each at its own book's number."""
-    for book in props.BOOK_ORDER:
-        c = row["cells"][props.BOOK_CODE[book]]
+    """A parsed grid row's cells against production's lines for its key: a
+    shown line over or under by its own lean, a hidden one plain, a book
+    with no line the sentinel; each at its own book's number. Every book
+    with a line for the key has a column (build amendment B35: the grid
+    draws the books with a line on the board)."""
+    assert set(books) <= {CODE_BOOK[code] for code in row["cells"]}, (row["player"], books)
+    for code, c in row["cells"].items():
+        book = CODE_BOOK[code]
         if book not in books:
             assert (c["cls"], c["number"], c["arrow"]) == ("none", SENTINEL, None), (
                 row["player"], book)
@@ -318,8 +345,13 @@ def test_the_grid_shows_only_with_the_feed_on_and_lines_on_the_date(monkeypatch,
                game("DEN", "SAS")):
         assert not grid_drawn(at) and not book_pills(at)        # the feed off: none, ever
     H.install_feed(monkeypatch)
-    for at in (slate(), slate(book="draftkings"), game("PHI", "DET"), game("DEN", "SAS")):
-        assert GP.grid_heads(html(at)) == CODES
+    # B35: a column per book with a line on the board: every fixture book on
+    # the date and on PHI at DET, all but PrizePicks (no DEN at SAS line) on
+    # DEN at SAS's page.
+    for at, want in ((slate(), CODES), (slate(book="draftkings"), CODES),
+                     (game("PHI", "DET"), CODES),
+                     (game("DEN", "SAS"), codes_of(b for b in PF.FIXTURE_BOOKS if b != "prizepicks"))):
+        assert GP.grid_heads(html(at)) == want
         assert not book_pills(at) and not at.warning
 
 
@@ -369,17 +401,19 @@ def test_no_page_draws_book_pills_or_reads_book():
 
 
 def test_on_the_game_page_the_lines_note_then_the_missing_books_note(monkeypatch, tmp_path):
-    """Every book posted PHI at DET: its page has the "Lines on this game"
-    note and no books-missing note. PrizePicks has not posted DEN at SAS:
-    the note comes right after "Lines on this game", once."""
+    """Every fixture book posted PHI at DET: its page has the "Lines on this
+    game" note, then one note naming only the books the site buys that the
+    fixtures never post (build amendment B35). PrizePicks has not posted DEN
+    at SAS either: that page's note names it first. Each note comes right
+    after "Lines on this game", once."""
     feed_world(monkeypatch, tmp_path)
-    phi = [PS.visible(v) for k, v in order(game("PHI", "DET")) if k == "md"]
-    assert any(v.startswith("Lines on this game:") for v in phi)
-    assert not any("lines for this game yet" in v or "not loaded on this site" in v for v in phi)
-    den = [PS.visible(v) for k, v in order(game("DEN", "SAS")) if k == "md"]
-    at = next(i for i, v in enumerate(den) if v.startswith("Lines on this game:"))
-    assert den[at + 1] == "No PrizePicks lines for this game yet."
-    assert den.count("No PrizePicks lines for this game yet.") == 1
+    for (away, home), missing in ((("PHI", "DET"), UNPOSTED),
+                                  (("DEN", "SAS"), ("prizepicks", *UNPOSTED))):
+        notes = [PS.visible(v) for k, v in order(game(away, home)) if k == "md"]
+        at = next(i for i, v in enumerate(notes) if v.startswith("Lines on this game:"))
+        said = f"No {titles_or(missing)} lines for this game yet."
+        assert notes[at + 1] == said and notes.count(said) == 1, (away, notes[at + 1])
+        assert not any("not loaded on this site" in v for v in notes), away
 
 
 def test_no_lines_for_the_date_means_no_pills_and_the_feeds_own_prompt(monkeypatch, tmp_path):
@@ -503,10 +537,16 @@ def test_each_players_cells_on_the_game_page_equal_the_slates(monkeypatch, tmp_p
     feed_world(monkeypatch, tmp_path)
     slate_rows = {(r["player"], r["stat"]): r["cells"] for r in GP.grid(slate(), show_all=True)}
     seen = 0
-    for (away, home), _gid in GAMES:
+    books_by_game = production().books_by_game
+    for (away, home), gid in GAMES:
         for player, rows in GP.player_grid(game(away, home)).items():
             for r in rows:
-                assert r["cells"] == slate_rows[(player, r["stat"])], (player, r["stat"])
+                # B35: the page draws its own game's books; the slate's other
+                # columns hold the dash for this row.
+                assert list(r["cells"]) == codes_of(books_by_game[gid]), (player, r["stat"])
+                want = slate_rows[(player, r["stat"])]
+                assert r["cells"] == {k: c for k, c in want.items() if k in r["cells"]}, player
+                assert all(c["cls"] == "none" for k, c in want.items() if k not in r["cells"])
                 seen += 1
     assert seen == len(slate_rows) > 0
     mgm = slate_rows[("Jalen Duren", "Points")]["MGM"]
@@ -574,9 +614,9 @@ def test_a_game_whose_posted_lines_all_went_unmatched_still_names_the_book_missi
     feed_world(monkeypatch, tmp_path, payloads={LF.DEN_EID: late})
     g = game("DEN", "SAS")
     assert not grid_drawn(g) and "Lines on this game" not in text(g)
-    notes = [m.value for m in g.markdown
-             if m.value == '<div class="bv-note"><b>No PrizePicks lines for this game yet.</b></div>']
-    assert len(notes) == 1 and text(g).count("No PrizePicks lines for this game yet.") == 1
+    said = f"No {titles_or(('prizepicks', *UNPOSTED))} lines for this game yet."    # B35
+    notes = [m.value for m in g.markdown if m.value == f'<div class="bv-note"><b>{said}</b></div>']
+    assert len(notes) == 1 and text(g).count(said) == 1
     assert props_ui.NO_LINES_GAME_FEED not in html(g)
 
 
@@ -679,29 +719,39 @@ def test_a_book_that_has_not_posted_a_game_shows_the_sentinel_and_the_notice_nam
     rows = [r for r in GP.grid(at, show_all=True) if (r["player"], LABEL_STAT[r["stat"]]) in late]
     assert rows and all(r["cells"]["PP"]["cls"] == "none" for r in rows)
     g = game("DEN", "SAS")
-    grids = GP.player_grid(g)
-    assert grids and all(r["cells"]["PP"]["number"] == SENTINEL for rs in grids.values() for r in rs)
-    assert "No PrizePicks lines for this game yet." in text(g) and "Lines on this game" in text(g)
+    grids = GP.player_grid(g)                  # B35: no line on this game, so no column
+    assert grids and all("PP" not in r["cells"] for rs in grids.values() for r in rs)
+    assert "PP" not in GP.grid_heads(html(g))
+    assert (f"No {titles_or(('prizepicks', *UNPOSTED))} lines for this game yet." in text(g)
+            and "Lines on this game" in text(g))
     assert props_ui.NO_LINES_GAME_FEED not in html(g)
     assert "Pick another" not in text(g) + text(at)
 
 
 def test_the_notice_names_two_games_and_shows_when_nothing_else_is_drawn_m7(monkeypatch, tmp_path):
-    """PrizePicks posted neither game: the notice names both, above the
-    board, which still draws the other books' lines (its PP column all
-    sentinels)."""
+    """PrizePicks posted neither game. The feed's notice still sits above the
+    board (m7). Since build amendment B35 a book with no line on the date has
+    no column (C6), so the board draws the other books' columns only, and
+    the one note under the grid names PrizePicks with the site's other books
+    that have no line yet, never game by game. (The notice above the board
+    names two games for a book that HAS a column: books_missing_html,
+    tests/test_props_ui_feed.py.)"""
     feed_world(monkeypatch, tmp_path, payloads={LF.PHI_EID: PF.without(PF.phi_det(), "prizepicks")})
     at = slate()
     words = text(at)
-    assert "No PrizePicks lines yet for PHI at DET and DEN at SAS." in words
+    said = f"No {titles_or(('prizepicks', *UNPOSTED))} lines yet for this date."
+    assert said in words and words.count(said) == 1 and "No PrizePicks lines yet for" not in words
     assert "Pick another" not in words and props_ui.NO_LINES_SLATE_FEED not in html(at)
     seq = order(at)
     window = next(i for i, (k, v) in enumerate(seq) if k == "md" and WINDOW in v)
     notice = next(i for i, (k, v) in enumerate(seq) if k == "md"
-                  and "No PrizePicks lines yet" in PS.visible(v))
-    assert notice < window
+                  and PS.visible(v).startswith("Lines as of"))
+    under = next(i for i, (k, v) in enumerate(seq) if k == "md" and said in PS.visible(v))
+    legend = next(i for i, (k, v) in enumerate(seq) if k == "md" and "bv-grid-legend" in v)
+    assert notice < window < legend < under
     rows = GP.grid(at, show_all=True)
-    assert rows and all(r["cells"]["PP"]["cls"] == "none" for r in rows)
+    assert rows and all("PP" not in r["cells"] for r in rows)
+    assert GP.grid_heads(html(at)) == codes_of(b for b in PF.FIXTURE_BOOKS if b != "prizepicks")
 
 
 # -- No link carries a book ---------------------------------------------------------------------
@@ -962,12 +1012,20 @@ def test_a_tipped_game_whose_books_posted_nothing_says_so(monkeypatch, tmp_path)
 
 
 # -- About (design 9.5) ---------------------------------------------------------------------------
-SOURCES = ("Player lines on the board come from DraftKings, FanDuel, BetMGM, PrizePicks and "
-           "Underdog through The Odds API, a licensed odds feed, refreshed through the day until "
-           "shortly before tip; you can also paste your own PrizePicks board.")
+# Build amendment B35: the books the site buys (here the setting's default),
+# and the pick'em books among them whose payouts are not modelled (all but
+# PrizePicks), rebuilt from the constants.
+_UNMODELLED = [f"{props.BOOK_TITLE[b]}'s" for b in props.BOOK_ORDER
+               if b in O.BOOKS and b in props.DFS_BOOKS and b != props.PASTE_BOOK]
+SOURCES = (f"Player lines on the board come from {titles_or(O.BOOKS, 'and')} through The Odds "
+           "API, a licensed odds feed, refreshed through the day until shortly before tip; you "
+           "can also paste your own PrizePicks board.")
 BREAKEVEN = ("A sportsbook line is different: a side priced at -110 needs about 52.4% to break "
-             "even, and the price sets the figure. Underdog's payouts are not modelled here, so no "
-             "break-even is shown for its lines. No price is shown for any book.")   # B27
+             "even, and the price sets the figure. "
+             f"{', '.join(_UNMODELLED[:-1])}{' and ' if len(_UNMODELLED) > 1 else ''}"
+             f"{_UNMODELLED[-1]} payouts are not modelled here, so no break-even is shown for "
+             f"{'its' if len(_UNMODELLED) == 1 else 'their'} lines. "
+             "No price is shown for any book.")   # B27
 
 
 def test_about_says_where_the_player_lines_come_from_only_with_the_feed_on(monkeypatch, tmp_path):
@@ -1156,13 +1214,14 @@ def test_a_game_only_the_paste_posted_shows_its_prizepicks_column_l3_2(monkeypat
     got = {}
     for player, rows in GP.player_grid(d).items():
         for r in rows:
-            assert [r["cells"][c]["cls"] for c in ("DK", "FD", "MGM", "UD")] == ["none"] * 4
+            assert list(r["cells"]) == ["PP"]          # B35: the only book with a line on it
             pp = r["cells"]["PP"]
             assert pp["cls"] in ("over", "under") and pp["title"].startswith(
                 f"PrizePicks {pp['number']} (pasted): ")
             got[(player, LABEL_STAT[r["stat"]])] = pp["number"]
     assert got == want
-    assert "No DraftKings, FanDuel, BetMGM or Underdog lines for this game yet." in text(d)
+    assert (f"No {titles_or(b for b in O.BOOKS if b != 'prizepicks')} lines for this game yet."
+            in text(d))
     assert not grid_drawn(game("DEN", "SAS"))
 
 
@@ -1208,7 +1267,7 @@ def test_the_missing_books_lines_never_point_at_a_picker_b24(monkeypatch, tmp_pa
     feed_world(monkeypatch, tmp_path)
     s, g = slate(), game("DEN", "SAS")
     assert "No PrizePicks lines yet for DEN at SAS." in text(s)
-    assert "No PrizePicks lines for this game yet." in text(g)
+    assert f"No {titles_or(('prizepicks', *UNPOSTED))} lines for this game yet." in text(g)
     for at in (s, g):
         for bad in ("Pick another book", "book above", "book below"):
             assert bad not in text(at), bad
@@ -1216,42 +1275,47 @@ def test_the_missing_books_lines_never_point_at_a_picker_b24(monkeypatch, tmp_pa
 
 def test_after_tip_and_for_a_book_the_site_does_not_buy_the_a6_lines_say_so_b25(monkeypatch, tmp_path):
     """Build amendment B25 (build 4's review, L3-6, which pinned A6's "yet"
-    after tip and for a book never bought), in layout C. PrizePicks has
-    posted neither game here (PHI at DET's payload without it). At 7:10 PM
-    PHI at DET has tipped and DEN at SAS has not: the slate's note names DEN
-    at SAS alone, PHI at DET's Game page says the odds feed did not load
-    PrizePicks lines for it before tip (build amendment B29), and DEN at
-    SAS's still says "yet". Once both have tipped (9:30 PM) the slate names
-    no game, and both Game pages say before tip. With BUCKETVALUE_ODDS_BOOKS
-    leaving BetMGM out, the grid keeps all five columns, BetMGM's cells all
-    the sentinel, and BetMGM's lines are said not to be loaded on this site,
-    on the slate and on both Game pages, before tip and after, never "yet"."""
-    after = "The odds feed did not load PrizePicks lines for this game before tip."   # B29
+    after tip and for a book never bought), in layout C with build amendment
+    B35's columns. PrizePicks has posted neither game here (PHI at DET's
+    payload without it), so it has no column, and the note under the grid
+    names it with the site's other books that have no line yet. At 7:10 PM
+    PHI at DET has tipped and DEN at SAS has not: that note still shows,
+    PHI at DET's Game page says the odds feed did not load those books'
+    lines for it before tip (build amendment B29), and DEN at SAS's still
+    says "yet". Once both have tipped (9:30 PM) the slate's note is gone,
+    and both Game pages say before tip. With BUCKETVALUE_ODDS_BOOKS leaving
+    BetMGM out the site never buys BetMGM: no line, so no column, and no
+    page names it, before tip or after (B25's not-loaded sentence is for a
+    book left out that still has a line on the board:
+    test_the_runbooks_books_setting_row_is_what_the_pages_do_r8_04)."""
+    missing = ("prizepicks", *UNPOSTED)
+    after = f"The odds feed did not load {titles_or(missing)} lines for this game before tip."  # B29
     payloads = {LF.PHI_EID: PF.without(PF.phi_det(), "prizepicks")}
     feed_world(monkeypatch, tmp_path, at=et(19, 10), payloads=payloads)
     s = text(slate())
-    assert "No PrizePicks lines yet for DEN at SAS." in s and "PHI at DET and" not in s
+    assert f"No {titles_or(missing)} lines yet for this date." in s and "PHI at DET and" not in s
+    assert "No PrizePicks lines yet for" not in s
     phi, den = text(game("PHI", "DET")), text(game("DEN", "SAS"))
     assert after in phi and "were posted" not in phi
     assert "lines for this game yet" not in phi
-    assert "No PrizePicks lines for this game yet." in den and "before tip" not in den
+    assert f"No {titles_or(missing)} lines for this game yet." in den and "before tip" not in den
     feed_world(monkeypatch, tmp_path / "late", at=et(21, 30), payloads=payloads)
-    assert "No PrizePicks lines yet" not in text(slate())
+    late = text(slate())
+    assert "No PrizePicks" not in late and "lines yet for this date" not in late
     for away, home in (("PHI", "DET"), ("DEN", "SAS")):
         assert after in text(game(away, home)), away
     narrow = {"BUCKETVALUE_ODDS_BOOKS": "draftkings,fanduel,prizepicks,underdog"}
-    gone = "BetMGM lines are not loaded on this site."
+    bought = narrow["BUCKETVALUE_ODDS_BOOKS"].split(",")
     for i, at in enumerate((H.MORNING, et(21, 30))):
         feed_world(monkeypatch, tmp_path / f"narrow{i}", at=at, environ=narrow)
         s = slate()
-        assert gone in text(s) and "No BetMGM lines" not in text(s), at
-        assert GP.grid_heads(html(s)) == CODES
-        assert all(r["cells"]["MGM"]["cls"] == "none" for r in GP.grid(s, show_all=True))
+        assert GP.grid_heads(html(s)) == codes_of(bought) and "BetMGM" not in text(s), at
+        assert all("MGM" not in r["cells"] for r in GP.grid(s, show_all=True))
         for away, home in (("PHI", "DET"), ("DEN", "SAS")):
-            g = text(game(away, home))
-            assert gone in g and "No BetMGM lines" not in g, (at, away)
+            g = game(away, home)
+            assert "BetMGM" not in text(g) and "MGM" not in GP.grid_heads(html(g)), (at, away)
         if at == H.MORNING:          # a book the site buys keeps its own sentence
-            assert "No PrizePicks lines yet for DEN at SAS." in text(slate())
+            assert "No PrizePicks lines yet for DEN at SAS." in text(s)
 
 
 # -- Build 6's fix pass: the review of stage S12 (S12-R2 pinned, S12-R3 by B29) -------------
@@ -1274,10 +1338,13 @@ def test_after_a_cold_start_re_buy_the_game_page_says_the_feed_did_not_load_priz
     _w, feed = feed_world(monkeypatch, tmp_path, at=et(20, 50), **world)
     assert [c.event_id for c in feed.vendor.odds_calls()] == [LF.PHI_EID, LF.DEN_EID]
     assert feed.mem["brake_day"] is not None and feed.mem["games"][LF.DEN_EID]["pulls"] == 2
-    assert "No PrizePicks lines yet for DEN at SAS." in text(slate())
+    # B35: no PrizePicks line on the date at all, so no PP column: the note
+    # under the grid says PrizePicks has none yet (R2).
+    missing = ("prizepicks", *UNPOSTED)
+    assert f"No {titles_or(missing)} lines yet for this date." in text(slate())
     feed_world(monkeypatch, tmp_path / "late", at=et(21, 30), **world)
     page = text(game("DEN", "SAS"))
-    assert "The odds feed did not load PrizePicks lines for this game before tip." in page
+    assert f"The odds feed did not load {titles_or(missing)} lines for this game before tip." in page
     assert "were posted" not in page and "lines for this game yet" not in page
 
 
@@ -1433,8 +1500,10 @@ def test_the_game_pages_note_says_a_hidden_line_is_drawn_only_when_one_is_r8_03(
         assert (props_ui.HIDDEN_DRAWN in text(g)) is (gid == LATE), away
 
 
-RUNBOOK_BOOKS = ("The board keeps all five columns: a book left out shows the dash on every row "
-                 "(PrizePicks' column still shows a visitor's pasted lines), and while it has no "
+RUNBOOK_BOOKS = ("The board draws a column only for a book with a line on it: a book the site "
+                 "buys with no line yet has no column and is named under the grid (`No <Book> "
+                 "lines yet for this date.`); a book left out has no column unless it has lines "
+                 "there (PrizePicks' column shows a visitor's pasted lines), and while it has no "
                  "line for a game another book has, the note reads `<Book> lines are not loaded on "
                  "this site.`")
 
@@ -1458,11 +1527,11 @@ def test_the_runbooks_books_setting_row_is_what_the_pages_do_r8_04(monkeypatch, 
     """docs/runbook.md's BUCKETVALUE_ODDS_BOOKS row (build 8's review, R8-04:
     it said a book left out "shows the dash everywhere", false for
     PrizePicks once a visitor has pasted), checked against the pages with
-    PrizePicks left out of the setting. With no paste: five columns, every
-    PP cell the dash, and the row's not-loaded sentence on the slate and on
-    both Game pages. With PHI at DET's part of the serve fixture's board
-    pasted: PP holds those pasted lines, each titled with B28's word, on PHI
-    at DET's rows only, and the sentence stays on the slate and on DEN at
+    PrizePicks left out of the setting. With no paste PrizePicks has no line,
+    so no column (build amendment B35), and no page names it. With PHI at
+    DET's part of the serve fixture's board pasted: PP is a column holding
+    those pasted lines, each titled with B28's word, on PHI at DET's rows
+    only, and the row's not-loaded sentence is on the slate and on DEN at
     SAS's page (a game other books have and PrizePicks has no line for),
     not on PHI at DET's. With the whole board pasted no game lacks a
     PrizePicks line, and the slate says no such thing."""
@@ -1476,11 +1545,12 @@ def test_the_runbooks_books_setting_row_is_what_the_pages_do_r8_04(monkeypatch, 
     narrow = {"BUCKETVALUE_ODDS_BOOKS": "draftkings,fanduel,betmgm,underdog"}
     w, _f = feed_world(monkeypatch, tmp_path, environ=narrow)
     s = slate()
-    assert GP.grid_heads(html(s)) == CODES and gone in text(s)
+    assert GP.grid_heads(html(s)) == codes_of(narrow["BUCKETVALUE_ODDS_BOOKS"].split(","))
+    assert gone not in text(s) and "No PrizePicks" not in text(s)
     rows = GP.grid(s, show_all=True)
-    assert rows and all(r["cells"]["PP"]["cls"] == "none" for r in rows)
+    assert rows and all("PP" not in r["cells"] for r in rows)
     for away, home in (("PHI", "DET"), ("DEN", "SAS")):
-        assert gone in text(game(away, home)), away
+        assert gone not in text(game(away, home)) and "No PrizePicks" not in text(game(away, home))
     token = paste_teams(monkeypatch, w, ("PHI", "DET"))
     s = slate(board=token)
     pp = [r for r in GP.grid(s, show_all=True) if r["cells"]["PP"]["cls"] != "none"]
@@ -1571,3 +1641,107 @@ def test_a_past_date_read_from_memory_with_every_game_final_shows_its_lines_p1(
             assert None not in actuals and SENTINEL not in actuals, away
         else:
             assert not any(FINAL_HEAD in m for m in mine) and set(actuals) == {None}, away
+
+
+# -- Build amendment B35: seven of the ten default books ---------------------------------------
+def posting_as(payload: dict, source: str, book: str, shift: float = 0.0) -> dict:
+    """A CONSTRUCTED copy of `payload` (as every fixture here is) in which
+    `book` also posts `source`'s lines, each point moved by `shift`, so its
+    numbers are its own."""
+    out = copy.deepcopy(payload)
+    entry = copy.deepcopy(next(b for b in out["bookmakers"] if b["key"] == source))
+    entry.update(key=book, title=book)
+    for m in entry["markets"]:
+        for oc in m["outcomes"]:
+            if isinstance(oc.get("point"), (int, float)):
+                oc["point"] += shift
+    out["bookmakers"].append(entry)
+    return out
+
+
+def newer_pair() -> tuple[str, str]:
+    """The two default books outside the fixtures' five that T6 posts: the
+    first sportsbook, then the first pick'em book (theScore Bet and
+    DraftKings Pick6 as shipped), or the next book when the default holds no
+    newer pick'em book. Read from the constants (round BK's review, BKR-3),
+    so a swap of the default list leaves T6 as it is; the kinds come from
+    C5's own list (OA.PICKEM), never from the code under test."""
+    fresh = [b for b in O.BOOKS if b not in PF.FIXTURE_BOOKS]
+    book = next(b for b in fresh if b not in OA.PICKEM)
+    pick = next((b for b in fresh if b in OA.PICKEM), None)
+    return book, pick if pick is not None else next(b for b in fresh if b != book)
+
+
+def test_seven_of_the_ten_default_books_draw_seven_columns_b35(monkeypatch, tmp_path):
+    """T6 (build amendment B35, C6 and C7). The site buys the ten default
+    books; two newer ones (newer_pair: theScore Bet, a sportsbook posting
+    DraftKings' lines a point higher, and DraftKings Pick6, a pick'em book
+    posting PrizePicks' lines on PHI at DET and Underdog's on DEN at SAS)
+    post beside the fixtures' five, so seven books have lines and three
+    have none. The slate's grid draws exactly those seven columns in the
+    catalog's order, every cell production's line at its own book; a pick'em
+    book's cells say More or Less (Pick6's), a sportsbook's Over or Under
+    (theScore Bet's); one note under the legend names the other three; each
+    card counts every book's shown lines, the newer books' too. Each Game
+    page draws its own game's books (DEN at SAS: no PrizePicks), the same
+    columns in every player's grid, and names the books the site buys with
+    no line for it."""
+    extra = newer_pair()
+    phi = posting_as(posting_as(PF.phi_det(), "draftkings", extra[0], 1.0), "prizepicks", extra[1])
+    den = posting_as(posting_as(PF.den_sas(), "draftkings", extra[0], 1.0), "underdog", extra[1])
+    feed_world(monkeypatch, tmp_path, payloads={LF.PHI_EID: phi, LF.DEN_EID: den})
+    posted = (*PF.FIXTURE_BOOKS, *extra)
+    unposted = tuple(b for b in O.BOOKS if b not in posted)
+    assert len(set(posted)) == 7 and set(posted) <= set(O.BOOKS)
+    assert len(unposted) == len(O.BOOKS) - 7 > 0
+    prod = production()
+    assert set(prod.shown["book"]) | set(prod.hidden["book"]) == set(posted)
+    s = slate()
+    assert GP.grid_heads(html(s)) == codes_of(posted) == [
+        props.BOOK_CODE[b] for b in props.BOOK_ORDER if b in posted]
+    rows = GP.grid(s, show_all=True)
+    lines = by_key(prod)
+    assert [(r["player"], r["stat"]) for r in rows] == [
+        (g["player"], props.STAT_LABEL[g["stat"]])
+        for g in props.grid_rows(prod.shown, prod.hidden).to_dict(orient="records")]
+    for r in rows:
+        assert list(r["cells"]) == codes_of(posted)
+        check_cells(r, lines[(r["player"], LABEL_STAT[r["stat"]])])
+    for book in extra:                                 # each newer book's own side words
+        code, (more, less) = props.BOOK_CODE[book], props.side_words(book)
+        assert (more, less) == (("More", "Less") if book in OA.PICKEM else ("Over", "Under")), book
+        leaned = [c for r in rows for k, c in r["cells"].items()
+                  if k == code and c["cls"] in ("over", "under")]
+        assert leaned and {c["sr"] for c in leaned} <= {f" leans {more}", f" leans {less}"}, book
+        assert all(c["title"].startswith(props.BOOK_TITLE[book] + " ") for c in leaned), book
+    said = f"No {titles_or(unposted)} lines yet for this date."
+    assert text(s).count(said) == 1
+    seq = order(s)
+    legend = next(i for i, (k, v) in enumerate(seq) if k == "md" and "bv-grid-legend" in v)
+    note = next(i for i, (k, v) in enumerate(seq) if k == "md" and said in PS.visible(v))
+    assert note == legend + 1
+    counts = pill_counts(s)
+    assert counts == {gid: props_ui.line_counts_by_game(prod.shown).get(gid, 0) for _t, gid in GAMES}
+    for _teams, gid in GAMES:
+        mine = prod.shown[prod.shown["game_id"].astype(str) == gid]
+        new = mine[mine["book"].isin(extra)]
+        assert len(new) and counts[gid] == len(mine), gid
+    # Biggest discrepancies (C7): its merged rows name the new books by their codes.
+    merged = props_ui.merge_books(props_ui.discrepancies(prod.shown))
+    named = {b for books in merged[props_ui.GAP_BOOKS] for b in books}
+    assert set(extra) <= named <= set(posted)
+    assert f'<span class="meta">{len(merged)} standard lines, largest gap first</span>' in html(s)
+    strip = next(m for m in (x.value for x in s.markdown) if '<div class="bv-gap-strip">' in m)
+    for book in extra:                                 # in the strip's chips or its +N table
+        code = f'<abbr title="{props.BOOK_TITLE[book]}">{props.BOOK_CODE[book]}</abbr>'
+        assert code in strip, book
+    for (away, home), gid in GAMES:
+        g = game(away, home)
+        books = prod.books_by_game[gid]
+        want = codes_of(books)
+        grids = GP.player_grid(g)
+        assert grids and all(list(r["cells"]) == want for rs in grids.values() for r in rs), away
+        assert want == (codes_of(posted) if gid == EARLY
+                        else codes_of(b for b in posted if b != "prizepicks")), away
+        missing = tuple(b for b in O.BOOKS if b not in books)
+        assert f"No {titles_or(missing)} lines for this game yet." in text(g), away
