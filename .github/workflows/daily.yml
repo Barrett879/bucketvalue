@@ -43,7 +43,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   update:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moved to Ubuntu 26.04 (from
+    # 2026-10-19), which has no build of runtime.txt's Python 3.12.8, so
+    # setup-python failed every run from 2026-11-16 17:53 ET. 24.04 has it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       PYTHONUNBUFFERED: "1"
