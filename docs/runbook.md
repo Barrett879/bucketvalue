@@ -51,9 +51,10 @@ A missed slot alerts nobody until this exists, and a day without a good run
 loses that day's roster snapshot for good:
 
 1. On healthchecks.io (the free tier is enough), create a check with schedule
-   type **Cron**, expression **`17,47 13-23,0-6 * * *`**, time zone **UTC**, and
+   type **Cron**, expression **`17,47 11-23,0-6 * * *`**, time zone **UTC**, and
    a grace time of **3 hours**. That is the full cron in `daily.yml`, on since
-   2026-11-04. If the repo goes private again, it is `17 2,15,20,23 * * *` with
+   2026-11-04 (the 11 and 12 UTC hours since 2026-11-20: slots at 7:17 and
+   7:47 AM ET, which GitHub starts only on some days). If the repo goes private again, it is `17 2,15,20,23 * * *` with
    an 8-hour grace instead (section 6): those runs are 3 to 13 hours apart.
 2. Turn on alerts by email, and phone or push if wanted.
 3. Copy the check's ping URL into the repo secret **`BV_HEALTHCHECK_URL`**
@@ -127,7 +128,8 @@ site should not show games frozen hours before tip.
 3. **Flip the repo public** (Barrett). Done 2026-11-04.
 4. **Swap the cron** (done 2026-11-04). In `daily.yml`, replace the line
    `- cron: "17 2,15,20,23 * * *"` with the two commented full-schedule lines
-   (`17,47 13-23 * * *` and `17,47 0-6 * * *`), push, then **dispatch one run by
+   (today `17,47 11-23 * * *` and `17,47 0-6 * * *`; the first was
+   `17,47 13-23 * * *` until 2026-11-20), push, then **dispatch one run by
    hand** (Actions, daily-update, Run workflow, date input EMPTY).
    - **Why dispatch:** a push never triggers daily.yml (it has only `schedule`
      and `workflow_dispatch`), and the new crons take effect on their next slot.
@@ -135,7 +137,7 @@ site should not show games frozen hours before tip.
      date is refused (exit 2), and a plain run already projects tomorrow as
      provisional.
 5. **Switch the healthcheck in the same sitting**, if it was set on the private
-   cron: expression `17,47 13-23,0-6 * * *`, grace **3 hours**. The full
+   cron: expression `17,47 11-23,0-6 * * *`, grace **3 hours**. The full
    expression on the private cron alarms within hours, and an 8-hour grace on a
    30-minute cron hides an outage.
 6. **Deploy on Streamlit Community Cloud** (Barrett's account):
@@ -166,8 +168,8 @@ site should not show games frozen hours before tip.
        anyone, never in ~/.streamlit/secrets.toml. The other `BUCKETVALUE_ODDS_*`
        settings are in section 8. Every value must be a quoted string at root
        level: Streamlit copies only strings and numbers into the environment.
-       After any secrets edit, press Reboot app (a reboot is a restart; section 8
-       says when one costs credits).
+       A saved secrets edit reaches the running app by itself (section 8); a
+       reboot is a restart, and section 8 says when one costs credits.
 
    **Deploy no earlier than step 4.** On the private cron a game freezes on the
    last run before its tip minus 5 minutes. That is up to about 3 hours before
@@ -482,9 +484,12 @@ nothing ever fetches PrizePicks itself.
 
 On Cloud each is a root-level Streamlit secret, written as a quoted string;
 locally they are plain environment variables. The key and the feed's settings
-are read on every call, `BUCKETVALUE_LOG` only when the process starts. Press
-Reboot app after any secrets edit anyway: whether Cloud's secrets editor
-reloads them by itself is UNVERIFIED.
+are read on every call, `BUCKETVALUE_LOG` only when the process starts. A saved
+secrets edit reaches the running app within about a minute: Streamlit 1.59
+polls the secrets file, and on a change resets and re-copies the root-level
+values into the environment (runtime/secrets.py; seen with the key on
+2026-11-11). So a feed setting needs no reboot. Only `BUCKETVALUE_LOG` does,
+and a reboot is a restart: before the first-pull time it costs nothing.
 
 | Setting | Default | Accepted | What it does |
 |---|---|---|---|
@@ -494,7 +499,7 @@ reloads them by itself is UNVERIFIED.
 | `BUCKETVALUE_ODDS_CORE_MARKETS` | `"player_points"` | market keys from the list above | What the budget keeps when the full list does not fit, and what every re-buy asks. Keys outside the market list are ignored; with none left, its first market is used. |
 | `BUCKETVALUE_ODDS_BOOKS` | `"draftkings,fanduel,betmgm,prizepicks,underdog,espnbet,hardrockbet,betrivers,pick6,betparx"` | up to 10 catalog books: those ten, `ballybet`, `dabble_us_dfs`, and on a paid plan `williamhill_us` (Caesars) and `fanatics` | Any catalog book, in the order named, each once. An unknown key, or a book the site never buys (an offshore book, an exchange or prediction market, the sweepstakes book, a Hard Rock state variant, courtside or rebet), is dropped, so is an 11th book and every later one, and an empty list means the default. Up to 10 books bill as 1 region, so ten cost what five do. On the free plan `williamhill_us` and `fanatics` get no lines (the vendor serves them on paid plans only), so, if named, each takes one of the 10 places, and the note under the grid and every Game page name it as a book with no lines. The board draws a column only for a book with a line on it: a book the site buys with no line yet has no column and is named under the grid (`No <Book> lines yet for this date.`); a book left out has no column unless it has lines there (PrizePicks' column shows a visitor's pasted lines), and while it has no line for a game another book has, the note reads `<Book> lines are not loaded on this site.` |
 | `BUCKETVALUE_ODDS_RESERVE` | unset: the larger of 25 and 5% of the plan's credits | a whole number, 0 to 100000000 | Credits the site never plans and never spends: room for the probe, local runs and surprises. |
-| `BUCKETVALUE_ODDS_FIRST_PULL_ET` | `"08:50"` | `"HH:MM"`, ET | The earliest first pull of a game, on its own ET date. The restart brake starts 60 minutes later (09:50 by default). |
+| `BUCKETVALUE_ODDS_FIRST_PULL_ET` | `"08:50"` | `"HH:MM"`, ET | The earliest first pull of a game, on its own ET date. The restart brake starts 60 minutes later (09:50 by default). The pages' empty-board prompts promise this time rounded UP to the hour (`about 9 AM ET` by default, `about 8 AM ET` at `"07:55"`). `"07:55"` (set 2026-11-19, Barrett's 8 AM request, on trial) lets the board fill by about 8 AM with the books that have posted by then: a book that posts later shows at the game's next planned refresh, and a PrizePicks check can take that pull (BKR-2), so on a two-pull day a book missing at 07:55 can miss the whole day. Saving it reaches the running app: no reboot. Every 08:50, 09:50 and 9 AM in this section is the default and moves with it, the push rule's window too. |
 | `BUCKETVALUE_ODDS_LAST_PULL_LEAD_MIN` | `"30"` | 0 to 720 | The last planned refresh, this many minutes before tip. |
 | `BUCKETVALUE_ODDS_MIN_REFRESH_MIN` | `"15"` | 1 to 720 | A planned refresh comes no sooner than this after the game's last pull. |
 | `BUCKETVALUE_ODDS_TIP_GUARD_MIN` | `"5"` | 0 to 720 | No paid call this close to tip, or later. |
@@ -713,7 +718,7 @@ Failures (WARNING):
 | `oddsapi: the date's published file is unreadable (<why>)` | Nothing is bought for that date. |
 | `oddsapi: a malformed game entry counted as absent` | A bug: tell the developer. |
 | `oddsapi: feed tables from older code (<Type>); rebuilt` | Tables cached by the code before a push reached the code after it; that view rebuilt them. It should never appear, since the cache's key names the tables' class (B34): tell the developer. |
-| `oddsapi: kick failed (<Type>)`, `oddsapi: walk failed (<Type>)`, `oddsapi: worker failed (<Type>)`, `oddsapi: feed view failed (<Type>)`, `oddsapi: feed check failed (<Type>)`, `oddsapi: feed start failed (<Type>)`, `oddsapi: feed result failed (<Type>)`, `oddsapi: feed tables failed (<Type>)`, `oddsapi: loading watch failed (<Type>)`, `oddsapi: refresher start failed (<Type>)`, `oddsapi: refresher tick failed (<Type>)` | An error inside the feed code, logged by its type only. The page falls back to a notice or the paste board. Tell the developer. |
+| `oddsapi: kick failed (<Type>)`, `oddsapi: walk failed (<Type>)`, `oddsapi: worker failed (<Type>)`, `oddsapi: feed view failed (<Type>)`, `oddsapi: feed check failed (<Type>)`, `oddsapi: feed start failed (<Type>)`, `oddsapi: feed result failed (<Type>)`, `oddsapi: feed tables failed (<Type>)`, `oddsapi: loading watch failed (<Type>)`, `oddsapi: refresher start failed (<Type>)`, `oddsapi: refresher tick failed (<Type>)`, `oddsapi: first-pull time unreadable (<Type>)` | An error inside the feed code, logged by its type only. The page falls back to a notice or the paste board (an unreadable first-pull time only makes the empty-board prompt say the default hour). Tell the developer. |
 | `prepare_feed failed (<Type>)`, `compare_books: <book> <game> failed (<Type>)`, `date_board: the feed board failed (<Type>)`, `date_board: no simulator parameters` | The board could not be built from the feed's lines; the page says so. Tell the developer. |
 
 ### Restarts, reboots and code pushes
@@ -752,11 +757,12 @@ Failures (WARNING):
   each costs credits.
 - **The push rule.** A code push keeps the memory, but a change to its shape
   (`FEED_MEMORY_VERSION` in bucketlib/live.py, or any change to the fields
-  `new_feed_memory` makes) replaces it. Never push such a change between 08:50
-  and 09:50 ET: every one of today's games would be re-bought. After 09:50 the
-  same push re-buys them through the brake's one re-buy each, which on the free
-  plan is each game's last pull. So push it before 08:50 ET. Any push is best
-  outside game hours.
+  `new_feed_memory` makes) replaces it. Never push such a change between the
+  first-pull time and an hour after it (08:50 to 09:50 ET by default; 07:55 to
+  08:55 with `BUCKETVALUE_ODDS_FIRST_PULL_ET = "07:55"`): every one of today's
+  games would be re-bought. After that hour the same push re-buys them through
+  the brake's one re-buy each, which on the free plan is each game's last pull.
+  So push it before the first-pull time. Any push is best outside game hours.
 
 ### The balance, the key and local runs
 

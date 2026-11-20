@@ -41,6 +41,7 @@ returned before the feed.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import math
 import secrets
@@ -314,14 +315,48 @@ NO_LINES_GAME = ("<b>No PrizePicks lines on this page.</b> Paste a board with "
                  "<b>Update lines</b> in the top bar: each player's lines open under his "
                  "team, and the biggest discrepancies appear here.")
 # The same prompts with the odds feed on (design 2.6): the board fills by
-# itself, and the paste box stays the backup.
-NO_LINES_SLATE_FEED = ("<b>No lines on this page yet.</b> On game days the board fills from "
-                       "the odds feed from about 9 AM ET. You can also paste a PrizePicks "
-                       "board with <b>Update lines</b> in the top bar.")
-NO_LINES_GAME_FEED = ("<b>No lines for this game yet.</b> On game days they load from the "
-                      "odds feed from about 9 AM ET, and each player's lines open under his "
-                      "team. You can also paste a PrizePicks board with <b>Update lines</b> "
-                      "in the top bar.")
+# itself, and the paste box stays the backup. The hour they promise is the
+# feed's first-pull time (BUCKETVALUE_ODDS_FIRST_PULL_ET) rounded up to the
+# hour, so it moves with the setting: the default 08:50 says 9 AM, 07:55 says
+# 8 AM, and no setting makes the page promise lines before they can exist.
+# This module never imports the feed (tests/test_props.py, paste only), so the
+# default is written here; tests/test_feed_first_pull.py pins it to the
+# setting reader's default, and only store.feed_first_pull reads the setting.
+FEED_FIRST_PULL_DEFAULT = dt.time(8, 50)
+
+
+def feed_hour(first_pull=None) -> str:
+    """'9 AM' for the default first pull (08:50), '8 AM' for 07:55: the
+    first-pull time rounded UP to the hour (08:00 says 8 AM, 08:01 says
+    9 AM), so the promise is never earlier than the first pull, in the
+    page's clock words. Anything but a datetime.time (None, text) reads as
+    the default setting's time, so a prompt never fails."""
+    t = first_pull if isinstance(first_pull, dt.time) else FEED_FIRST_PULL_DEFAULT
+    h = (t.hour + (1 if (t.minute, t.second, t.microsecond) > (0, 0, 0) else 0)) % 24
+    return f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}"
+
+
+def no_lines_slate_feed(first_pull=None) -> str:
+    """The slate's prompt with the feed on and no line held for the date;
+    `first_pull` is store.feed_first_pull() (None: the default's hour)."""
+    return ("<b>No lines on this page yet.</b> On game days the board fills from "
+            f"the odds feed from about {feed_hour(first_pull)} ET. You can also paste a "
+            "PrizePicks board with <b>Update lines</b> in the top bar.")
+
+
+def no_lines_game_feed(first_pull=None) -> str:
+    """The Game page's prompt with the feed on and no line held for the game."""
+    return ("<b>No lines for this game yet.</b> On game days they load from the "
+            f"odds feed from about {feed_hour(first_pull)} ET, and each player's lines open "
+            "under his team. You can also paste a PrizePicks board with <b>Update lines</b> "
+            "in the top bar.")
+
+
+# The prompts at the default setting (08:50: about 9 AM), which every page test
+# world without the setting draws. Built from no environment: settings are read
+# on every call, never at import.
+NO_LINES_SLATE_FEED = no_lines_slate_feed()
+NO_LINES_GAME_FEED = no_lines_game_feed()
 
 
 # -- The token ----------------------------------------------------------------

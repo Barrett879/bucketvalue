@@ -1781,6 +1781,21 @@ def feed_on(environ=None) -> bool:
     return True
 
 
+def feed_first_pull(environ=None):
+    """The feed's first-pull time (BUCKETVALUE_ODDS_FIRST_PULL_ET, a
+    datetime.time in ET), read on this call like every feed setting, so the
+    pages' prompts promise the hour the board really fills
+    (props_ui.no_lines_slate_feed). A value the reader cannot parse is its
+    default (08:50); a failed read is None, which the prompts read as the
+    default too. Never raises: a prompt never costs the page."""
+    env = os.environ if environ is None else environ
+    try:
+        return O.read_settings(env).first_pull_et
+    except Exception as e:  # noqa: BLE001 - the type only; the prompt says the default
+        C.logger.warning("oddsapi: first-pull time unreadable (%s)", type(e).__name__)
+        return None
+
+
 @dataclass(frozen=True)
 class FeedTicket:
     """What feed_start did for a page view: "off" (no key, or switched off),

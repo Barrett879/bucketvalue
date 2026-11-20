@@ -28,6 +28,7 @@ same page, element for element, as a feed stubbed off.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import re
 import sys
 import threading
@@ -424,6 +425,40 @@ def test_no_lines_for_the_date_means_no_pills_and_the_feeds_own_prompt(monkeypat
     assert props_ui.NO_LINES_SLATE_FEED in html(at) and props_ui.NO_LINES_SLATE not in html(at)
     den = game("DEN", "SAS")
     assert not grid_drawn(den) and props_ui.NO_LINES_GAME_FEED in html(den)
+
+
+def test_the_prompts_promise_the_first_pull_settings_hour(monkeypatch, tmp_path):
+    """Lines by 8 AM (Barrett, 2026-11-19): with BUCKETVALUE_ODDS_FIRST_PULL_ET
+    = "07:55" in the environment, as a Cloud secret puts it, the slate's and
+    a Game page's empty-board prompts say about 8 AM, never the default's
+    9 AM. The pages read the setting on the view (store.feed_first_pull)."""
+    feed_world(monkeypatch, tmp_path, payloads={LF.PHI_EID: empty(PF.phi_det()),
+                                               LF.DEN_EID: empty(PF.den_sas())},
+               environ={"BUCKETVALUE_ODDS_FIRST_PULL_ET": "07:55"})
+    at = slate()
+    assert not grid_drawn(at)
+    assert props_ui.no_lines_slate_feed(dt.time(7, 55)) in html(at)
+    assert "about 8 AM ET" in text(at) and "about 9 AM" not in text(at)
+    assert props_ui.NO_LINES_SLATE_FEED not in html(at) and props_ui.NO_LINES_SLATE not in html(at)
+    for away, home in (("PHI", "DET"), ("DEN", "SAS")):
+        g = game(away, home)
+        assert not grid_drawn(g), away
+        assert props_ui.no_lines_game_feed(dt.time(7, 55)) in html(g), away
+        assert "about 8 AM ET" in text(g) and "about 9 AM" not in text(g), away
+
+
+def test_without_the_setting_the_prompts_keep_the_default_hour(monkeypatch, tmp_path):
+    """No BUCKETVALUE_ODDS_FIRST_PULL_ET (the default 08:50): the prompts are
+    the words the site has always shown, about 9 AM, so every other test here
+    that looks for props_ui.NO_LINES_SLATE_FEED or NO_LINES_GAME_FEED looks
+    for the text the pages really draw."""
+    monkeypatch.delenv("BUCKETVALUE_ODDS_FIRST_PULL_ET", raising=False)
+    feed_world(monkeypatch, tmp_path, payloads={LF.PHI_EID: empty(PF.phi_det()),
+                                               LF.DEN_EID: empty(PF.den_sas())})
+    at = slate()
+    assert props_ui.NO_LINES_SLATE_FEED in html(at) and "about 9 AM ET" in text(at)
+    g = game("PHI", "DET")
+    assert props_ui.NO_LINES_GAME_FEED in html(g) and "about 9 AM ET" in text(g)
 
 
 def test_a_game_with_no_lines_has_no_grid_while_the_slate_has_one(monkeypatch, tmp_path):

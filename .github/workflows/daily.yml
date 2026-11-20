@@ -3,16 +3,22 @@
 # commits ONLY state/. docs/serving_design.md section 4.
 #
 # FULL SCHEDULE, on since 2026-11-04, when the repo went public (Barrett's
-# call): dense off-minute crons (:17 and :47, 13:00-06:47 UTC = 8 AM to 1:47 AM
-# EST, 9 AM to 2:47 AM EDT), 36 slots a day. Public runs cost no Actions
-# minutes. The cadence logic lives in Python, which derives the ET date every
+# call): dense off-minute crons (:17 and :47, 11:17-06:47 UTC = 6:17 AM to 1:47
+# AM EST, 7:17 AM to 2:47 AM EDT), 40 slots a day. Public runs cost no Actions
+# minutes. The 11 and 12 UTC hours (Barrett's 8 AM request, live 2026-11-20)
+# add SLOTS at 7:17 and 7:47 AM ET all year, for the box scores by 8 AM. GitHub
+# starts only some slots (2026-11-09..19: 39 scheduled runs, 3 starting between
+# 5 and 10 AM ET), so a run before 8 AM happens only on some days. An early run
+# takes the newest injury report (the NBA re-titles it every 15 minutes, around
+# the clock), or the committed one when none is real (daily_update.py step 4).
+# The cadence logic lives in Python, which derives the ET date every
 # run; cron starts run hours late and GitHub skips some (2026-11-02..04, on the
 # private schedule: 5 runs from about 10 slots), which is why the slots are
 # dense. A game freezes on the last run before its tip minus 5 minutes.
 #
 # PRIVATE-REPO SCHEDULE, 2026-11-02..04 and the rollback (docs/runbook.md
 # section 6): four runs a day, "17 2,15,20,23 * * *", inside a private repo's
-# free 2,000 minutes a month. 36 runs a day of 6-10 minutes would spend those
+# free 2,000 minutes a month. 40 runs a day of 6-10 minutes would spend those
 # within a week, so swap it back in the same change as any return to private.
 # The go-live order and checks: docs/runbook.md.
 #
@@ -32,7 +38,7 @@ on:
         default: ""
   schedule:
     # Full schedule (the repo is public; see the header):
-    - cron: "17,47 13-23 * * *"
+    - cron: "17,47 11-23 * * *"
     - cron: "17,47 0-6 * * *"
     # Private-repo schedule, only if the repo goes private again (replaces both):
     # - cron: "17 2,15,20,23 * * *"

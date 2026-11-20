@@ -487,7 +487,8 @@ elif not (board is not None and (board.meta.get("error") or PASTE_ONLY or sum(le
     if state == "upcoming":
         if ROSTER is not None and FEED.state in ("idle", "ok") and not FEED.loading \
                 and not (FEED.per_game.get(gid) or {}).get("asof"):
-            st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_GAME_FEED}</div>',
+            st.markdown(f'<div class="bv-note">'
+                        f'{props_ui.no_lines_game_feed(store.feed_first_pull())}</div>',
                         unsafe_allow_html=True)
     elif state in ("live", "final"):
         _why = (FEED.per_game.get(gid) or {}).get("reason")

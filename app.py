@@ -343,7 +343,8 @@ elif ROSTER is not None and FRAME is not None and len(FRAME) \
     if not FEED_LIVE:
         st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_SLATE}</div>', unsafe_allow_html=True)
     elif FEED.state in ("idle", "ok") and not FEED.loading and not len(FEED.value):
-        st.markdown(f'<div class="bv-note">{props_ui.NO_LINES_SLATE_FEED}</div>',
+        st.markdown(f'<div class="bv-note">'
+                    f'{props_ui.no_lines_slate_feed(store.feed_first_pull())}</div>',
                     unsafe_allow_html=True)
 
 render_footer(FOOT_KEEP)

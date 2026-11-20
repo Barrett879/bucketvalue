@@ -874,10 +874,12 @@ that was spending:
   can then read the plan as full and ask every market, spending credits the
   core plan kept for that evening's refreshes. Fix before adding markets.
 - L2-4 (not changed): a FEED_MEMORY_VERSION bump, or any change to the
-  ledger's keys, replaces the ledger. Pushed between 08:50 and 09:50 ET it
-  re-buys today's games (floor-checked, core markets); after 09:50 the brake
-  applies (had_ledger) and B21 re-buys each braked game once while P >= 2.
-  So such a change is pushed before 08:50 ET, never between 08:50 and 09:50.
+  ledger's keys, replaces the ledger. Pushed between the first-pull time
+  (BUCKETVALUE_ODDS_FIRST_PULL_ET, 08:50 ET by default; 07:55 on Cloud
+  since 2026-11-19, on trial) and an hour after it, it re-buys today's games (floor-checked,
+  core markets); after that hour the brake applies (had_ledger) and B21
+  re-buys each braked game once while P >= 2. So such a change is pushed
+  before the first-pull time, never in the hour after it.
 - B32: a vendor that alternates "nothing posted" answers with timeouts it
   bills re-arms L2-1's free timeout at each empty answer. The backoff bounds
   it to about 13 credits per game per day, each taken off the local balance
