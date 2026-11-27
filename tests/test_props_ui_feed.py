@@ -234,7 +234,8 @@ def test_the_grid_has_one_column_per_book_in_the_mockups_order():
     assert GP.heads(html) == [(props.BOOK_CODE[b], props.BOOK_TITLE[b]) for b in props.BOOK_ORDER
                               if b in BOARD_BOOKS]          # the board's books, the catalog's order
     assert ('<thead><tr><th class="pl" scope="col">Player</th><th class="st" scope="col">Stat</th>'
-            '<th class="num" scope="col">Model</th><th class="bk" scope="col">'
+            '<th class="num" scope="col">Model</th><th class="num avg" scope="col">'
+            '<abbr title="Average of the book lines">Avg</abbr></th><th class="bk" scope="col">'
             '<abbr title="DraftKings">DK</abbr></th>') in html
     for word in (">Gap<", ">Lean<", "Other books", "bv-ledger", "\n"):
         assert word not in html, word
@@ -475,8 +476,9 @@ def test_the_per_player_grid_and_its_settled_notes():
     assert html.startswith(
         '<div class="bv-grid-wrap" tabindex="0" role="region" aria-label="Ann Able: lines by book">'
         '<table class="bv-grid bv-grid-pl"><thead><tr><th class="st" scope="col">Stat</th>'
-        '<th class="num" scope="col">Model</th><th class="bk" scope="col"><abbr title="DraftKings">'
-        "DK</abbr></th>")
+        '<th class="num" scope="col">Model</th><th class="num avg" scope="col">'
+        '<abbr title="Average of the book lines">Avg</abbr></th>'
+        '<th class="bk" scope="col"><abbr title="DraftKings">DK</abbr></th>')
     assert '<tr><th class="st" scope="row">Points<span class="bv-tier' in html
     assert "Player" not in html and "Final" not in html and "So far" not in html
     (row,) = GP.rows(html)
@@ -506,16 +508,17 @@ def test_the_per_player_grid_and_its_settled_notes():
     final = settled([("draftkings", 24.5, 27.0, None)])
     assert '<th class="num" scope="col">Final</th>' in final and GP.rows(final)[0]["actual"] == "27"
     gone = None, "void"
-    assert notes([("prizepicks", 24.5, *gone)]) == [(8, "Did not play, pick voided")]
-    assert notes([("draftkings", 24.5, *gone), ("underdog", 24.5, *gone)]) == [(8, "Did not play")]
+    # A note spans every column: Stat, Model, Avg, the five books and Final (9).
+    assert notes([("prizepicks", 24.5, *gone)]) == [(9, "Did not play, pick voided")]
+    assert notes([("draftkings", 24.5, *gone), ("underdog", 24.5, *gone)]) == [(9, "Did not play")]
     assert notes([("underdog", 24.5, *gone), ("prizepicks", 24.5, *gone),
                   ("draftkings", 24.5, *gone)]) == [
-        (8, "PP: Did not play, pick voided. DK, UD: Did not play")]
+        (9, "PP: Did not play, pick voided. DK, UD: Did not play")]
     # His hidden line is in the row too: its book is named.
     assert notes([("draftkings", 24.5, *gone)], [("prizepicks", 23.5, *gone)]) == [
-        (8, "PP: Did not play, pick voided. DK: Did not play")]
+        (9, "PP: Did not play, pick voided. DK: Did not play")]
     assert notes([("draftkings", 25.0, 25.0, "exact"), ("fanduel", 25.0, 25.0, "exact"),
-                  ("prizepicks", 24.5, 25.0, None)]) == [(8, "25: landed on the line (DK, FD)")]
+                  ("prizepicks", 24.5, 25.0, None)]) == [(9, "25: landed on the line (DK, FD)")]
     assert notes([("draftkings", 24.5, 27.0, None)]) == []
     assert settled([("prizepicks", 24.5, *gone)]).count("pick voided") == 1
 
@@ -676,7 +679,8 @@ def test_ten_book_columns_keep_the_phone_contract_b35():
 def test_the_legend_line_under_the_grid():
     assert props_ui.GRID_LEGEND == (
         "Up arrow: model leans More (Over) at that line. Down arrow: Less (Under). No arrow: no "
-        "lean there, or the line does not offer that side. A dash: no line from that book.")
+        "lean there, or the line does not offer that side. A dash: no line from that book. Avg: "
+        "the average of the book lines in the row, leaving out PrizePicks Goblin and Demon lines.")
     assert props_ui.grid_legend_html() == ('<div class="bv-grid-legend">' + props_ui.GRID_LEGEND
                                            + "</div>")
     assert esc(props_ui.GRID_LEGEND) == props_ui.GRID_LEGEND

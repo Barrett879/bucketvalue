@@ -36,6 +36,12 @@ SLATE_LEAD = re.compile(r'<th class="pl" scope="row"><span class="nm">(.*?)</spa
                         r'<td class="st">(.*?)</td>', re.S)
 PLAYER_LEAD = re.compile(r'<th class="st" scope="row">(.*?)</th>', re.S)
 MODEL = re.compile(r'<td class="num">([^<]*)</td>')
+# The Avg cell, right after Model (amendment C22): its title, its number (or
+# the sentinel) and its visually hidden text. Its header sits right after
+# Model's in every grid, which tables() checks.
+AVG = re.compile(r'<td class="num avg" title="([^"]*)">([^<]*)<span class="bv-sr">([^<]*)</span></td>')
+AVG_AFTER_MODEL = ('<th class="num" scope="col">Model</th><th class="num avg" scope="col">'
+                   '<abbr title="Average of the book lines">Avg</abbr></th>')
 ACTUAL = re.compile(r'<td class="num act">([^<]*)</td>')
 MORE = re.compile(r'<b class="bv-pp-more">\+(\d+) more</b>')
 
@@ -90,11 +96,15 @@ def _row(markup: str, columns: list[tuple[str, str]]) -> dict:
     model = MODEL.match(rest)
     if not model:
         raise GridMismatch(f"a grid row without its Model cell: {rest[:160]!r}")
+    avg = AVG.match(rest, model.end())
+    if not avg:
+        raise GridMismatch(f"a grid row without its Avg cell right after Model: {rest[:200]!r}")
     found = CELL.findall(rest)
     if len(found) != len(columns):
         raise GridMismatch(f"{len(found)} book cells under {len(columns)} book columns")
     actual = ACTUAL.search(rest)
     row.update(stat=unescape(stat.split("<", 1)[0]), stat_html=stat, model=model.group(1),
+               avg=avg.group(2), avg_title=unescape(avg.group(1)), avg_sr=unescape(avg.group(3)),
                actual=actual.group(1) if actual else None,
                cells={code: cell(c, code, title) for (code, title), c in zip(columns, found)})
     return row
@@ -106,6 +116,8 @@ def tables(markup: str) -> list[dict]:
     note)])}, each row as _row reads it."""
     out = []
     for label, cls, head, body in WRAP.findall(markup):
+        if AVG_AFTER_MODEL not in head:
+            raise GridMismatch(f"a grid without its Avg column right after Model: {head[:200]!r}")
         columns = [(unescape(code), unescape(title)) for title, code in HEAD.findall(head)]
         out.append({"label": unescape(label), "cls": cls, "heads": columns,
                     "rows": [_row(r, columns) for r in ROW.findall(body)],

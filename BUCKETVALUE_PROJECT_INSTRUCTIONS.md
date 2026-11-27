@@ -423,7 +423,10 @@ percentiles. Targets that fail ship a labelled baseline.
   @st.fragment, "Show all", footnotes (Demon/Goblin and Reboot on PrizePicks rows
   only, break-even per source, board-at-its-ceiling); while the odds feed holds lines
   for the date, the board is a grid: one row per player and stat with a shown line
-  (Player with the matchup under it, Stat, Model) and one column per book (DK, FD,
+  (Player with the matchup under it, Stat, Model, then Avg: the average of the book
+  lines in the row, shown or hidden, leaving out PrizePicks Goblin and Demon lines,
+  one decimal with a tie rounded up, so 24 and 24.5 give 24.3, never a lean or an
+  arrow) and one column per book (DK, FD,
   MGM, PP, UD), each cell that book's line with the model's lean at it (a green up
   arrow for More or Over, a red down arrow for Less or Under, the number alone where
   the model has no lean or the line does not offer its side, the sentinel where the
@@ -438,7 +441,7 @@ percentiles. Targets that fail ship a labelled baseline.
   BLK TOV PRA FS as mid-p medians under "if he plays"; starters by minutes then bench;
   deep bench collapsed; Out rows greyed at the bottom with the reason and no numbers;
   expandable rows with each player's lines (with the odds feed on, the same grid per
-  player: one row per stat with a shown line, one column per book; sides offered,
+  player: one row per stat with a shown line, Model and Avg, one column per book; sides offered,
   badges, void risk on PrizePicks lines) and, after tip, actuals from the cdn box
   score (120s cache; "Did not play, pick voided" on a PrizePicks line, "Did not play"
   on an Underdog or sportsbook line; a row holding a PrizePicks line and other books'

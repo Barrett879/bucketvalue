@@ -46,6 +46,7 @@ import hashlib
 import math
 import secrets
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 
 import pandas as pd
 import streamlit as st
@@ -1616,7 +1617,10 @@ GRID_CAPTION = ("Top {k} of {n} players, one row each (their best-ranked stat). 
                 "lists every stat.")
 GRID_LEGEND = ("Up arrow: model leans More (Over) at that line. Down arrow: Less (Under). "
                "No arrow: no lean there, or the line does not offer that side. "
-               "A dash: no line from that book.")
+               "A dash: no line from that book. Avg: the average of the book lines in the "
+               "row, leaving out PrizePicks Goblin and Demon lines.")
+# The Avg column's header title (2026-11-27, amendment C22).
+AVG_TITLE = "Average of the book lines"
 # The one sentence the hidden notes gain with the feed on when a hidden line
 # is drawn beside a shown one (amendment C8).
 HIDDEN_DRAWN = ("A hidden line in a row with a shown line is drawn as its number alone, "
@@ -1690,6 +1694,57 @@ def _grid_model(r) -> str:
     if any(_finite(x) and round(val, 1) == round(float(x), 1) for x in lines):
         return f'<td class="num">{val:.2f}</td>'
     return f'<td class="num">{val:.1f}</td>'
+
+
+def _avg_lines(cells) -> tuple[list, list]:
+    """(used, left_out) for the Avg cell, each [(book, line, odds type)] in
+    props.BOOK_ORDER: every cell of the row with a finite line, shown or hidden
+    (a hidden line is still the number that book posted), split by whether the
+    line is standard. PrizePicks Goblin and Demon lines sit off the market on
+    purpose, so they are left out, as in Biggest discrepancies."""
+    used, left_out = [], []
+    for book in props.BOOK_ORDER:
+        rec = (cells or {}).get(book)
+        if not isinstance(rec, dict) or not _finite(rec.get("line")):
+            continue
+        kind = str(rec.get("odds_type") or "standard").strip().lower()
+        (used if kind == "standard" else left_out).append((book, float(rec["line"]), kind))
+    return used, left_out
+
+
+def _avg_text(lines) -> str:
+    """The mean of `lines` with one decimal, rounded the way a reader rounds
+    by hand: a tie goes up, so (24 + 24.5) / 2 = 24.25 prints 24.3. Float
+    formatting would print 24.2 there (it sends a tie to the even digit), and
+    a mean like 24.15 is not exact in binary, so it would print 24.1. Each
+    line is read by its shortest repr (24.5 is "24.5") and summed exactly."""
+    total = sum((Decimal(repr(float(n))) for n in lines), Decimal(0))
+    return format((total / len(lines)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP), "f")
+
+
+def _grid_avg(r) -> str:
+    """The Avg cell (amendment C22; Barrett, 2026-11-27: "put an average of the
+    book lines next to our predicted amount"): the mean of _avg_lines' used
+    lines, one decimal, or the sentinel when there is none. It carries no arrow
+    and no lean class: it is never a lean (spec rule 15). Its title names the
+    lines averaged and any left out."""
+    used, left_out = _avg_lines(r.get(props.GRID_CELLS))
+    skipped = "".join(f" {props.BOOK_CODE[b]} {k.title()} {n:g} left out."
+                      for b, n, k in left_out)
+    if not used:
+        tip = "No standard book line to average." + skipped
+        return (f'<td class="num avg" title="{esc(tip)}">{SENTINEL}'
+                f'<span class="bv-sr"> no book average</span></td>')
+    word = "line" if len(used) == 1 else "lines"
+    listed = ", ".join(f"{props.BOOK_CODE[b]} {n:g}" for b, n, _k in used)
+    tip = f"Average of {len(used)} book {word}: {listed}." + skipped
+    return (f'<td class="num avg" title="{esc(tip)}">{_avg_text([n for _b, n, _k in used])}'
+            f'<span class="bv-sr"> average of {len(used)} book {word}</span></td>')
+
+
+def _avg_head() -> str:
+    """The Avg column's header, right after Model in both grids."""
+    return f'<th class="num avg" scope="col"><abbr title="{esc(AVG_TITLE)}">Avg</abbr></th>'
 
 
 def _grid_latest(rows: pd.DataFrame, feed: dict | None) -> dict:
@@ -1774,7 +1829,7 @@ def _grid_html(rows, more: dict | None, feed: dict) -> str:
     head = ('<div class="bv-grid-wrap" tabindex="0" role="region" aria-label="Lines by book">'
             '<table class="bv-grid"><thead><tr><th class="pl" scope="col">Player</th>'
             '<th class="st" scope="col">Stat</th><th class="num" scope="col">Model</th>'
-            + "".join(_grid_head(b) for b in books) + "</tr></thead><tbody>")
+            + _avg_head() + "".join(_grid_head(b) for b in books) + "</tr></thead><tbody>")
     body = []
     for r in rows.to_dict(orient="records"):
         cells = r.get(props.GRID_CELLS) or {}
@@ -1782,7 +1837,7 @@ def _grid_html(rows, more: dict | None, feed: dict) -> str:
         more_html = f'<b class="bv-pp-more">+{n_more} more</b>' if n_more else ""
         body.append(f'<tr><th class="pl" scope="row"><span class="nm">{esc(r.get("player"))}</span>'
                     f'<i>{_matchup(r)}{more_html}</i></th><td class="st">{_grid_stat(r)}</td>'
-                    f"{_grid_model(r)}"
+                    f"{_grid_model(r)}{_grid_avg(r)}"
                     + "".join(_grid_cell(b, cells.get(b), latest, today) for b in books)
                     + "</tr>")
     return head + "".join(body) + "</tbody></table></div>"
@@ -1838,12 +1893,14 @@ def _player_grid_html(rows, context, feed: dict) -> str:
             f'aria-label="{esc(recs[0].get("player"))}: lines by book">'
             f'<table class="bv-grid bv-grid-pl{" has-actual" if after_tip else ""}"><thead><tr>'
             '<th class="st" scope="col">Stat</th><th class="num" scope="col">Model</th>'
-            + "".join(_grid_head(b) for b in books) + act_head + "</tr></thead><tbody>")
-    span = 2 + len(books) + (1 if after_tip else 0)
+            + _avg_head() + "".join(_grid_head(b) for b in books) + act_head
+            + "</tr></thead><tbody>")
+    span = 3 + len(books) + (1 if after_tip else 0)
     body = []
     for r in recs:
         cells = r.get(props.GRID_CELLS) or {}
         body.append(f'<tr><th class="st" scope="row">{_grid_stat(r)}</th>{_grid_model(r)}'
+                    f"{_grid_avg(r)}"
                     + "".join(_grid_cell(b, cells.get(b), latest, today) for b in books)
                     + (f'<td class="num act">{esc(_actual_text(r))}</td>' if after_tip else "")
                     + "</tr>")
